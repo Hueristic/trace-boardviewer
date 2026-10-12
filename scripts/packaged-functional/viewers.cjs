@@ -10,13 +10,20 @@ const { makeImageOnlyPdf } = require('../qa-ocr.cjs');
 
 const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 // Below PANEL_AUTO_COLLAPSE_BELOW (1120 px, src/components/workspace/model.ts) a document tab collapses the side panels (W-win-viewers-02);
-// a hosted macOS runner's display is that narrow. The search panel is then opened as a user opens it, with the top-bar toggle: an explicit
-// choice that stays while the tabs change.
+// the hosted macOS and Windows runners' displays are that narrow. The search panel and the inspector beside it are then opened as a user
+// opens them, with the top-bar toggles: an explicit choice that stays while the tabs change. A panel that is already open is left alone.
+const openCollapsedSidePanels = async page => {
+  for (const toggle of ['toggle-left', 'toggle-right']) {
+    const button = page.locator(`[data-testid=${toggle}]`);
+    if (await button.count() && await button.getAttribute('aria-pressed') === 'false') await button.click();
+  }
+};
 const searchInput = async page => {
   const input = page.locator('[data-testid=search-input]');
   if (!(await input.isVisible())) {
-    await page.locator('[data-testid=toggle-left]').click();
+    await openCollapsedSidePanels(page);
     await input.waitFor({ state: 'visible', timeout: 10000 });
+    await page.locator('[data-testid=inspector]').waitFor({ state: 'visible', timeout: 10000 });
   }
   return input;
 };
@@ -930,6 +937,10 @@ async function run(ctx) {
     await boardChoices.first().click();
     await page.waitForFunction(() => /\bU1\b/.test(document.querySelector('[data-testid=inspector]')?.textContent || ''), null, { timeout: 15000 });
     assert.match(await page.locator('[data-testid=inspector]').innerText(), /U1/, 'the chosen EAGLE U1 reference is matched to the current board target');
+    // A narrow schematic viewer (the side panels open in a small window) keeps the sheet list closed behind its Sheets button and shows
+    // it as a popover; a user opens it with that button.
+    const sheetsButton = page.locator('[data-testid=schematic-tab] .schv-btn[aria-controls^="schv-nav-"]').first();
+    if (await sheetsButton.count() && await sheetsButton.getAttribute('aria-expanded') === 'false') await sheetsButton.click();
     const sheets = page.locator('.schv-nav .schv-row-main');
     await sheets.nth(1).waitFor({ state: 'visible', timeout: 15000 });
     await sheets.nth(1).click();
@@ -998,6 +1009,12 @@ async function run(ctx) {
     await page.getByRole('button', { name: /add bookmark/i }).click();
     await page.locator('[data-tab=bookmarks]').click();
     await page.waitForFunction(() => document.querySelectorAll('.pdfv-bm').length === 1);
+    // In a narrow window the PDF viewer is compact and shows its side panels over the page; a user closes them with the first toolbar
+    // button before placing a note on the page.
+    if (await page.locator('.pdfv[data-compact="true"][data-sidebar="open"]').count()) {
+      await page.locator('.pdfv-toolbar .pdfv-bar > .pdfv-btn').first().click();
+      await page.waitForSelector('.pdfv[data-sidebar="closed"]', { timeout: 10000 });
+    }
     await page.getByRole('button', { name: /add note/i }).click();
     await page.locator('.pdfv-page[data-page="1"]').click({ position: { x: 120, y: 120 } });
     const noteEditor = page.getByRole('dialog', { name: /note/i });
@@ -1124,8 +1141,9 @@ async function run(ctx) {
     await page.locator('.imgv-input').first().fill('100');
     await page.getByRole('button', { name: /set scale/i }).click();
     await page.getByRole('button', { name: /note/i }).first().click();
-    // The bookmark above sits at the view centre: a note click there would select that marker instead of opening the editor.
-    await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.3);
+    // The bookmark above sits at the view centre: a note click there would select that marker instead of opening the editor. The lower
+    // half is used because, in a narrow viewer, the removed-content banner and the note hint cover the top of the surface.
+    await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.7);
     const editor = page.getByRole('dialog', { name: /new note/i });
     await editor.locator('textarea').fill('image viewer annotation');
     await editor.getByRole('button', { name: /^save$/i }).click();
