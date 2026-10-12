@@ -38,6 +38,7 @@ Windows x64, macOS Apple silicon and Linux x86-64 packages carry the same applic
 - Leftover temporary export files are cleaned up at the next start. An export is no longer stopped when its temporary-file record cannot be written; the export log says so.
 - XZZ, FZ and CAE key dialogs: the reason line and the key hints are translated in all eight languages.
 - macOS metadata files (._name) are refused with a named reason on every platform.
+- Linux and macOS: a document attached on Windows with a path relative to the board folder (folder\file) is found again after the board folder has moved.
 
 ## 1.3.2 (not released separately; its changes ship in 1.3.3)
 

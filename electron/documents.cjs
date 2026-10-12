@@ -419,10 +419,22 @@ async function hashFile(filename, options = {}) {
 // '..', no empty or dot segments, no drive or stream separators. Returns the segments or null.
 // On POSIX a backslash is an ordinary character of a name (a file name may hold one); on Windows it is a separator as well.
 function relativeSegments(value, platform = process.platform) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 32767 || value.includes('\0')) return null;
   const windows = platform === 'win32';
+  return splitRelative(value, windows ? /[\\/]/ : '/', windows);
+}
+
+// The same path read with the backslash as a separator too, for a path written on Windows (docs\ref.pdf) that is read on POSIX. It is
+// tried only when the literal name is not there (see locateOne). Null on Windows, where relativeSegments already splits on it.
+function separatedRelativeSegments(value, platform = process.platform) {
+  if (platform === 'win32' || typeof value !== 'string' || !value.includes('\\')) return null;
+  return splitRelative(value, /[\\/]/, false);
+}
+
+// The refusals every reading shares, whatever the separator: absolute, drive-relative and stream forms, and any empty, dot or '..' segment.
+function splitRelative(value, separator, windows) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 32767 || value.includes('\0')) return null;
   if (/^[A-Za-z]:/.test(value) || value.startsWith('/') || (windows && value.startsWith('\\'))) return null;
-  const segments = value.split(windows ? /[\\/]/ : '/');
+  const segments = value.split(separator);
   return segments.some((segment) => segment === '' || segment === '.' || segment === '..' || segment.includes(':')) ? null : segments;
 }
 
@@ -478,11 +490,16 @@ async function locateOne(request, root, options) {
     const segments = relativeSegments(request.relativePath, platform);
     if (segments) candidates.push({ via: 'relative', filename: path.join(root, ...segments) });
     else problem = t('native.error.locateInvalidPath');
+    const separated = separatedRelativeSegments(request.relativePath, platform);
+    if (separated) candidates.push({ via: 'relative', separated: true, filename: path.join(root, ...separated) });
   }
   const kindExtensions = KINDS[request.kind].extensions;
   const seen = [];
   let changed = null;
+  let literalFound = false;
   for (const candidate of candidates) {
+    // The separated reading is a fallback: it is tried only when the literal name is not in the board folder.
+    if (candidate.separated && literalFound) continue;
     let canonical;
     try {
       canonical = localAbsolutePath(await fs.realpath(candidate.filename), t);
@@ -491,6 +508,7 @@ async function locateOne(request, root, options) {
       problem ??= mapError(error, t).message;
       continue;
     }
+    if (candidate.via === 'relative' && !candidate.separated) literalFound = true;
     if (candidate.via === 'relative' && relativeInside(root, canonical) === undefined) {
       problem ??= t('native.error.locateOutsideBoard');
       continue;

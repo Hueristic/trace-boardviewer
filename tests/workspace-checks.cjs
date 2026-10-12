@@ -1222,6 +1222,43 @@ test('documents.cjs: locateDocuments on simulated volumes: a Unicode spelling an
   assert.deepEqual(await locate([request('case', { path: path.join(vol, 'docs', 'GUIDE.PDF') })], strict), [{ id: 'case', status: 'missing' }]);
 });
 
+// A path written on Windows (docs\win.pdf) is read on POSIX too: the separated reading finds the file when the literal name is not there. The
+// literal name still wins when it is there, and the separated reading keeps every refusal, so nothing outside the board folder is found.
+test('documents.cjs: on POSIX a path stored with Windows separators is found by its separated reading; a literal backslash name wins; the fallback stays inside the board folder', { skip: path.sep !== '/' }, async (t0) => {
+  const root = await sandbox(t0, 'posix-separators');
+  const boardDir = path.join(root, 'project');
+  await fs.mkdir(boardDir, { recursive: true });
+  const boardFile = path.join(boardDir, 'Board.cad');
+  await fs.writeFile(boardFile, 'board bytes');
+  const place = async (relative, content) => { const filename = path.join(boardDir, relative); await fs.mkdir(path.dirname(filename), { recursive: true }); await fs.writeFile(filename, content); return filename; };
+  const locate = async (relativePath) => {
+    const [result] = await documentsEn.locateDocuments(boardFile, [{ id: 'posix', kind: 'pdf', path: path.join(root, 'old-home', 'ref.pdf'), key: sha256(PDF), relativePath }]);
+    return result;
+  };
+
+  // Written on Windows as docs\win.pdf: the file is docs/win.pdf here, so only the separated reading finds it.
+  const win = await place('docs/win.pdf', PDF);
+  assert.deepEqual(await locate('docs\\win.pdf'), { id: 'posix', status: 'moved', path: await fs.realpath(win), relativePath: 'docs/win.pdf', key: sha256(PDF), size: PDF.length });
+
+  // A file whose name holds a backslash is one name on POSIX, and the literal reading finds it.
+  const literal = await place('lit\\name.pdf', PDF);
+  const found = await locate('lit\\name.pdf');
+  assert.equal(found.status, 'moved');
+  assert.equal(found.path, await fs.realpath(literal));
+
+  // When the literal name is there with other bytes, it decides: the separated file is not tried.
+  await place('chg\\doc.pdf', 'other bytes');
+  await place('chg/doc.pdf', PDF);
+  const decided = await locate('chg\\doc.pdf');
+  assert.equal(decided.status, 'changed');
+  assert.equal(decided.path, await fs.realpath(path.join(boardDir, 'chg\\doc.pdf')));
+
+  // The separated reading keeps the refusals: a '..' segment is refused, so the file beside the board folder is never found.
+  await fs.writeFile(path.join(root, 'secret.pdf'), PDF);
+  assert.equal((await locate('..\\secret.pdf')).status, 'missing');
+  assert.equal((await locate('docs\\..\\..\\secret.pdf')).status, 'missing');
+});
+
 // MAC-TEST-20261011-03: a backslash is a separator on win32 only. A POSIX document named a\b.pdf is stored with its relative path and found
 // again beside the board after the board moved. The win32 reading of the same stored path is the two folders a and b.pdf, as before.
 test('documents.cjs: a backslash is part of a POSIX relative path and a separator on win32 (MAC-TEST-20261011-03)', async () => {

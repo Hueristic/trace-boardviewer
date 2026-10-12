@@ -42,10 +42,14 @@ async function mapWith(limits: Partial<MapLimits> = {}, fs?: unknown): Promise<F
   return mapFolderTree(port, platform, { ...DEFAULT_LIMITS, ...limits });
 }
 
+// The adapter resolves paths with the native realpath, which expands an 8.3 short name (C:\Users\RUNNER~1\...) to the long one. The JS
+// realpathSync does not, so the fixtures must be built from the native form, or the adapter's path comparisons never match.
+const canonicalTemp = () => realpathSync.native(tmpdir());
+
 beforeAll(() => {
-  const canonicalTemp = realpathSync(tmpdir());
-  root = mkdtempSync(join(canonicalTemp, 'devices-adapter-root-'));
-  outside = mkdtempSync(join(canonicalTemp, 'devices-adapter-outside-'));
+  const temp = canonicalTemp();
+  root = mkdtempSync(join(temp, 'devices-adapter-root-'));
+  outside = mkdtempSync(join(temp, 'devices-adapter-outside-'));
   for (const folder of ['Birchfield/Kestrel-14-R2/board', 'Birchfield/Kestrel-14-R2/docs', 'Birchfield/Alder']) mkdirSync(join(root, folder), { recursive: true });
   writeFileSync(join(root, 'loose.txt'), 'x'.repeat(10));
   writeFileSync(join(root, 'Birchfield/Kestrel-14-R2/board/MB-Q731_rev2.brd'), Buffer.alloc(2048, 1));
@@ -141,7 +145,7 @@ describe('native directory adapter with the folder map', () => {
 
 describe('reparse points through the native adapter (W16-B4)', () => {
   it('a reparse point that is not a link is skipped with reason reparse, is not read, its siblings are mapped and the map is incomplete', async () => {
-    const tree = mkdtempSync(join(realpathSync(tmpdir()), 'devices-reparse-'));
+    const tree = mkdtempSync(join(canonicalTemp(), 'devices-reparse-'));
     mkdirSync(join(tree, 'Cloud', 'hidden'), { recursive: true });
     mkdirSync(join(tree, 'Plain'));
     writeFileSync(join(tree, 'Plain', 'board.brd'), 'x');
@@ -171,7 +175,7 @@ describe('reparse points through the native adapter (W16-B4)', () => {
 
 describe('online-only files through the native adapter (W16-B4)', () => {
   it('a cloud placeholder file is mapped by name and size with online true, and its content is never opened', async () => {
-    const tree = mkdtempSync(join(realpathSync(tmpdir()), 'devices-online-'));
+    const tree = mkdtempSync(join(canonicalTemp(), 'devices-online-'));
     const placeholder = join(tree, 'Cloud.brd');
     writeFileSync(placeholder, Buffer.alloc(8192, 5));
     const opened: string[] = [];

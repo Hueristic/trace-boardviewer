@@ -534,7 +534,15 @@ const scopeFor = (lang) => {
   if (!scopes.has(key)) scopes.set(key, lang ? buildScope([lang, 'en'], false) : buildScope(SCAN_LANGUAGES, true));
   return scopes.get(key);
 };
-const BYPASS_FILES = ['README.md', 'CHANGELOG.md', 'docs/MAC_LOCAL_LOG.md', 'docs/MAC_LOCAL_REPORT_arm64_2026-10-06.md', 'docs/MAC_LOCAL_REPORT_TEMPLATE.md', 'docs/MAC_LOCAL_SESSION.md', 'scripts/mac-local-evidence.sh'];
+// Private Mac documents: make-public-tree removes them, so the public tree does not carry them. Each check that reads one is skipped with
+// a reason when it is missing; the other checks still run. These names are written only in the definitions below.
+const M3_REPORT = 'docs/MAC_LOCAL_REPORT_arm64_2026-10-06.md';
+const PRIVATE_MAC_DOCS = ['docs/MAC_LOCAL_LOG.md', M3_REPORT, 'docs/MAC_LOCAL_REPORT_TEMPLATE.md', 'docs/MAC_LOCAL_SESSION.md'];
+const BYPASS_FILES = ['README.md', 'CHANGELOG.md', 'scripts/mac-local-evidence.sh', ...PRIVATE_MAC_DOCS];
+const missingPrivateSkip = () => {
+  const missing = PRIVATE_MAC_DOCS.filter((file) => !fs.existsSync(rel(file)));
+  return missing.length ? `private document(s) not in this tree (removed from the public tree): ${missing.join(', ')}` : false;
+};
 
 const EIGHT_LOCALES = ['de', 'en', 'fr', 'hu', 'it', 'pl', 'sk', 'uk'];
 const USER_DOCS = ['README.md', 'CHANGELOG.md', 'RELEASING.md', 'CONTRIBUTING.md', 'SECURITY.md', 'docs/SUPPORT.md', 'docs/LINUX.md'];
@@ -615,7 +623,7 @@ const userFacingFiles = () => [...new Set([
   ...listFiles('docs', (name) => name.endsWith('.md')),
   ...listFiles('.github', (name) => /\.(?:md|ya?ml)$/.test(name)),
   ...SERVICE_DOCS.filter((file) => fs.existsSync(rel(file))),
-  ...BYPASS_FILES,
+  ...BYPASS_FILES.filter((file) => fs.existsSync(rel(file))),
   ...EIGHT_LOCALES.flatMap((lang) => listFiles(`electron/locales/${lang}`, (name) => name.endsWith('.json'))),
   ...listFiles('src', (name) => /\.(?:tsx?|json)$/.test(name)),
   ...WEBSITE_DIRS.filter((dir) => fs.existsSync(rel(dir))).flatMap((dir) => listFiles(dir, (name) => WEBSITE_TEXT.test(name))),
@@ -897,7 +905,11 @@ test('static: the public Mac wording states the no-bypass rule and calls the M3 
   const release = changelog.slice(changelog.indexOf('## 1.2.0'), changelog.indexOf('## 1.1.0'));
   assert.match(release, /development evidence, not an acceptance test/);
   assert.doesNotMatch(release, /validated natively/i);
-  assert.match(read('docs/MAC_LOCAL_REPORT_arm64_2026-10-06.md'), /must not be opened by removing the quarantine flag/);
+});
+
+test('static: the private Mac documents give no bypass guidance, and the M3 report states the no-bypass rule', { skip: missingPrivateSkip() }, () => {
+  for (const file of PRIVATE_MAC_DOCS) assert.deepEqual(bypassViolations(read(file), null), [], `${file} gives no bypass guidance`);
+  assert.match(read(M3_REPORT), /must not be opened by removing the quarantine flag/);
 });
 
 test('static: the smoke script refuses to produce evidence off macOS', () => {
