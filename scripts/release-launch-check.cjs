@@ -62,6 +62,7 @@ function decideLaunch(facts) {
   const problems = [];
   if (facts.startError) problems.push(`the executable did not start (${facts.startError})`);
   else if (!facts.startedAt) problems.push('the executable did not start');
+  if (problems.length) return problems;
   if (facts.exitedBeforeStay) {
     problems.push(`the app exited within ${facts.stayMs} ms of its start (code ${facts.exitedBeforeStay.code}, signal ${facts.exitedBeforeStay.signal})`);
   }
