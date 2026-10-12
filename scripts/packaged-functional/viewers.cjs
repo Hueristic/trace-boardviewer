@@ -9,6 +9,17 @@ const path = require('node:path');
 const { makeImageOnlyPdf } = require('../qa-ocr.cjs');
 
 const settle = page => page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+// Below PANEL_AUTO_COLLAPSE_BELOW (1120 px, src/components/workspace/model.ts) a document tab collapses the side panels (W-win-viewers-02);
+// a hosted macOS runner's display is that narrow. The search panel is then opened as a user opens it, with the top-bar toggle: an explicit
+// choice that stays while the tabs change.
+const searchInput = async page => {
+  const input = page.locator('[data-testid=search-input]');
+  if (!(await input.isVisible())) {
+    await page.locator('[data-testid=toggle-left]').click();
+    await input.waitFor({ state: 'visible', timeout: 10000 });
+  }
+  return input;
+};
 const installBoardRasterHistoryObserver = page => page.evaluate(() => {
   const key = '__viewerRasterHistory';
   if (window[key]?.installed) return window[key].snapshot();
@@ -494,7 +505,7 @@ const panCamera = (camera, screenDelta) => {
   return { ...camera, x: camera.x - mirroredX, y: camera.y + y };
 };
 const activateSearch = async (page, query, expectedSource, expectedText) => {
-  const input = page.locator('[data-testid=search-input]');
+  const input = await searchInput(page);
   await input.fill(query);
   const row = page.locator(`[data-testid=search-row][data-source="${expectedSource}"]`).filter({ hasText: expectedText }).first();
   await row.waitFor({ state: 'visible', timeout: 20000 });
@@ -869,14 +880,14 @@ async function run(ctx) {
     await page.keyboard.press('Home');
     await settle(page);
     const symbolRow = page.locator('[data-testid=search-row][data-source="schematic-symbols"]').filter({ hasText: 'U1' }).first();
-    await page.locator('[data-testid=search-input]').fill('U1');
+    await (await searchInput(page)).fill('U1');
     await symbolRow.waitFor({ state: 'visible', timeout: 20000 });
     await symbolRow.click();
     await page.waitForFunction(() => document.querySelector('[data-testid=tab-schematic]')?.getAttribute('aria-selected') === 'true');
     assert.match(await symbolRow.getAttribute('class') || '', /selected/, 'the exact schematic U1 row is selected after cross-probe');
     assert.match(await page.locator('[data-testid=inspector]').innerText(), /U1/, 'the attached schematic U1 resolves against the current board U1 target');
     const netRow = page.locator('[data-testid=search-row][data-source="schematic-nets"]').filter({ hasText: 'VCC' }).first();
-    await page.locator('[data-testid=search-input]').fill('VCC');
+    await (await searchInput(page)).fill('VCC');
     await netRow.waitFor({ state: 'visible', timeout: 20000 });
     await netRow.click();
     assert.match(await netRow.getAttribute('class') || '', /selected/, 'the exact schematic VCC net is selected after cross-probe');
@@ -900,7 +911,7 @@ async function run(ctx) {
     await openDocument(ctx, 'viewer-hierarchical.eagle.sch');
     const eagleDiag = await page.locator('[data-testid=schematic-diagnostics]').innerText();
     assert.match(eagleDiag, /EAGLE/i, 'the second synthetic multi-sheet schematic was parsed as EAGLE');
-    await page.locator('[data-testid=search-input]').fill('U1');
+    await (await searchInput(page)).fill('U1');
     // The attached KiCad board also has a U1 on its page 1: keep the EAGLE sheet's row, never the KiCad row.
     const eagleSheet1Symbol = page.locator('[data-testid=search-row][data-source="schematic-symbols"]').filter({ hasText: 'U1' }).filter({ hasText: 'Sheet 1' }).filter({ hasNotText: 'viewer-known-board' }).first();
     await eagleSheet1Symbol.waitFor({ state: 'visible', timeout: 20000 });
@@ -928,7 +939,7 @@ async function run(ctx) {
     const hierarchyDiagnostics = await page.locator('[data-testid=schematic-diagnostics]').innerText();
     assert.match(hierarchyDiagnostics, /KiCad/i, 'authored hierarchical KiCad fixture is recognized by the native schematic viewer');
     const childSymbol = page.locator('[data-testid=search-row][data-source="schematic-symbols"]').filter({ hasText: 'U10' }).first();
-    await page.locator('[data-testid=search-input]').fill('U10');
+    await (await searchInput(page)).fill('U10');
     await childSymbol.waitFor({ state: 'visible', timeout: 20000 });
     await childSymbol.click();
     assert.match(await childSymbol.getAttribute('class') || '', /selected/, 'the child sheet instance resolves to its exact U10 symbol');
@@ -945,7 +956,7 @@ async function run(ctx) {
     const page = ctx.getPage();
     const kicadName = 'viewer-known-board.kicad_sch', eagleName = 'viewer-hierarchical.eagle.sch';
     await openDocument(ctx, kicadName);
-    await page.locator('[data-testid=search-input]').fill('VCC');
+    await (await searchInput(page)).fill('VCC');
     const vccRow = page.locator('[data-testid=search-row][data-source="schematic-nets"]').filter({ hasText: 'VCC' }).first();
     await vccRow.waitFor({ state: 'visible', timeout: 20000 });
     await vccRow.click();
