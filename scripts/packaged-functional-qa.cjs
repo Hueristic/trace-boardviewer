@@ -368,7 +368,10 @@ async function inspectFuses(binary, options) {
   const configured = qaFlavour.expectedFuses(selected, platform) || {};
   const smoke = require(path.join(ROOT, 'scripts', 'linux-smoke.cjs'));
   const observed = smoke.describeFuseWire(observedRaw);
-  const expected = smoke.expectedFuseWire(configured);
+  // resetAdHocDarwinSignature (macOS configs) tells electron-builder to re-sign after flipping the fuses; it is a builder option,
+  // not a fuse wire entry, so it is left out here. expectedFuseWire still reports any other unknown key.
+  const { resetAdHocDarwinSignature: _resetAdHocDarwinSignature, ...configuredWire } = configured;
+  const expected = smoke.expectedFuseWire(configuredWire);
   assert.deepEqual(expected.unknown, [], 'all configured fuses map to a recorded Electron fuse');
   assert.deepEqual(smoke.compareFuseWire(observed, expected.wire), [], `${path.basename(binary)} fuse wire matches every configured value`);
   return { executableSha256: await fileSha(binary), configured, observed };

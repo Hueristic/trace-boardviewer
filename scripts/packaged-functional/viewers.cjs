@@ -253,8 +253,12 @@ const cameraAfterWheel = (camera, rect, wheel, scale) => {
   assert.ok(Math.abs(nextScale - scale) < 1e-10, 'wheel transform uses the scale derived from the actual observed delta');
   return { ...camera, zoom: nextScale, x: camera.x + anchorX * (1 / camera.zoom - 1 / nextScale), y: camera.y - anchorY * (1 / camera.zoom - 1 / nextScale) };
 };
+// The drag is a whole number of millimetres worth at least 20 px, so that the first of the four move steps (at least 5 px) already
+// crosses the 4 px pan threshold of BoardCanvas and no part of the movement is dropped. A small CI window gives a low fitted zoom, where
+// one millimetre is only a few pixels and the sub-threshold first step was lost (the camera landed a quarter millimetre short).
 const dragToPersistedCenter = camera => {
-  const target = { x: Math.round((Math.round(camera.x * 1000) / 1000 + 1) * 1000) / 1000, y: Math.round((Math.round(camera.y * 1000) / 1000 + 1) * 1000) / 1000 };
+  const millimetres = Math.max(1, Math.ceil(20 / camera.zoom));
+  const target = { x: Math.round((Math.round(camera.x * 1000) / 1000 + millimetres) * 1000) / 1000, y: Math.round((Math.round(camera.y * 1000) / 1000 + millimetres) * 1000) / 1000 };
   return { target, delta: { x: (camera.x - target.x) * camera.zoom, y: (target.y - camera.y) * camera.zoom } };
 };
 const cameraAfterObservedDrag = (camera, events) => {

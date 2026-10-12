@@ -1676,12 +1676,15 @@ async function runScenario(parsed, { env = process.env, log = console.log } = {}
     checks.push({ name: `scenario environment: unprivileged user namespaces are ${parsed.userns}`, status: usernsProblems.length ? 'fail' : 'pass', ...(usernsProblems.length ? { detail: usernsProblems.join('; ') } : {}) });
     if (!exists(executable)) throw new Error(`the executable does not exist: ${executable}`);
     if (parsed.target === 'installed') {
-      const status = tool('dpkg-query', ['-W', '-f=${Status} ${Version}', DEB_PACKAGE]);
       const sandboxMode = (() => { try { return (fsSync.statSync(`${INSTALL_DIR}/chrome-sandbox`).mode & 0o7777).toString(8); } catch { return null; } })();
-      // The Version of the .deb this run was given: the installed version must be exactly this one (TB-084).
+      // The Version of the .deb this run was given: the installed version must be exactly this one (TB-084). dpkg is asked about the
+      // Package of that same file: the QA .deb keeps the package name of package.json while its executable is trace-boardviewer-qa.
       const debFile = parsed.deb ? path.resolve(parsed.deb) : null;
-      const debVersion = debFile !== null && exists(debFile) ? (parseDebFields(tool('dpkg-deb', ['-f', debFile]).stdout).Version ?? null) : null;
-      facts.installed = { dpkg: status.stdout.trim(), debVersion, apparmorProfileFile: exists(`/etc/apparmor.d/${EXECUTABLE_NAME}`), chromeSandboxMode: sandboxMode };
+      const debFields = debFile !== null && exists(debFile) ? parseDebFields(tool('dpkg-deb', ['-f', debFile]).stdout) : {};
+      const debVersion = debFields.Version ?? null;
+      const debPackage = debFields.Package ?? DEB_PACKAGE;
+      const status = tool('dpkg-query', ['-W', '-f=${Status} ${Version}', debPackage]);
+      facts.installed = { package: debPackage, dpkg: status.stdout.trim(), debVersion, apparmorProfileFile: exists(`/etc/apparmor.d/${EXECUTABLE_NAME}`), chromeSandboxMode: sandboxMode };
       const problems = installedProblems({ status: facts.installed.dpkg, debVersion, apparmorProfileFile: facts.installed.apparmorProfileFile });
       checks.push({ name: 'the .deb is installed at its exact version and its AppArmor profile file is in place', status: problems.length ? 'fail' : 'pass', ...(problems.length ? { detail: problems.join('; ') } : { detail: facts.installed }) });
     }
