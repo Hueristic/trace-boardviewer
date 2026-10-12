@@ -59,6 +59,8 @@ const smokeStep = (scenario) => {
   return steps[0];
 };
 const PACKAGES_EXIST = "!cancelled() && steps.locate.outcome == 'success'";
+// The QA packages (the flavour that the Playwright and CDP steps run) are located by the locate_qa step.
+const PACKAGES_QA = "!cancelled() && steps.locate_qa.outcome == 'success'";
 const XVFB = "xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run ";
 
 // ---- the workflow ------------------------------------------------------------------------------------------
@@ -128,9 +130,11 @@ test('static: the steps run in order: tests, build, checksums, static package ch
   assert.equal(metadata.id, 'metadata');
   assert.match(metadata.run, /echo "artifact_name=TRACE-Boardviewer-\$version-linux-\$TRACE_ARCH" >> "\$GITHUB_OUTPUT"/);
   assert.match(metadata.run, /if \[\[ "\$TRACE_REF" == refs\/tags\/\* && "\$TRACE_TAG" != "v\$version" \]\]; then/, 'a tag must match package.json, as in the other jobs');
-  assert.equal(stepNamed('Run the static Linux packaging checks').run, 'node --test tests/linux-config-checks.cjs tests/linux-workflow-checks.cjs');
-  assert.equal(stepNamed('Run parser and geometry tests').run, 'pnpm test');
-  assert.equal(stepNamed('Run desktop boundary and persistence tests').run, 'pnpm test:desktop');
+  // Each command streams to a log under $RUNNER_TEMP/ci-diag (the failure annotations read it) and keeps its own exit code (pipefail).
+  assert.ok(stepNamed('Run the static Linux packaging checks').run.includes('node --test tests/linux-config-checks.cjs tests/linux-workflow-checks.cjs 2>&1 | tee "$RUNNER_TEMP/ci-diag/'));
+  assert.ok(stepNamed('Run parser and geometry tests').run.includes('pnpm test 2>&1 | tee "$RUNNER_TEMP/ci-diag/'));
+  assert.ok(stepNamed('Run desktop boundary and persistence tests').run.includes('pnpm test:desktop 2>&1 | tee "$RUNNER_TEMP/ci-diag/'));
+  assert.ok(stepNamed('Run the static Linux packaging checks').run.startsWith('set -o pipefail'));
   assert.equal(stepNamed('Build the renderer').run, 'pnpm run build');
 });
 
@@ -151,7 +155,8 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   assert.ok(windowsPayload.index < windowsQa.index && windowsQa.index < windowsValidate.index && windowsValidate.index < windowsQaUpload.index && windowsQaUpload.index < windowsArtifact.index);
   assert.match(windowsValidate.step.run, /validate-packaged-functional-evidence\.cjs/);
   assert.equal(windowsValidate.step.if, 'always()');
-  assert.match(windowsQa.step.run, /release\/win-unpacked\/TRACE Boardviewer\.exe/);
+  assert.match(windowsQa.step.run, /release-qa\/win-unpacked\/TRACE Boardviewer QA\.exe/, 'the Windows functional QA runs the QA EXE');
+  assert.match(windowsQa.step.run, /--flavour=qa/);
   assert.match(windowsQa.step.run, /resources\/app\.asar/);
   assert.match(windowsQa.step.run, /--manifest=/);
   assert.match(windowsQa.step.run, /--os=win32 --arch=x64/);
@@ -159,7 +164,7 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   assert.equal(windowsQaUpload.step.if, 'always()');
   assert.equal(windowsQaUpload.step.with['if-no-files-found'], 'error');
 
-  const macExtract = find(mac.steps, 'Extract the checksummed macOS ZIP');
+  const macExtract = find(mac.steps, 'Extract the checksummed macOS QA ZIP');
   const macQa = find(mac.steps, 'Run packaged functional QA');
   const macQaValidate = find(mac.steps, 'Validate macOS packaged functional QA evidence manifest');
   const macQaUpload = find(mac.steps, 'Upload macOS packaged functional QA');
@@ -173,17 +178,17 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   assert.equal(macQaUpload.step.with['if-no-files-found'], 'error');
 
   const s1 = find(linuxSteps, 'Smoke-test the .deb under the stock user-namespace restriction');
-  const linuxQa = find(linuxSteps, 'Run packaged functional QA against the installed DEB');
+  const linuxQa = find(linuxSteps, 'Run packaged functional QA against the installed QA DEB');
   const relaxed = find(linuxSteps, 'Allow unprivileged user namespaces');
   const linuxSummary = find(linuxSteps, 'Show packaged functional QA summary');
   const linuxUpload = find(linuxSteps, 'Upload packaged functional QA evidence');
   assert.ok(s1.index < linuxQa.index && linuxQa.index < relaxed.index, 'the functional run remains inside S1 with Chromium sandbox on');
   assert.match(linuxQa.step.run, /xvfb-run/);
-  assert.match(linuxQa.step.run, /\/opt\/TRACE Boardviewer\/trace-boardviewer/);
+  assert.match(linuxQa.step.run, /\/opt\/TRACE Boardviewer QA\/trace-boardviewer-qa/);
   assert.match(linuxQa.step.run, /deb="\$PWD\/\$TRACE_DEB"/);
   assert.match(linuxQa.step.run, /"--checksum=\$deb\.sha256"/);
-  assert.match(linuxQa.step.run, /--os=linux --arch=x64/);
-  assert.equal(linuxQa.step.if, PACKAGES_EXIST);
+  assert.match(linuxQa.step.run, /--os=linux --arch=x64 --flavour=qa/);
+  assert.equal(linuxQa.step.if, PACKAGES_QA);
   assert.equal(linuxSummary.step.if, 'always()');
   assert.match(linuxSummary.step.run, /evidence is missing/);
   assert.equal(linuxUpload.step.if, 'always()');
@@ -191,7 +196,7 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   assert.match(fs.readFileSync(rel('scripts', 'linux-smoke.cjs'), 'utf8'), /the unpacked app, the AppImage and the \.deb carry the same app\.asar/);
 
   const s3 = find(linuxSteps, 'Smoke-test the AppImage with user namespaces allowed (S3');
-  const appImageQa = find(linuxSteps, 'Run packaged functional QA against the AppImage');
+  const appImageQa = find(linuxSteps, 'Run packaged functional QA against the QA AppImage');
   const appImageVerify = find(linuxSteps, 'Verify and upload AppImage functional evidence');
   const appImageUpload = find(linuxSteps, 'Upload AppImage packaged functional QA evidence');
   const s4 = find(linuxSteps, 'Smoke-test the unpacked app with user namespaces allowed (S4');
@@ -267,7 +272,8 @@ test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace 
   for (const [scenario, args] of Object.entries(expected)) {
     const step = smokeStep(scenario);
     assert.ok(step.run.includes(`${XVFB}${args}`), `${scenario} runs: ${args}`);
-    assert.equal(step.if, PACKAGES_EXIST, `${scenario} runs whenever the packages exist, even after an earlier scenario failed`);
+    assert.equal(step.if, PACKAGES_QA, `${scenario} runs the QA packages whenever they exist, even after an earlier scenario failed`);
+    assert.equal(step.env.TRACE_FLAVOUR, 'qa', `${scenario} runs the QA flavour`);
     assert.ok(Number.isInteger(step['timeout-minutes']) && step['timeout-minutes'] <= 15, `${scenario} has its own timeout`);
     // Every scenario must be accepted by the script's own argument parser (the variables as the locate step sets them).
     const values = { '"$TRACE_ARCH"': 'x64', '"$TRACE_APPIMAGE"': 'release-linux/TRACE-Boardviewer-1.2.0-linux-x86_64.AppImage', '"$TRACE_UNPACKED"': 'release-linux/linux-unpacked' };
@@ -278,9 +284,9 @@ test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace 
   const s1Lines = s1.run.split('\n').map((line) => line.trim()).filter(Boolean);
   assert.equal(s1Lines[1], 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1', 'S1 sets the stock restriction explicitly before anything else');
   assert.ok(s1Lines.includes('sudo apt-get install -y --no-install-recommends "./$TRACE_DEB"'), 'the .deb is installed with apt (dependencies and maintainer scripts run)');
-  assert.ok(s1Lines.includes('test -f /etc/apparmor.d/trace-boardviewer'));
-  assert.ok(s1Lines.includes("sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer (unconfined)'"), 'the profile is loaded');
-  assert.ok(s1Lines.indexOf("sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer (unconfined)'") < s1Lines.findIndex((line) => line.startsWith('xvfb-run')));
+  assert.ok(s1Lines.includes('test -f /etc/apparmor.d/trace-boardviewer-qa'), 'the QA deb ships its own AppArmor profile');
+  assert.ok(s1Lines.includes("sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer-qa (unconfined)'"), 'the QA profile is loaded');
+  assert.ok(s1Lines.indexOf("sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer-qa (unconfined)'") < s1Lines.findIndex((line) => line.startsWith('xvfb-run')));
   assert.equal(s1Lines[0], 'set -euo pipefail');
   const s2Lines = smokeStep('S2').run.split('\n').map((line) => line.trim()).filter(Boolean);
   assert.deepEqual(s2Lines.slice(0, 2), ['set -euo pipefail', 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1'], 'S2 asserts the restriction itself');
@@ -289,14 +295,18 @@ test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace 
   assert.equal(relax.if, PACKAGES_EXIST);
   for (const scenario of ['S3', 'S4']) assert.doesNotMatch(smokeStep(scenario).run, /sysctl/, `${scenario} relies on the step before it`);
   assert.equal(linux().steps.filter((step) => step.run && /--expect-gate yes/.test(step.run)).length, 1, 'only S2 expects the consent dialog');
-  assert.equal(stepNamed('Check the packages statically (S0)').run, 'node scripts/linux-smoke.cjs static --appimage "$TRACE_APPIMAGE" --deb "$TRACE_DEB" --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --out test-results/linux/linux-static.json');
+  assert.ok(stepNamed('Check the packages statically (S0)').run.includes('node scripts/linux-smoke.cjs static --appimage "$TRACE_APPIMAGE" --deb "$TRACE_DEB" --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --out test-results/linux/linux-static.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/'));
   assert.equal(stepNamed('Check the packages statically (S0)').if, PACKAGES_EXIST);
   const summary = stepNamed('Show Linux smoke summary');
   assert.equal(summary.if, 'always()');
   assert.match(summary.run, /node scripts\/linux-smoke\.cjs summary --dir test-results\/linux >> "\$GITHUB_STEP_SUMMARY"/);
   for (const step of linux().steps.filter((entry) => entry.env)) {
     for (const [name, value] of Object.entries(step.env)) {
-      if (/^TRACE_(APPIMAGE|DEB|UNPACKED)$/.test(name)) assert.equal(value, `\${{ steps.locate.outputs.${name.slice(6).toLowerCase()} }}`, `${step.name}: ${name} comes from the locate step`);
+      // The release packages come from the locate step, the QA packages (every Playwright and CDP step) from the locate_qa step.
+      if (/^TRACE_(APPIMAGE|DEB|UNPACKED)$/.test(name)) {
+        const output = name.slice(6).toLowerCase();
+        assert.ok(value === `\${{ steps.locate.outputs.${output} }}` || value === `\${{ steps.locate_qa.outputs.${output} }}`, `${step.name}: ${name} comes from the locate or locate_qa step`);
+      }
     }
   }
 });
@@ -339,7 +349,9 @@ test('static: the packages are uploaded only after every step passed; the eviden
   assert.ok(declared, 'the process pattern is declared once');
   const pattern = new RegExp(declared[1]);
   for (const line of ['/opt/TRACE Boardviewer/trace-boardviewer --user-data-dir=/tmp/p', '/tmp/.mount_TRACE-x/trace-boardviewer --type=renderer',
-    '/home/runner/work/trace-boardviewer/trace-boardviewer/release-linux/TRACE-Boardviewer-1.2.0-linux-x86_64.AppImage --inspect=0', 'release-linux/linux-unpacked/trace-boardviewer']) {
+    '/home/runner/work/trace-boardviewer/trace-boardviewer/release-linux/TRACE-Boardviewer-1.2.0-linux-x86_64.AppImage --inspect=0', 'release-linux/linux-unpacked/trace-boardviewer',
+    '/opt/TRACE Boardviewer QA/trace-boardviewer-qa --user-data-dir=/tmp/p', '/tmp/.mount_TRACE-x/trace-boardviewer-qa --type=renderer',
+    'release-qa-linux/linux-unpacked/trace-boardviewer-qa', '/home/runner/work/trace-boardviewer/trace-boardviewer/release-qa-linux/TRACE-Boardviewer-QA-1.2.0-linux-x86_64.AppImage']) {
     assert.match(line, pattern, line);
   }
   for (const line of ['/home/runner/actions-runner/cached/bin/Runner.Worker spawnclient 1 2', 'bash -e /home/runner/work/_temp/1234.sh',

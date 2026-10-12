@@ -233,7 +233,7 @@ test('static: the mac job builds the unsigned arm64 zip inside the release workf
   const checkout = job.steps.find((step) => step.uses && step.uses.startsWith('actions/checkout@'));
   assert.equal(checkout.with['persist-credentials'], false);
   const names = job.steps.map((step) => step.name);
-  const order = ['Install locked dependencies', 'Validate release metadata', 'Run the static macOS packaging checks', 'Build the renderer', 'Build the unsigned macOS app', 'Locate the app and generate the zip checksum', 'Run the packaged-app smoke test', 'Scan the app bundle for private names and paths', 'Upload macOS zip and checksum', 'Upload macOS smoke evidence'];
+  const order = ['Install locked dependencies', 'Validate release metadata', 'Run the static macOS packaging checks', 'Build the renderer', 'Build the unsigned macOS app', 'Locate the app and generate the zip checksum', 'Run the packaged-app smoke test (QA flavour)', 'Scan the app bundle for private names and paths', 'Upload macOS zip and checksum', 'Upload macOS smoke evidence'];
   assert.deepEqual(names.filter((name) => order.includes(name)), order, 'the steps run in this order: the smoke test and the scan come before the upload');
   assert.ok(!names.some((name) => /Prepare Electron runtime/.test(name)), 'no setup:electron: the builder downloads the arm64 Electron itself');
 

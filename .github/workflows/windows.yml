@@ -73,11 +73,23 @@ jobs:
           "version=$traceVersion" >> $env:GITHUB_OUTPUT
           "artifact_name=TRACE-Boardviewer-$traceVersion-windows-x64" >> $env:GITHUB_OUTPUT
       - name: Run parser and geometry tests
-        run: pnpm test
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm test 2>&1 | tee "$RUNNER_TEMP/ci-diag/windows-vitest.log"
       - name: Run desktop boundary and persistence tests
-        run: pnpm test:desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm test:desktop 2>&1 | tee "$RUNNER_TEMP/ci-diag/windows-desktop.log"
       - name: Check packaged functional QA runner contracts
-        run: node --test tests/packaged-functional-qa-checks.cjs tests/packaged-bug-report-checks.cjs
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node --test tests/packaged-functional-qa-checks.cjs tests/packaged-bug-report-checks.cjs 2>&1 | tee "$RUNNER_TEMP/ci-diag/windows-contracts.log"
       - name: Build portable Windows EXE
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -103,20 +115,41 @@ jobs:
           $traceLines = @("files: $($traceManifest.fileCount), bytes: $($traceManifest.totalBytes)", "manifest digest: $($traceManifest.manifestDigest)", "TRACE Boardviewer.exe sha256: $($traceManifest.exeSha256)", "resources/app.asar sha256: $($traceManifest.asarSha256)")
           $traceLines | ForEach-Object { Write-Host $_ }
           (@('### Payload manifest (release/win-unpacked)', '', '```text') + $traceLines + @('```')) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
-      - name: Run packaged functional QA against the manifest-linked Windows payload
+      - name: Build the QA flavour of the portable EXE (inspector on; packaged QA only, never uploaded)
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: pnpm exec electron-builder --win portable --x64 --config config/electron-builder.qa.yml --publish never
+      - name: Generate the QA checksum and payload manifest (never uploaded)
         env:
           TRACE_VERSION: ${{ steps.metadata.outputs.version }}
         run: |
-          $traceExe = (Resolve-Path -LiteralPath 'release/win-unpacked/TRACE Boardviewer.exe').Path
-          $traceAsar = (Resolve-Path -LiteralPath 'release/win-unpacked/resources/app.asar').Path
-          $traceArtifact = (Resolve-Path -LiteralPath "release/TRACE-Boardviewer-$env:TRACE_VERSION.exe").Path
-          $traceChecksum = (Resolve-Path -LiteralPath "release/TRACE-Boardviewer-$env:TRACE_VERSION.exe.sha256").Path
-          $traceManifest = (Resolve-Path -LiteralPath 'payload-manifest.json').Path
-          node scripts/packaged-functional-qa.cjs "--executable=$traceExe" "--asar=$traceAsar" "--artifact=$traceArtifact" "--checksum=$traceChecksum" "--manifest=$traceManifest" "--version=$env:TRACE_VERSION" --os=win32 --arch=x64 --out="$PWD/test-results/packaged-functional/windows-x64.json"
+          $traceQaExe = Join-Path release-qa "TRACE-Boardviewer-QA-$env:TRACE_VERSION.exe"
+          if (-not (Test-Path -LiteralPath $traceQaExe -PathType Leaf)) { throw 'The QA portable EXE is missing.' }
+          $traceHash = (Get-FileHash -LiteralPath $traceQaExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$traceHash  $([IO.Path]::GetFileName($traceQaExe))" | Set-Content -LiteralPath "$traceQaExe.sha256" -Encoding ascii
+          $traceQaUnpacked = Join-Path release-qa 'win-unpacked'
+          if (-not (Test-Path -LiteralPath $traceQaUnpacked -PathType Container)) { throw 'release-qa/win-unpacked is missing: the QA payload manifest cannot be generated.' }
+          node scripts/payload-manifest.cjs --dir $traceQaUnpacked --out payload-manifest-qa.json
+          if ($LASTEXITCODE -ne 0) { throw "QA payload manifest generation failed with exit code $LASTEXITCODE." }
+      - name: Run packaged functional QA against the manifest-linked Windows QA payload (QA flavour)
+        env:
+          TRACE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          $traceExe = (Resolve-Path -LiteralPath 'release-qa/win-unpacked/TRACE Boardviewer QA.exe').Path
+          $traceAsar = (Resolve-Path -LiteralPath 'release-qa/win-unpacked/resources/app.asar').Path
+          $traceArtifact = (Resolve-Path -LiteralPath "release-qa/TRACE-Boardviewer-QA-$env:TRACE_VERSION.exe").Path
+          $traceChecksum = (Resolve-Path -LiteralPath "release-qa/TRACE-Boardviewer-QA-$env:TRACE_VERSION.exe.sha256").Path
+          $traceManifest = (Resolve-Path -LiteralPath 'payload-manifest-qa.json').Path
+          node scripts/packaged-functional-qa.cjs "--executable=$traceExe" "--asar=$traceAsar" "--artifact=$traceArtifact" "--checksum=$traceChecksum" "--manifest=$traceManifest" "--version=$env:TRACE_VERSION" --os=win32 --arch=x64 --flavour=qa --out="$PWD/test-results/packaged-functional/windows-x64.json"
           if ($LASTEXITCODE -ne 0) { throw "Packaged functional QA failed with exit code $LASTEXITCODE." }
       - name: Validate packaged functional QA evidence manifest
         if: always()
         run: node scripts/validate-packaged-functional-evidence.cjs --report test-results/packaged-functional/windows-x64.json --screenshots test-results/packaged-functional/windows-x64-screenshots
+      - name: Launch the RELEASE Windows build without Playwright (fresh profile, alive 10 s, clean close)
+        run: |
+          $traceExe = (Resolve-Path -LiteralPath 'release/win-unpacked/TRACE Boardviewer.exe').Path
+          node scripts/release-launch-check.cjs "--executable=$traceExe" --os=win32 --out="$PWD/test-results/packaged-functional/release-launch-windows.json"
+          if ($LASTEXITCODE -ne 0) { throw "Release launch check failed with exit code $LASTEXITCODE." }
       - name: Upload packaged functional QA evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -125,6 +158,7 @@ jobs:
           path: |
             test-results/packaged-functional/windows-x64.json
             test-results/packaged-functional/windows-x64-screenshots/*.png
+            test-results/packaged-functional/release-launch-windows.json
           if-no-files-found: error
           retention-days: 14
       - name: Upload portable EXE and checksum
@@ -146,6 +180,10 @@ jobs:
           retention-days: 14
           overwrite: true
 
+      - name: Annotate failures from the logs and the evidence (runs only after a failure)
+        if: failure()
+        shell: bash
+        run: node scripts/ci-annotate.cjs --logs="$RUNNER_TEMP/ci-diag" --evidence=test-results/packaged-functional
   portable-isolation:
     needs: build
     runs-on: windows-latest
@@ -518,15 +556,35 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "artifact_name=TRACE-Boardviewer-$version-mac-$TRACE_ARCH" >> "$GITHUB_OUTPUT"
       - name: Run the static macOS packaging checks
-        run: node --test tests/mac-config-checks.cjs tests/mac-payload-manifest-checks.cjs
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node --test tests/mac-config-checks.cjs tests/mac-payload-manifest-checks.cjs 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-static.log"
       - name: Check packaged functional QA runner contracts
-        run: node --test tests/packaged-functional-qa-checks.cjs tests/packaged-bug-report-checks.cjs
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node --test tests/packaged-functional-qa-checks.cjs tests/packaged-bug-report-checks.cjs 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-contracts.log"
       - name: Run TypeScript checks
-        run: pnpm exec tsc --noEmit
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm exec tsc --noEmit 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-tsc.log"
       - name: Run parser and geometry tests
-        run: pnpm exec vitest run --maxWorkers=3
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm exec vitest run --maxWorkers=3 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-vitest.log"
       - name: Run desktop boundary and persistence tests
-        run: pnpm test:desktop
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm test:desktop 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-desktop.log"
       - name: Build the renderer
         run: pnpm run build
       - name: Build the unsigned macOS app
@@ -544,6 +602,21 @@ jobs:
           # Same line format as the EXE checksum: "<sha256, lowercase>  <file name>".
           (cd release-mac && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")
           cat "$zip.sha256"
+          echo "app=$app" >> "$GITHUB_OUTPUT"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+      - name: Build the QA flavour of the macOS app (inspector on; packaged QA and smoke only, never uploaded)
+        run: pnpm exec electron-builder --mac zip "--$TRACE_ARCH" --config config/electron-builder.qa.mac.yml --publish never
+      - name: Locate the QA app and generate its zip checksum (never uploaded)
+        id: locate_qa
+        env:
+          TRACE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          app="release-qa-mac/mac-$TRACE_ARCH/TRACE Boardviewer QA.app"
+          zip="release-qa-mac/TRACE-Boardviewer-QA-$TRACE_VERSION-mac-$TRACE_ARCH.zip"
+          if [ ! -d "$app" ]; then echo "The QA app bundle is missing: $app" >&2; exit 1; fi
+          if [ ! -f "$zip" ]; then echo "The QA zip archive is missing: $zip" >&2; exit 1; fi
+          (cd release-qa-mac && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")
           echo "app=$app" >> "$GITHUB_OUTPUT"
           echo "zip=$zip" >> "$GITHUB_OUTPUT"
       - name: Write the macOS payload manifest of the built app
@@ -572,6 +645,13 @@ jobs:
           unpacked="$(mktemp -d)"
           ditto -x -k "$TRACE_ZIP" "$unpacked"
           node scripts/mac-payload-manifest.cjs verify --manifest release-mac/mac-payload-manifest.json --provenance release-mac/mac-provenance.json --zip "$TRACE_ZIP" --commit "$TRACE_COMMIT" --app "$unpacked/TRACE Boardviewer.app"
+      - name: Launch the RELEASE macOS app without Playwright (fresh profile, LaunchServices registration, clean quit)
+        env:
+          TRACE_APP: ${{ steps.locate.outputs.app }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node scripts/release-launch-check.cjs "--executable=$PWD/$TRACE_APP/Contents/MacOS/TRACE Boardviewer" --os=darwin --out="$PWD/test-results/mac/release-launch-$TRACE_ARCH.json" 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-release-launch.log"
       - name: Print host and binary facts (log only)
         env:
           TRACE_APP: ${{ steps.locate.outputs.app }}
@@ -583,38 +663,42 @@ jobs:
           lipo -info "$TRACE_APP/Contents/MacOS/TRACE Boardviewer" || true
           # 1 means this shell is translated (Rosetta). The smoke script asks the app process itself.
           sysctl -n sysctl.proc_translated || echo "sysctl.proc_translated is not available on this host"
-      - name: Run the packaged-app smoke test
+      - name: Run the packaged-app smoke test (QA flavour)
         timeout-minutes: 20
         env:
-          TRACE_APP: ${{ steps.locate.outputs.app }}
-          TRACE_ZIP: ${{ steps.locate.outputs.zip }}
-        run: node scripts/mac-smoke.cjs --app "$TRACE_APP" --arch "$TRACE_ARCH" --commit "$TRACE_COMMIT" --artifact "$TRACE_ZIP" --out "test-results/mac/mac-smoke-evidence-$TRACE_ARCH.json"
-      - name: Extract the checksummed macOS ZIP for packaged functional QA
+          TRACE_APP: ${{ steps.locate_qa.outputs.app }}
+          TRACE_ZIP: ${{ steps.locate_qa.outputs.zip }}
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node scripts/mac-smoke.cjs --app "$TRACE_APP" --arch "$TRACE_ARCH" --commit "$TRACE_COMMIT" --artifact "$TRACE_ZIP" --out "test-results/mac/mac-smoke-evidence-$TRACE_ARCH.json" 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-smoke.log"
+      - name: Extract the checksummed macOS QA ZIP for packaged functional QA
         env:
-          TRACE_ZIP: ${{ steps.locate.outputs.zip }}
+          TRACE_ZIP: ${{ steps.locate_qa.outputs.zip }}
         run: |
           set -euo pipefail
           mkdir -p test-results/mac/functional-package
           ditto -x -k "$TRACE_ZIP" test-results/mac/functional-package
-          app="test-results/mac/functional-package/TRACE Boardviewer.app"
-          test -x "$app/Contents/MacOS/TRACE Boardviewer"
+          app="test-results/mac/functional-package/TRACE Boardviewer QA.app"
+          test -x "$app/Contents/MacOS/TRACE Boardviewer QA"
           test -f "$app/Contents/Resources/app.asar"
           echo "TRACE_FUNCTIONAL_APP=$PWD/$app" >> "$GITHUB_ENV"
           (cd "$(dirname "$TRACE_ZIP")" && shasum -a 256 -c "$(basename "$TRACE_ZIP").sha256")
-      - name: Run packaged functional QA against the extracted ZIP payload
+      - name: Run packaged functional QA against the extracted QA ZIP payload (QA flavour)
         timeout-minutes: 20
         env:
           TRACE_VERSION: ${{ steps.metadata.outputs.version }}
-          TRACE_ZIP: ${{ steps.locate.outputs.zip }}
+          TRACE_ZIP: ${{ steps.locate_qa.outputs.zip }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
           zip="$PWD/$TRACE_ZIP"
           node scripts/packaged-functional-qa.cjs \
-            "--executable=$TRACE_FUNCTIONAL_APP/Contents/MacOS/TRACE Boardviewer" \
+            "--executable=$TRACE_FUNCTIONAL_APP/Contents/MacOS/TRACE Boardviewer QA" \
             "--asar=$TRACE_FUNCTIONAL_APP/Contents/Resources/app.asar" \
             "--artifact=$zip" "--checksum=$zip.sha256" \
-            "--version=$TRACE_VERSION" --os=darwin --arch=arm64 \
-            --out="$PWD/test-results/mac/packaged-functional-arm64.json"
+            "--version=$TRACE_VERSION" --os=darwin --arch=arm64 --flavour=qa \
+            --out="$PWD/test-results/mac/packaged-functional-arm64.json" 2>&1 | tee "$RUNNER_TEMP/ci-diag/mac-packaged-qa.log"
       - name: Validate macOS packaged functional QA evidence manifest
         if: always()
         run: node scripts/validate-packaged-functional-evidence.cjs --report test-results/mac/packaged-functional-arm64.json --screenshots test-results/mac/packaged-functional-arm64-screenshots
@@ -706,6 +790,10 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Annotate failures from the logs and the evidence (runs only after a failure)
+        if: failure()
+        shell: bash
+        run: node scripts/ci-annotate.cjs --logs="$RUNNER_TEMP/ci-diag" --evidence=test-results/mac
   linux:
     # Experimental Linux build: an x86-64 .deb and AppImage (static AppImage runtime) built on an Ubuntu 24.04 runner. The job runs
     # the static packaging checks and the test suites, builds both packages, checks them statically (S0) and smoke-tests them under
@@ -759,13 +847,25 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "artifact_name=TRACE-Boardviewer-$version-linux-$TRACE_ARCH" >> "$GITHUB_OUTPUT"
       - name: Run the static Linux packaging checks
-        run: node --test tests/linux-config-checks.cjs tests/linux-workflow-checks.cjs
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node --test tests/linux-config-checks.cjs tests/linux-workflow-checks.cjs 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-static.log"
       - name: Check packaged functional QA runner contracts
-        run: node --test tests/packaged-functional-qa-checks.cjs tests/packaged-bug-report-checks.cjs
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node --test tests/packaged-functional-qa-checks.cjs tests/packaged-bug-report-checks.cjs 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-contracts.log"
       - name: Run parser and geometry tests
-        run: pnpm test
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm test 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-vitest.log"
       - name: Run desktop boundary and persistence tests
-        run: pnpm test:desktop
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          pnpm test:desktop 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-desktop.log"
       - name: Build the renderer
         run: pnpm run build
       - name: Build the Linux packages
@@ -789,6 +889,29 @@ jobs:
           if [ ! -x "$unpacked/trace-boardviewer" ]; then echo "The unpacked app is missing: $unpacked" >&2; exit 1; fi
           # Same line format as the EXE and zip checksums: "<sha256, lowercase>  <file name>".
           (cd release-linux && for name in "$(basename "$appimage")" "$(basename "$deb")"; do sha256sum "$name" > "$name.sha256"; cat "$name.sha256"; done)
+          echo "appimage=$appimage" >> "$GITHUB_OUTPUT"
+          echo "deb=$deb" >> "$GITHUB_OUTPUT"
+          echo "unpacked=$unpacked" >> "$GITHUB_OUTPUT"
+      - name: Build the QA flavour of the Linux packages (inspector on; packaged QA and smoke only, never uploaded)
+        run: pnpm exec electron-builder --linux AppImage deb "--$TRACE_ARCH" --config config/electron-builder.qa.linux.yml --publish never
+      - name: Locate the QA packages and generate their checksums (never uploaded)
+        id: locate_qa
+        env:
+          TRACE_VERSION: ${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          case "$TRACE_ARCH" in
+            x64) appimageArch=x86_64; debArch=amd64; unpacked=release-qa-linux/linux-unpacked ;;
+            arm64) appimageArch=arm64; debArch=arm64; unpacked=release-qa-linux/linux-arm64-unpacked ;;
+            *) echo "Unsupported architecture: $TRACE_ARCH" >&2; exit 1 ;;
+          esac
+          appimage="release-qa-linux/TRACE-Boardviewer-QA-$TRACE_VERSION-linux-$appimageArch.AppImage"
+          deb="release-qa-linux/TRACE-Boardviewer-QA-$TRACE_VERSION-linux-$debArch.deb"
+          for file in "$appimage" "$deb"; do
+            if [ ! -f "$file" ]; then echo "QA package is missing: $file" >&2; exit 1; fi
+          done
+          if [ ! -x "$unpacked/trace-boardviewer-qa" ]; then echo "The QA unpacked app is missing: $unpacked" >&2; exit 1; fi
+          (cd release-qa-linux && for name in "$(basename "$appimage")" "$(basename "$deb")"; do sha256sum "$name" > "$name.sha256"; done)
           echo "appimage=$appimage" >> "$GITHUB_OUTPUT"
           echo "deb=$deb" >> "$GITHUB_OUTPUT"
           echo "unpacked=$unpacked" >> "$GITHUB_OUTPUT"
@@ -821,37 +944,43 @@ jobs:
           TRACE_APPIMAGE: ${{ steps.locate.outputs.appimage }}
           TRACE_DEB: ${{ steps.locate.outputs.deb }}
           TRACE_UNPACKED: ${{ steps.locate.outputs.unpacked }}
-        run: node scripts/linux-smoke.cjs static --appimage "$TRACE_APPIMAGE" --deb "$TRACE_DEB" --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --out test-results/linux/linux-static.json
-      - name: Smoke-test the .deb under the stock user-namespace restriction (S1, sandbox on through its AppArmor profile)
-        if: "!cancelled() && steps.locate.outcome == 'success'"
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          node scripts/linux-smoke.cjs static --appimage "$TRACE_APPIMAGE" --deb "$TRACE_DEB" --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --out test-results/linux/linux-static.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-s0.log"
+      - name: Smoke-test the .deb under the stock user-namespace restriction (S1, sandbox on through its AppArmor profile; QA flavour)
+        if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 10
         env:
-          TRACE_DEB: ${{ steps.locate.outputs.deb }}
+          TRACE_DEB: ${{ steps.locate_qa.outputs.deb }}
+          TRACE_FLAVOUR: qa
         run: |
           set -euo pipefail
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
           sudo apt-get install -y --no-install-recommends "./$TRACE_DEB"
-          test -f /etc/apparmor.d/trace-boardviewer
-          sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer (unconfined)'
-          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S1 --target installed --arch "$TRACE_ARCH" --userns restricted --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S1-deb-restricted.json
-      - name: Run packaged functional QA against the installed DEB under S1 sandbox policy
-        if: "!cancelled() && steps.locate.outcome == 'success'"
+          test -f /etc/apparmor.d/trace-boardviewer-qa
+          sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer-qa (unconfined)'
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S1 --target installed --arch "$TRACE_ARCH" --userns restricted --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S1-deb-restricted.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-smoke-S1.log"
+      - name: Run packaged functional QA against the installed QA DEB under S1 sandbox policy (QA flavour)
+        if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 20
         env:
           TRACE_VERSION: ${{ steps.metadata.outputs.version }}
-          TRACE_DEB: ${{ steps.locate.outputs.deb }}
+          TRACE_DEB: ${{ steps.locate_qa.outputs.deb }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
           test "$TRACE_ARCH" = x64
           deb="$PWD/$TRACE_DEB"
-          test -x "/opt/TRACE Boardviewer/trace-boardviewer"
-          test -f "/opt/TRACE Boardviewer/resources/app.asar"
+          test -x "/opt/TRACE Boardviewer QA/trace-boardviewer-qa"
+          test -f "/opt/TRACE Boardviewer QA/resources/app.asar"
           xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/packaged-functional-qa.cjs \
-            --executable="/opt/TRACE Boardviewer/trace-boardviewer" \
-            --asar="/opt/TRACE Boardviewer/resources/app.asar" \
+            --executable="/opt/TRACE Boardviewer QA/trace-boardviewer-qa" \
+            --asar="/opt/TRACE Boardviewer QA/resources/app.asar" \
             "--artifact=$deb" "--checksum=$deb.sha256" \
-            "--version=$TRACE_VERSION" --os=linux --arch=x64 \
-            --out="$PWD/test-results/linux/packaged-functional-x64.json"
+            "--version=$TRACE_VERSION" --os=linux --arch=x64 --flavour=qa \
+            --out="$PWD/test-results/linux/packaged-functional-x64.json" 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-packaged-qa-deb.log"
       - name: Show packaged functional QA summary
         if: always()
         run: |
@@ -872,40 +1001,47 @@ jobs:
             test-results/linux/packaged-functional-x64-screenshots/*.png
           if-no-files-found: error
           retention-days: 14
-      - name: Smoke-test the AppImage under the stock restriction (S2, no sandbox, the consent dialog is answered)
-        if: "!cancelled() && steps.locate.outcome == 'success'"
+      - name: Smoke-test the AppImage under the stock restriction (S2, no sandbox, the consent dialog is answered; QA flavour)
+        if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 10
         env:
-          TRACE_APPIMAGE: ${{ steps.locate.outputs.appimage }}
+          TRACE_APPIMAGE: ${{ steps.locate_qa.outputs.appimage }}
+          TRACE_FLAVOUR: qa
         run: |
           set -euo pipefail
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1
-          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S2 --target appimage --appimage "$TRACE_APPIMAGE" --arch "$TRACE_ARCH" --userns restricted --expect-sandbox off --expect-gate yes --out test-results/linux/smoke-S2-appimage-restricted.json
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S2 --target appimage --appimage "$TRACE_APPIMAGE" --arch "$TRACE_ARCH" --userns restricted --expect-sandbox off --expect-gate yes --out test-results/linux/smoke-S2-appimage-restricted.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-smoke-S2.log"
       - name: Allow unprivileged user namespaces (the default of Fedora, Debian, Arch and older Ubuntu releases)
         if: "!cancelled() && steps.locate.outcome == 'success'"
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Smoke-test the AppImage with user namespaces allowed (S3, sandbox on)
-        if: "!cancelled() && steps.locate.outcome == 'success'"
+      - name: Smoke-test the AppImage with user namespaces allowed (S3, sandbox on; QA flavour)
+        if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 10
         env:
-          TRACE_APPIMAGE: ${{ steps.locate.outputs.appimage }}
-        run: xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S3 --target appimage --appimage "$TRACE_APPIMAGE" --arch "$TRACE_ARCH" --userns allowed --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S3-appimage-userns.json
-      - name: Run packaged functional QA against the AppImage under S3 sandbox policy
-        if: "!cancelled() && steps.locate.outcome == 'success'"
+          TRACE_APPIMAGE: ${{ steps.locate_qa.outputs.appimage }}
+          TRACE_FLAVOUR: qa
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S3 --target appimage --appimage "$TRACE_APPIMAGE" --arch "$TRACE_ARCH" --userns allowed --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S3-appimage-userns.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-smoke-S3.log"
+      - name: Run packaged functional QA against the QA AppImage under S3 sandbox policy (QA flavour)
+        if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 20
         env:
           TRACE_VERSION: ${{ steps.metadata.outputs.version }}
-          TRACE_APPIMAGE: ${{ steps.locate.outputs.appimage }}
-          TRACE_UNPACKED: ${{ steps.locate.outputs.unpacked }}
+          TRACE_APPIMAGE: ${{ steps.locate_qa.outputs.appimage }}
+          TRACE_UNPACKED: ${{ steps.locate_qa.outputs.unpacked }}
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
           image="$PWD/$TRACE_APPIMAGE"
           asar="$PWD/$TRACE_UNPACKED/resources/app.asar"
           xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/packaged-functional-qa.cjs \
             "--executable=$image" "--asar=$asar" \
             "--artifact=$image" "--checksum=$image.sha256" \
-            "--version=$TRACE_VERSION" --os=linux --arch=x64 \
-            --out="$PWD/test-results/linux/packaged-functional-appimage-x64.json"
+            "--version=$TRACE_VERSION" --os=linux --arch=x64 --flavour=qa \
+            --out="$PWD/test-results/linux/packaged-functional-appimage-x64.json" 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-packaged-qa-appimage.log"
       - name: Verify and upload AppImage functional evidence
         if: always()
         run: |
@@ -924,12 +1060,25 @@ jobs:
             test-results/linux/packaged-functional-appimage-x64-screenshots/*.png
           if-no-files-found: error
           retention-days: 14
-      - name: Smoke-test the unpacked app with user namespaces allowed (S4, sandbox on)
-        if: "!cancelled() && steps.locate.outcome == 'success'"
+      - name: Smoke-test the unpacked app with user namespaces allowed (S4, sandbox on; QA flavour)
+        if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 10
         env:
+          TRACE_UNPACKED: ${{ steps.locate_qa.outputs.unpacked }}
+          TRACE_FLAVOUR: qa
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S4 --target unpacked --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --userns allowed --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S4-unpacked-userns.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-smoke-S4.log"
+      - name: Launch the RELEASE Linux unpacked app without Playwright (fresh profile, window, clean stop)
+        if: "!cancelled() && steps.locate.outcome == 'success'"
+        timeout-minutes: 5
+        env:
           TRACE_UNPACKED: ${{ steps.locate.outputs.unpacked }}
-        run: xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S4 --target unpacked --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --userns allowed --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S4-unpacked-userns.json
+        run: |
+          set -o pipefail
+          mkdir -p "$RUNNER_TEMP/ci-diag"
+          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/release-launch-check.cjs "--executable=$PWD/$TRACE_UNPACKED/trace-boardviewer" --os=linux --out="$PWD/test-results/linux/release-launch-$TRACE_ARCH.json" 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-release-launch.log"
       - name: Show Linux smoke summary
         if: always()
         run: node scripts/linux-smoke.cjs summary --dir test-results/linux >> "$GITHUB_STEP_SUMMARY" || echo 'No Linux smoke summary could be written.' >> "$GITHUB_STEP_SUMMARY"
@@ -1012,12 +1161,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
           overwrite: true
+      - name: Annotate failures from the logs and the evidence (runs only after a failure)
+        if: failure()
+        run: node scripts/ci-annotate.cjs --logs="$RUNNER_TEMP/ci-diag" --evidence=test-results/linux
       - name: Stop leftover app processes
         # The smoke script kills what it started; this catches anything a cancelled or timed-out step left behind (app
         # processes and AppImage mounts), so the runner can finish the job cleanly.
         if: always()
         run: |
-          appProcesses='(/opt/TRACE Boardviewer|linux-unpacked|/\.mount_[^/ ]*|/appimage_extracted_[^/ ]*)/trace-boardviewer( |$)|\.AppImage( |$)'
+          appProcesses='(/opt/TRACE Boardviewer( QA)?|linux-unpacked|/\.mount_[^/ ]*|/appimage_extracted_[^/ ]*)/trace-boardviewer(-qa)?( |$)|\.AppImage( |$)'
           pgrep -a -f -- "$appProcesses" || echo 'No leftover app processes.'
           pkill -KILL -f -- "$appProcesses" || true
           for mountPoint in /tmp/.mount_*; do
