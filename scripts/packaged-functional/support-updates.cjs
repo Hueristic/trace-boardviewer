@@ -10,7 +10,9 @@ const updates = require('../../electron/updates.cjs');
 const egress = require('../../electron/net/egress.cjs');
 
 const RELEASE = '1.3.1';
-const PACKAGED_UPDATE_RELEASE = '1.3.2';
+const { appVersion, feedReleaseVersion, isNewerVersion } = require('./update-version.cjs');
+// The local feed fixture is the next patch of the package.json version that builds the app under test (never a public release).
+const PACKAGED_UPDATE_RELEASE = feedReleaseVersion();
 const HOURS = 60 * 60 * 1000;
 const UPDATE_PATH = new URL(updates.RELEASES_API).pathname;
 
@@ -74,6 +76,14 @@ async function verifyUpdateContract() {
     releasePageOpen: 'not exercised by this transport fixture; packaged UI exercises only the blocked offline path' };
 }
 
+// A valid encrypted XZZ vector from the synthetic corpus (the same input the XZZ key scenario uses): the hand-built record above is not a
+// recognised board, so opening it only showed the unsupported-file message and no key request.
+function encryptedXzzFixture() {
+  const vectors = JSON.parse(require('node:fs').readFileSync(require('node:path').resolve(__dirname, '../../tests/fuzz/corpus/xzz.json'), 'utf8'));
+  const vector = vectors.find((entry) => entry.kind === 'valid' && /^[0-9a-f]{16}$/i.test(entry.options?.xzzKey ?? ''));
+  if (!vector) throw new Error('synthetic XZZ corpus must include a valid encrypted vector');
+  return Buffer.from(vector.b64, 'base64');
+}
 function keyRequiredXzzFixture() {
   const mainLength = 5 + 64;
   const netAt = 0x30 + 4 + mainLength;
@@ -132,6 +142,17 @@ async function withVirtualReminderClock(page, action) {
 }
 
 async function testSkippableReminder(ctx, page) {
+  // The startup notice is still open when this scenario starts and would intercept the first board open click.
+  await ctx.dismissSupport();
+  // The reminder board opens on the real clock: a board load under the virtual clock never finished (step 41).
+  const reminderBoard = await ctx.registerFixture('support-reminder-owned-baseline.cad', Buffer.from(boardText()));
+  await ctx.openFiles([reminderBoard]);
+  await page.waitForFunction(() => /support-reminder-owned-baseline\.cad/i.test(document.querySelector('.project-subtitle')?.textContent || ''), null, { timeout: 20_000 });
+  // A freshly opened board may still be behind the Documents tab: show the Board tab before its canvas is expected.
+  await page.locator('[data-testid=tab-board]').click();
+  await page.locator('[data-testid=board-pane] canvas').first().waitFor({ state: 'visible', timeout: 20_000 });
+  // The startup notice can appear once the board is open: settle it before the reminder checks take over.
+  await ctx.dismissSupport();
   await withVirtualReminderClock(page, async (tick) => {
     await ctx.dismissSupport();
     await page.locator('[data-testid=support-button]').click();
@@ -158,10 +179,6 @@ async function testSkippableReminder(ctx, page) {
     await tick(HOURS);
     assert.equal(await page.locator('[data-testid=support-notice]').count(), 0, 'repeated timer activation cannot reopen a dismissed notice in the same hour');
 
-    const reminderBoard = await ctx.registerFixture('support-reminder-owned-baseline.cad', Buffer.from(boardText()));
-    await ctx.openFiles([reminderBoard]);
-    await page.waitForFunction(() => /support-reminder-owned-baseline\.cad/i.test(document.querySelector('.project-subtitle')?.textContent || ''), null, { timeout: 20_000 });
-    await page.locator('[data-testid=board-pane] canvas').waitFor({ state: 'visible', timeout: 20_000 });
     await page.locator('[data-testid=search-input]').fill('U1');
     await waitForCurrentBoardComponentRow(page, 'U1');
     await page.locator('[data-testid=search-input]').press('Enter');
@@ -178,7 +195,7 @@ async function testSkippableReminder(ctx, page) {
     await page.keyboard.press('Escape');
     await page.locator('[data-testid=support-notice]').waitFor({ state: 'detached', timeout: 10_000 });
 
-    const encryptedBoard = await ctx.registerFixture('support-reminder-key-required.xzz', keyRequiredXzzFixture());
+    const encryptedBoard = await ctx.registerFixture('support-reminder-key-required.pcb', encryptedXzzFixture());
     await ctx.openFiles([encryptedBoard]);
     await page.waitForSelector('[data-testid=key-dialog]', { timeout: 20_000 });
     await tick(3 * HOURS);
@@ -204,10 +221,14 @@ async function waitForCurrentBoardComponentRow(page, ref) {
 }
 
 async function testSuccessfulPackagedUpdate(ctx, page) {
+  // The installed app must report the package.json version, and the fixture must be strictly newer, or the update check is not exercised.
+  const installedVersion = await ctx.main(({ app: electronApp }) => electronApp.getVersion());
+  assert.equal(installedVersion, appVersion(), 'the packaged app reports the package.json version that builds it');
+  assert.equal(isNewerVersion(PACKAGED_UPDATE_RELEASE, installedVersion), true, 'the local feed fixture is strictly newer than the installed app');
   const stable = { tag_name: `v${PACKAGED_UPDATE_RELEASE}`, prerelease: false, draft: false, html_url: 'https://invalid.example/ignored' };
   const transport = await ctx.main(async (electronAPI, { body }) => {
-    require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
-    const { session } = require('electron');
+    if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
+    const { session } = electronAPI;
     const partition = session.fromPartition('trace-egress', { cache: false });
     const previousNow = Date.now;
     const offset = 60_000;
@@ -225,25 +246,23 @@ async function testSuccessfulPackagedUpdate(ctx, page) {
     const cachedReply = await page.evaluate(() => window.traceDesktop.checkForUpdates());
     assert.deepEqual(cachedReply, reply, 'an immediate second packaged IPC returns the cached successful answer');
     const cached = await ctx.main((electronAPI) => {
-      require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
+      if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
       return globalThis.__traceQaUpdateReplies || [];
     });
     assert.equal(cached.length, 1, 'the immediate second packaged IPC stays inside cooldown without another fetch');
     await page.evaluate(() => window.traceDesktop.openUpdatePage());
-    const external = await ctx.main((electronAPI) => {
-      require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
-      const { app } = require('electron');
-      const path = require('node:path');
-      const { RELEASE_PAGE_BASE } = require(path.join(app.getAppPath(), 'electron', 'updates.cjs'));
+    const external = await ctx.main((electronAPI, { releaseBase }) => {
+      if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
+      const RELEASE_PAGE_BASE = releaseBase;
       return {
       contextAvailable: Boolean(electronAPI),
       urls: globalThis.__traceQaExternalUrls || [],
       requests: globalThis.__traceQaUpdateReplies || [],
       releasePageBase: RELEASE_PAGE_BASE,
       };
-    });
+    }, { releaseBase: updates.RELEASE_PAGE_BASE });
     assert.equal(external.contextAvailable, true, 'the packaged main context is the first main-callback argument');
-    assert.equal(external.urls.at(-1), `${external.releasePageBase}v${PACKAGED_UPDATE_RELEASE}`, 'the validated tag opens only the fixed stable release page');
+    assert.equal(external.urls.at(-1), `${external.releasePageBase}v${PACKAGED_UPDATE_RELEASE}`, 'the local fixture tag opens only the fixed release page (the shell handoff is intercepted; no public release is contacted)');
     assert.equal(external.requests.at(-1)?.url, updates.RELEASES_API, 'the real packaged egress transport saw only its fixed API endpoint');
     assert.equal(external.requests.at(-1)?.method, 'GET');
     assert.equal(external.requests.at(-1)?.credentials, 'omit');
@@ -264,12 +283,13 @@ async function testSuccessfulPackagedUpdate(ctx, page) {
 
 async function installSyntheticReceiptService(ctx, fixture, { seed }) {
   return ctx.main(async (electronAPI, { fixture: value, seedValue }) => {
-    require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
-    const { app, ipcMain } = require('electron');
-    const path = require('node:path');
-    const fs = require('node:fs/promises');
-    const { createJsonStore } = require(path.join(app.getAppPath(), 'electron', 'store.cjs'));
-    const { createSupportService } = require(path.join(app.getAppPath(), 'electron', 'support.cjs'));
+    if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
+    const { app, ipcMain } = electronAPI;
+    const getBuiltin = process.getBuiltinModule || ((id) => process.mainModule.require(id));
+    const path = getBuiltin('path');
+    const fs = getBuiltin('fs/promises');
+    const { createJsonStore } = process.mainModule.require(path.join(app.getAppPath(), 'electron', 'store.cjs'));
+    const { createSupportService } = process.mainModule.require(path.join(app.getAppPath(), 'electron', 'support.cjs'));
     const store = createJsonStore({ directory: app.getPath('userData'), maxBytes: 8192, fs, trusted: true, t: key => key });
     const clock = { now: value.now };
     if (seedValue) await store.write('support-receipt.json', { claim: value.claim });
@@ -277,7 +297,7 @@ async function installSyntheticReceiptService(ctx, fixture, { seed }) {
       enabled: true, endpoint: 'https://synthetic-receipts.invalid', publicKey: value.publicKey,
     }, egress: () => ({ request: async () => ({ ok: true, status: 200, body: Buffer.from(JSON.stringify(value.receipt)) }) }) });
     if (seedValue) {
-      const receiptStatus = await service.check();
+      const receiptStatus = await service.check({ userAction: true });
       if (receiptStatus.status !== 'verified') throw new Error('Synthetic configured receipt did not verify in the packaged service.');
     }
     ipcMain.removeHandler('trace:get-support-status');
@@ -302,7 +322,7 @@ async function installSyntheticReceiptService(ctx, fixture, { seed }) {
 
 async function setSyntheticReceiptTime(ctx, now) {
   return ctx.main(async (electronAPI, { time }) => {
-    require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
+    if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
     const fixture = globalThis.__traceQaSyntheticReceipt;
     if (!fixture?.clock) throw new Error('Synthetic support receipt clock is not installed.');
     fixture.clock.now = time;
@@ -389,7 +409,7 @@ async function restoreExpiryRendererClock(page) {
 
 async function beginRendererStatusObservation(ctx) {
   return ctx.main(async (electronAPI) => {
-    require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
+    if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
     const observation = globalThis.__traceQaSyntheticReceipt?.rendererStatus;
     if (!observation) throw new Error('Synthetic support status instrumentation is not installed.');
     observation.requests.length = 0;
@@ -400,7 +420,7 @@ async function beginRendererStatusObservation(ctx) {
 
 async function awaitRendererInitialStatusReply(ctx) {
   return ctx.main(async (electronAPI) => {
-    require('node:assert/strict').ok(electronAPI, 'the packaged main context is the first main-callback argument');
+    if (!electronAPI) throw new Error('the packaged main context is the first main-callback argument');
     const observation = globalThis.__traceQaSyntheticReceipt?.rendererStatus;
     if (!observation) throw new Error('Synthetic support status instrumentation is not installed.');
     const started = Date.now();
@@ -418,11 +438,30 @@ async function awaitRendererInitialStatusReply(ctx) {
 }
 
 async function waitForCommittedSupportRender(page) {
-  await page.waitForFunction(() => {
-    const app = document.querySelector('[data-testid=app]');
-    const canvas = document.querySelector('[data-testid=board-pane] canvas');
-    return app && getComputedStyle(app).visibility !== 'hidden' && canvas;
-  }, null, { timeout: 20_000 });
+  // The same committed-render condition as before, polled here so that an exception inside the page predicate is recorded and
+  // reported instead of being hidden behind a generic waitForFunction timeout.
+  const deadline = Date.now() + 20_000;
+  let last = null;
+  for (;;) {
+    try {
+      last = await page.evaluate(() => {
+        const app = document.querySelector('[data-testid=app]');
+        const canvas = document.querySelector('[data-testid=board-pane] canvas');
+        // A reloaded app without a board shows the welcome screen instead of a board canvas.
+        // A restored board on the Documents tab has no canvas mounted: its loaded title in the project heading is the committed state.
+        // Only a board that really loaded counts: its heading is the board file name, then the component count (e.g. "Board.cad · 1 компонент").
+        const heading = (document.querySelector('.project-subtitle')?.textContent || '').trim();
+        const loadedBoard = /^\S[^·]*\.\w+\s·\s\d/.test(heading) ? heading : '';
+        const shown = canvas || document.querySelector('[data-testid=welcome]') || loadedBoard;
+        return { url: location.href, app: Boolean(app), visibility: app ? getComputedStyle(app).visibility : null, canvas: Boolean(canvas), welcome: Boolean(document.querySelector('[data-testid=welcome]')), ready: Boolean(app && getComputedStyle(app).visibility !== 'hidden' && shown) };
+      });
+      if (last.ready) break;
+    } catch (error) {
+      last = { predicateError: String(error && error.message || error).split(String.fromCharCode(10))[0].slice(0, 300) };
+    }
+    if (Date.now() > deadline) throw new Error(`The committed support render was not reached within 20000 ms; last observed state: ${JSON.stringify(last)}`);
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 

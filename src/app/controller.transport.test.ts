@@ -257,7 +257,7 @@ describe('quit-time *_CLOSING failures are silent', () => {
     h.desktop.pickDocuments = async () => { throw closing('DOCUMENT_CLOSING'); };
     h.desktop.exportWorkspace = async () => { throw closing('EXPORT_CLOSING'); };
     await h.controller.actions.attachDocuments();
-    await expect(h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: true, includeNotes: false })).resolves.toBeNull();
+    await expect(h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: true, includeNotes: false })).resolves.toBe('failed');
     h.desktop.failures.saveNotes = () => closing('STORE_CLOSING');
     await h.controller.actions.upsertNote({ componentId: 'r1' }, { text: 'quitting' });
     h.desktop.failures.saveWorkspace = () => closing('STORE_CLOSING');

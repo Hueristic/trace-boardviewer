@@ -39,6 +39,7 @@
  * synthetic fixtures only: the openly licensed real files available are flat designs.
  */
 import { boundText } from '../bounded-text';
+import { sourceBaseName, type SourcePlatform } from '../formats/source-name';
 import {
   SCHEMATIC_LIMITS,
   type SchBounds, type SchBus, type SchBusEntry, type SchDiagnostic, type SchField, type SchGraphic, type SchJunction, type SchLabel,
@@ -125,7 +126,7 @@ interface Loaded {
   symbolFiles: Map<number, string>;
 }
 
-const baseName = (path: string): string => path.split(/[\\/]/).pop() ?? path;
+const baseName = (path: string, platform?: SourcePlatform): string => sourceBaseName(path, platform);
 /** The key of a sheet (and the id of its definition) is its lower-case file name; a name without a file part (empty, or ending in a separator) still gives a non-empty id. */
 const keyOf = (path: string): string => baseName(path).toLowerCase() || 'schematic';
 const stemOf = (path: string): string => baseName(path).replace(/\.[^.]*$/, '') || 'schematic';
@@ -746,7 +747,7 @@ const SCOPE_AUTOMATIC = 0, SCOPE_HIERARCHICAL = 2, SCOPE_GLOBAL = 3;
 export const parseAltiumSch: SchematicParser = (input: SchematicInput): Schematic | null => {
   const data = input.data;
   if (data.length < 16) return null;
-  const primaryDoc = decodeSchematic(data, baseName(input.name));
+  const primaryDoc = decodeSchematic(data, baseName(input.name, input.platform));
   if (!primaryDoc) return null;
   return build(input, primaryDoc);
 };
@@ -754,7 +755,7 @@ export const parseAltiumSch: SchematicParser = (input: SchematicInput): Schemati
 function build(input: SchematicInput, primaryDoc: AltiumDocument): Schematic {
   const diag = new Diags();
   const companions = input.companions ?? {};
-  const primary: Loaded = { key: keyOf(input.name), file: baseName(input.name), stem: stemOf(input.name), doc: primaryDoc, symbolFiles: scanSymbolFiles(primaryDoc) };
+  const primary: Loaded = { key: keyOf(input.name), file: baseName(input.name, input.platform), stem: stemOf(input.name), doc: primaryDoc, symbolFiles: scanSymbolFiles(primaryDoc) };
   const loaded = new Map<string, Loaded>([[primary.key, primary]]);
   const failed = new Set<string>();
   const order: Loaded[] = [primary];

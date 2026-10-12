@@ -3,6 +3,10 @@ dist/
 release/
 release-linux/
 release-mac/
+# QA flavour outputs (config/electron-builder.qa*.yml): never published, never committed.
+release-qa/
+release-qa-linux/
+release-qa-mac/
 test-results/
 coverage/
 .fuzz/

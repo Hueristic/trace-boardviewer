@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Done",
   "diagnostic.bugStageUnknown": "Unknown",
   "diagnostic.bugCleanupTiming": "These limits assume normal scheduled cleanup; hosting outages may delay deletion.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bytes"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bytes",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} characters",
+  "diagnostic.bugDescriptionLimit": "The description can be at most {max} characters. Shorten it to review and send."
 }

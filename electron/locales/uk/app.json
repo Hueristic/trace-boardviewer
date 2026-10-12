@@ -8,14 +8,19 @@
   "header.settings": "Налаштування",
   "layout.workshop": "Майстерня",
   "layout.focus": "Фокус",
-
   "window.minimize": "Згорнути вікно",
   "window.restore": "Відновити вікно",
   "window.maximize": "Розгорнути вікно",
   "window.close": "Закрити застосунок",
-
   "status.fileInfo": "Інформація про файл",
   "status.shortcuts": "Комбінації клавіш",
+  "status.saved": "Збережено",
+  "status.saving": "Збереження…",
+  "status.unsaved": "Незбережені зміни",
+  "status.failed": "Не вдалося зберегти: {message}",
+  "status.notSaved": "Не збережено (режим браузера)",
+  "status.region": "Рядок стану",
+  "status.zoom": "Масштаб",
 
   "welcome.eyebrow": "З'ЄДНАННЯ, ПРИХОВАНІ В ПЛАТІ",
   "welcome.title1": "Зазирніть углиб.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Тут з'являтимуться відкриті вами плати.",
   "welcome.footerLocal": "Локальний робочий простір · працює офлайн",
   "welcome.shortcuts": "Комбінації клавіш",
-
   "toast.close": "Закрити сповіщення",
   "toast.settingsSaveFailed": "Не вдалося зберегти налаштування.",
   "toast.settingsReadFailed": "Не вдалося прочитати налаштування.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Не вдалося запустити застосунок.",
   "toast.importCancelled": "Відкриття файлу скасовано.",
   "toast.importStopped": "Відкриття файлу зупинено після {seconds} с без поступу. Файл може бути пошкоджений або надто складний.",
-
+  "toast.companionOnlineOnly": "Супровідний файл доступний лише онлайн. Відкрийте його або прикріпіть вручну.",
+  "toast.companionOnlineOnlyNames": "Супровідні файли, яких стосується: {names}.",
+  "toast.noSandboxRevokeFailed": "Не вдалося змінити налаштування.",
   "loading.processing": "Обробка плати…",
   "loading.reading": "Читання файлу…",
   "loading.hint": "Ще мить — і картина складеться.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Цей файл обробляється надто довго. Можна зачекати або скасувати.",
   "loading.cancel": "Скасувати",
   "drop.title": "Відпустіть плату",
-  "fileInput.aria": "Файл boardview"
+  "fileInput.aria": "Файл boardview",
+  "toast.componentMissing": "Цього компонента немає на цій платі.",
+  "toast.documentsAfterBoard": "Документи, перетягнуті разом із платою, буде прикріплено після її відкриття. Перетягніть їх тоді ще раз.",
+  "toast.attachedOne": "Прикріплено «{name}».",
+  "toast.attachedMany": "Прикріплено документів: {count}.",
+
+  "config.locked": "Налаштування не можна прочитати, бо файл заблоковано іншою програмою; їх не буде перезаписано.",
+  "config.readOnly": "Файл налаштувань лише для читання: зміни діють лише для цього сеансу, а файл не замінюється.",
+  "config.unreadable": "Файл налаштувань пошкоджено або його записала інша версія: програма запустилася з типовими налаштуваннями; старий файл зберігається до першого збереження."
 }

@@ -41,6 +41,12 @@ export const note = (message: string): ParseIssue => ({ key: 'parse.warning.form
 /** "1 track" / "2 tracks" (an irregular plural is given). */
 export const quantity = (count: number, singular: string, plural = `${singular}s`): string => `${count} ${count === 1 ? singular : plural}`;
 export const normalizeAngle = (degrees: number): number => { const value = ((degrees % 360) + 360) % 360; return value === 0 ? 0 : value; };
+/**
+ * The turn that places a part's footprint on the board. A top part is turned by its angle. A bottom part is flipped and turned by its angle plus 180
+ * degrees (normalised to 0..360): mirrored in x and turned by that, which is the same as mirrored in y and turned by the angle. Real EasyEDA Pro files
+ * agree with this at 0, 90, 180 and 270 degrees (see easyeda-pro.ts).
+ */
+export const turnOf = (theta: number, bottom: boolean): number => (bottom ? normalizeAngle(theta + 180) : theta);
 
 /** A finite number of source units from a JSON value (number or plain decimal text), within the supported magnitude. */
 export function numeric(value: unknown, label: string, format: string): number {

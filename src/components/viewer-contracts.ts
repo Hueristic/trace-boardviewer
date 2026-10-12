@@ -10,7 +10,7 @@ import type { SchematicDesign } from '../lib/schematic/model';
  *
  * Document space: PDF = points at scale 1, origin top-left of the UNROTATED page, Y down (src/lib/pdf/document.ts);
  * image = source pixels, origin top-left; schematic = millimetres of the sheet definition (model.ts, Y down).
- * UI texts are English constants inside each component marked `// i18n: pending` (catalogs are frozen this phase).
+ * UI texts are English constants inside each component marked `// i18n: pending` (the texts are not in the catalogs yet).
  */
 export type ViewerRotation = 0 | 90 | 180 | 270;
 export interface ViewerCamera {

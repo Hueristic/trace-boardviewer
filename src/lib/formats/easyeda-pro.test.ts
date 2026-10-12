@@ -87,6 +87,11 @@ describe('EasyEDA Pro: recognition', () => {
     expect(sniffEasyedaPro(sqlite('CREATE TABLE "projects" ("cbb_project" integer)'))).toMatchObject({ variant: 'eprj-sqlite' });
     expect(sniffEasyedaPro(sqlite('CREATE TABLE notes (a, b)'))).toBeNull();
   });
+  it('recognizes a V3 log whose DOCHEAD object carries more fields than the type (a ticket number, as real V3 logs write)', () => {
+    const v3 = '{"type":"DOCHEAD","ticket":4439}||{"docType":"PCB","uuid":"synthetic"}|\n{"type":"CANVAS","ticket":1,"id":"CANVAS"}||{}|\n';
+    expect(sniffEasyedaPro(strToU8(v3), 'log.epru')).toMatchObject({ variant: 'log-v3', kind: 'unsupported', confidence: 0.9 });
+    expectFailure(() => parse(v3, 'log.epru'), 'UNSUPPORTED_VARIANT', /V3/);
+  });
   it('returns null for everything that is not EasyEDA Pro', () => {
     for (const text of ['', ' ', '{}', '[]', '["PCB"]', '[["DOCTYPE","PCB"]]', '(kicad_pcb (version 20240108))', '{"head":{"docType":"3"},"shape":["TRACK~1~10"]}', 'x'.repeat(50)]) expect(sniffEasyedaPro(strToU8(text)), text).toBeNull();
     expect(sniffEasyedaPro(new Uint8Array(0))).toBeNull();
@@ -100,7 +105,7 @@ describe('EasyEDA Pro: recognition', () => {
     expect(sniffEasyedaPro(strToU8(JSON.stringify({ head: { docType: '3' }, canvas: 'CA~1', shape: ['TRACK~1~10~~1 1 2 2~g'] })))).toBeNull();
   });
   it('declares its registry facts', () => {
-    expect(EASYEDA_PRO_INFO).toMatchObject({ id: 'easyeda-pro', status: 'supported', validation: 'real-files', electrical: 'nets', extensions: ['.epro', '.epcb', '.zip'] });
+    expect(EASYEDA_PRO_INFO).toMatchObject({ id: 'easyeda-pro', status: 'supported', validation: 'real-files', electrical: 'nets', extensions: ['.epro', '.epro2', '.epcb', '.zip'] });
     expect(EASYEDA_PRO_INFO.notes.join(' ')).toMatch(/unverified/);
   });
   it('rejects, with a reason, what it recognizes but cannot read, and returns null for what is not a board', () => {
@@ -146,11 +151,11 @@ describe('EasyEDA Pro: project archive fixture', () => {
     expect(pinOf(board, 'Q1', '1').x).toBeCloseTo(51.7525, 9); expect(pinOf(board, 'Q1', '1').y).toBeCloseTo(26.3398, 9);
     expect(pinOf(board, 'Q1', '3').x).toBeCloseTo(49.8475, 9); expect(pinOf(board, 'Q1', '3').rotation).toBe(270); // part 180 + pad angle 90
   });
-  it('mirrors a bottom part in x before rotating it, puts its pads on the bottom and says the convention is unverified', () => {
+  it('places a 90-degree bottom part by the EasyEDA rule (mirrored in y, turned by 90), puts its pads on the bottom and says real files confirm this angle', () => {
     const half = 27.56 * MIL;
-    expect(pinOf(board, 'C1', '1').side).toBe('bottom'); expect(pinOf(board, 'C1', '1').x).toBeCloseTo(30.48, 9); expect(pinOf(board, 'C1', '1').y).toBeCloseTo(38.1 + half, 9);
-    expect(pinOf(board, 'C1', '2').y).toBeCloseTo(38.1 - half, 9); expect(pinOf(board, 'C1', '1').rotation).toBe(270);
-    expect(notes(board).some(text => /1 bottom-side component is placed mirrored and rotated by the usual convention/.test(text))).toBe(true);
+    expect(pinOf(board, 'C1', '1').side).toBe('bottom'); expect(pinOf(board, 'C1', '1').x).toBeCloseTo(30.48, 9); expect(pinOf(board, 'C1', '1').y).toBeCloseTo(38.1 - half, 9);
+    expect(pinOf(board, 'C1', '2').y).toBeCloseTo(38.1 + half, 9); expect(pinOf(board, 'C1', '1').rotation).toBe(90);
+    expect(notes(board).some(text => /1 bottom-side component is placed mirrored; real EasyEDA Pro files confirm this placement/.test(text))).toBe(true);
   });
   it('reads pad shapes: rect, square, round, oval and n-gon as bounding shapes, polygon pads by their box, and both-sides for MULTI pads', () => {
     expect(pinOf(board, 'J1', '1')).toMatchObject({ shape: 'square', side: 'both' }); expect(pinOf(board, 'J1', '1').width).toBeCloseTo(60 * MIL, 9);
@@ -190,11 +195,63 @@ describe('EasyEDA Pro: placement, sides and rotation', () => {
       expect(board.components[0].rotation).toBe(((angle % 360) + 360) % 360);
     }
   });
-  it('mirrors a bottom part in x before the rotation and turns the pad angle with it', () => {
-    for (const angle of [0, 90, 180, 270, 33]) {
-      const board = at(2, angle), [dx, dy] = rotate(-30, 10, angle), pin = pinOf(board, 'U1', '1');
+  it('places every bottom part by the one EasyEDA rule, mirrored in y and turned by its angle, at any angle (0, 33, 90, 180, 270, 540 and -90 are checked)', () => {
+    for (const angle of [0, 33, 90, 180, 270, 540, -90]) {
+      const board = at(2, angle), [dx, dy] = rotate(-30, 10, angle + 180), pin = pinOf(board, 'U1', '1');
       expect(pin.x, `${angle}`).toBeCloseTo((1000 + dx) * MIL, 9); expect(pin.y, `${angle}`).toBeCloseTo((800 + dy) * MIL, 9);
-      expect(pin.side).toBe('bottom'); expect(board.components[0].side).toBe('bottom'); expect(pin.rotation).toBeCloseTo(((angle + 180) % 360 + 360) % 360, 9);
+      expect(pin.side).toBe('bottom'); expect(board.components[0].side).toBe('bottom'); expect(pin.rotation, `${angle}`).toBeCloseTo(((angle % 360) + 360) % 360, 9);
+    }
+  });
+  it('turns a bottom part of exactly 180 degrees by 0, the placement one real file confirmed: mirrored in x only, pad angle 180 minus its own', () => {
+    for (const angle of [180, 540]) { // 540 is the same orientation with a whole extra turn; it is normalised before the check
+      const board = at(2, angle), pin = pinOf(board, 'U1', '1');
+      expect(pin.x, `${angle}`).toBeCloseTo((1000 - 30) * MIL, 9); expect(pin.y, `${angle}`).toBeCloseTo((800 + 10) * MIL, 9);
+      expect(pin.rotation, `${angle}`).toBeCloseTo(180, 9);
+    }
+  });
+  it('places the pads of a 180-degree bottom part where their own nets end: two point-symmetric pads, one net each, copper on the bottom layer', () => {
+    // Synthetic structure of a real two-pad bottom part turned 180 degrees (no bytes or names from any real file): the pads sit point-symmetric about the
+    // part origin, and each net's track on the bottom layer ends on its own pad centre. The previous placement put each pad at the other pad's position.
+    const fp = footprintText([padRecord('e1', '1', 30, 10, ['RECT', 40, 20, 0]), padRecord('e2', '2', -30, -10, ['RECT', 40, 20, 0])]);
+    const tracks: unknown[][] = [['LINE', 'ta', 0, 'N1', 2, 970, 810, 900, 810, 10, 0], ['LINE', 'tb', 0, 'N2', 2, 1030, 790, 1100, 790, 10, 0]];
+    const board = parse(epro([...outlineLines(0, 0, 2000, 2000), ...component('c', 2, 1000, 800, 180, { Footprint: FP_UUID, Designator: 'C1' }, [['1', 'N1', 'e1'], ['2', 'N2', 'e2']]), ...tracks], { footprints: { [FP_UUID]: fp } }));
+    expect(pinOf(board, 'C1', '1')).toMatchObject({ net: 'N1', side: 'bottom' }); expect(pinOf(board, 'C1', '1').x).toBeCloseTo(970 * MIL, 9); expect(pinOf(board, 'C1', '1').y).toBeCloseTo(810 * MIL, 9);
+    expect(pinOf(board, 'C1', '2')).toMatchObject({ net: 'N2', side: 'bottom' }); expect(pinOf(board, 'C1', '2').x).toBeCloseTo(1030 * MIL, 9); expect(pinOf(board, 'C1', '2').y).toBeCloseTo(790 * MIL, 9);
+  });
+  it('turns a bottom part of exactly 0 degrees by 180, the placement real vendor files confirmed: mirrored in y only, so pad 1 at (30, 10) lands at (30, -10)', () => {
+    for (const angle of [0, 360]) { // 360 is the same orientation with a whole extra turn; it is normalised before the check
+      const board = at(2, angle), pin = pinOf(board, 'U1', '1');
+      expect(pin.x, `${angle}`).toBeCloseTo((1000 + 30) * MIL, 9); expect(pin.y, `${angle}`).toBeCloseTo((800 - 10) * MIL, 9);
+      expect(pin.rotation, `${angle}`).toBeCloseTo(0, 9); // 180 minus the pad's own angle (0), plus the turn of 180
+    }
+  });
+  it('places the pads of a 0-degree bottom part where their own nets end: two pads on the part axis, one net each, copper on the bottom layer', () => {
+    // Synthetic structure of a two-pad bottom chip turned 0 degrees (no bytes or names from any real file): the pads sit on the x axis of the part, one on
+    // each side, and each net's track on the bottom layer ends on its own pad centre. The previous placement (mirror in x) put each pad at the other pad's position.
+    const fp = footprintText([padRecord('e1', '1', -30, 0, ['RECT', 40, 20, 0], { angle: 30 }), padRecord('e2', '2', 30, 0, ['RECT', 40, 20, 0])]);
+    const tracks: unknown[][] = [['LINE', 'ta', 0, 'N1', 2, 970, 800, 900, 800, 10, 0], ['LINE', 'tb', 0, 'N2', 2, 1030, 800, 1100, 800, 10, 0]];
+    const board = parse(epro([...outlineLines(0, 0, 2000, 2000), ...component('c', 2, 1000, 800, 0, { Footprint: FP_UUID, Designator: 'C1' }, [['1', 'N1', 'e1'], ['2', 'N2', 'e2']]), ...tracks], { footprints: { [FP_UUID]: fp } }));
+    expect(pinOf(board, 'C1', '1')).toMatchObject({ net: 'N1', side: 'bottom' }); expect(pinOf(board, 'C1', '1').x).toBeCloseTo(970 * MIL, 9); expect(pinOf(board, 'C1', '1').y).toBeCloseTo(800 * MIL, 9);
+    expect(pinOf(board, 'C1', '1').rotation).toBeCloseTo(330, 9); // 180 minus the pad's own angle (30), plus the turn of 180
+    expect(pinOf(board, 'C1', '2')).toMatchObject({ net: 'N2', side: 'bottom' }); expect(pinOf(board, 'C1', '2').x).toBeCloseTo(1030 * MIL, 9); expect(pinOf(board, 'C1', '2').y).toBeCloseTo(800 * MIL, 9);
+  });
+  it('places a bottom part at 0, 90, 180 and 270 degrees where its own nets end, by the one EasyEDA rule (synthetic: two pads on the part axis, pad 1 turned 30 degrees, one net per pad)', () => {
+    // Synthetic two-pad bottom chip (no bytes or names from any real file): the pads sit on the x axis of the part, one on each side, and each net's track
+    // on the bottom layer ends on its own pad centre. The expected centres follow the rule: mirrored in y, then turned by the angle (origin 1000, 800 mil).
+    const fp = footprintText([padRecord('e1', '1', -30, 0, ['RECT', 40, 20, 0], { angle: 30 }), padRecord('e2', '2', 30, 0, ['RECT', 40, 20, 0])]);
+    const cases: Array<[number, number, number, number, number, number, number]> = [ // angle, pad 1 x, y, pad 2 x, y, pad 1 rotation, pad 2 rotation (mil, degrees)
+      [0, 970, 800, 1030, 800, 330, 0],
+      [90, 1000, 770, 1000, 830, 60, 90],
+      [180, 1030, 800, 970, 800, 150, 180],
+      [270, 1000, 830, 1000, 770, 240, 270],
+    ];
+    for (const [angle, x1, y1, x2, y2, r1, r2] of cases) {
+      const tracks: unknown[][] = [['LINE', 'ta', 0, 'N1', 2, x1, y1, x1 - 60, y1, 10, 0], ['LINE', 'tb', 0, 'N2', 2, x2, y2, x2 + 60, y2, 10, 0]];
+      const board = parse(epro([...outlineLines(0, 0, 2000, 2000), ...component('c', 2, 1000, 800, angle, { Footprint: FP_UUID, Designator: 'C1' }, [['1', 'N1', 'e1'], ['2', 'N2', 'e2']]), ...tracks], { footprints: { [FP_UUID]: fp } }));
+      expect(pinOf(board, 'C1', '1'), `${angle}`).toMatchObject({ net: 'N1', side: 'bottom' });
+      expect(pinOf(board, 'C1', '1').x, `${angle}`).toBeCloseTo(x1 * MIL, 9); expect(pinOf(board, 'C1', '1').y, `${angle}`).toBeCloseTo(y1 * MIL, 9); expect(pinOf(board, 'C1', '1').rotation, `${angle}`).toBeCloseTo(r1, 9);
+      expect(pinOf(board, 'C1', '2'), `${angle}`).toMatchObject({ net: 'N2', side: 'bottom' });
+      expect(pinOf(board, 'C1', '2').x, `${angle}`).toBeCloseTo(x2 * MIL, 9); expect(pinOf(board, 'C1', '2').y, `${angle}`).toBeCloseTo(y2 * MIL, 9); expect(pinOf(board, 'C1', '2').rotation, `${angle}`).toBeCloseTo(r2, 9);
     }
   });
   it('keeps a pad of a top component on the top, MULTI on both, and flips a TOP pad of a bottom component to the bottom', () => {
@@ -203,7 +260,7 @@ describe('EasyEDA Pro: placement, sides and rotation', () => {
     const board = parse(epro(recs, { footprints: { [FP_UUID]: fp } }));
     expect(['1', '2', '3'].map(n => pinOf(board, 'T1', n).side)).toEqual(['both', 'top', 'bottom']);
     expect(['1', '2', '3'].map(n => pinOf(board, 'B1', n).side)).toEqual(['both', 'bottom', 'top']);
-    expect(pinOf(board, 'B1', '2').x).toBeCloseTo((1500 - 50) * MIL, 9);
+    expect(pinOf(board, 'B1', '2').x).toBeCloseTo((1500 + 50) * MIL, 9); // a bottom part turned by 0 is mirrored in y, so its pads keep their x
   });
   it('uses a hole-only pad (no copper shape) at the hole size', () => {
     const fp = footprintText([padRecord('e1', '1', 0, 0, null, { layer: 12, hole: ['ROUND', 32, 32] })]);

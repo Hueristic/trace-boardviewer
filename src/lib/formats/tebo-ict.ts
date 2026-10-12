@@ -1,5 +1,6 @@
 /** Original bounded reader for the validated Tebo-ict v3.0 BOARD / BOARD_XY export pair. */
 import type { Board, Point } from '../types';
+import { sourceBaseName, sourceSegments, type SourcePlatform } from './source-name';
 import { BoardFormatError, buildBoard, decodeText, MAX_IMPORT_BYTES, note, number, type ParseInput, type RawPart, type RawPin } from './common';
 
 export const TEBO_ICT_FORMAT = 'Tebo ICT companion pair';
@@ -7,7 +8,7 @@ const MAGIC = '!Tebo-ict v3.0';
 const DECIMAL = '[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?';
 const XY = new RegExp(`^(${DECIMAL})\\s*,\\s*(${DECIMAL})\\s*(;)?$`);
 const PAD = new RegExp(`^(${DECIMAL})\\s*,\\s*(${DECIMAL})\\s+(\\S+)\\s+(?:(TOP)\\s+)?(NO_PROBE|MANDATORY)\\s*;$`);
-const baseName = (name: string): string => name.split(/[\\/]/).pop()?.toLowerCase() ?? '';
+const baseName = (name: string, platform?: SourcePlatform): string => sourceBaseName(name, platform).toLowerCase();
 function reject(message: string, code: 'INVALID_FORMAT' | 'LIMIT_EXCEEDED' | 'UNSUPPORTED_VARIANT' | 'COMPANIONS_REQUIRED' = 'INVALID_FORMAT'): never {
   throw new BoardFormatError(`Tebo ICT: ${message}`, code, TEBO_ICT_FORMAT);
 }
@@ -115,7 +116,7 @@ export function readTeboIctProgram(data: Uint8Array): TeboIctProgram {
 /** Select only the known same-directory roles, rejecting conflicting case/path duplicates. */
 function companion(input: ParseInput, names: readonly string[]): Uint8Array | undefined {
   let found: Uint8Array | undefined;
-  for (const [name, data] of Object.entries(input.companions ?? {})) if (names.includes(baseName(name))) {
+  for (const [name, data] of Object.entries(input.companions ?? {})) if (names.includes(baseName(name, input.platform))) {
     if (!(data instanceof Uint8Array)) reject('a companion must be a byte array.');
     if (found && (found.length !== data.length || found.some((byte, at) => byte !== data[at]))) reject('conflicting copies of a companion role.'); found = data;
   }
@@ -142,7 +143,7 @@ export function parseTeboIct(input: ParseInput): Board | null {
   const warnings = [note('The paired export supplies electrical pin points and an outline. Physical pad dimensions, component bodies, values, packages and copper traces are not imported.'),
     note('Explicit BOTTOM device declarations set component sides. Other component sides follow their physical pins; mixed pin sides are shown on both sides. TOP pin access is explicit; omitted TOP uses the HP3070 bottom-access convention. Coordinates remain Y-up and are not mirrored.')];
   if (noProbe || geometry.noAccess) warnings.push(note(`${noProbe} NO_PROBE pin annotations and ${geometry.noAccess} NO_ACCESS node annotations were checked. Electrical points are retained; probe availability is not modeled.`));
-  const folders = input.name.split(/[\\/]/); folders.pop(); const folder = folders.pop();
+  const folders = sourceSegments(input.name, input.platform); folders.pop(); const folder = folders.pop();
   const pairedName = folder && !/^[A-Za-z]:$/.test(folder) ? `${folder}.ict` : 'board.ict';
   // A complete pair has the same visible model and name whichever role the user selects.
   return buildBoard({ ...input, name: pairedName }, { format: TEBO_ICT_FORMAT, parts: [...parts.values()], pins, outline: geometry.outline, unitsToMm: 25.4, warnings });

@@ -4,8 +4,12 @@
 // configQueue/notesQueue and the before-quit drain of main.cjs; B01).
 //
 //  - One FIFO queue per store: writes and updates run strictly in submission order.
-//  - Every write is atomic: unique temporary file (mode 0o600, flag 'wx') + rename; a failed
-//    write removes its temporary file and reports native.error.dataSaveFailed to its caller only.
+//  - Every write is atomic: unique temporary file (mode 0o600, flag 'wx'), synced to the disk before
+//    the rename (MLX-03-05), then renamed over the target and the directory synced (POSIX, best effort).
+//    A failed write removes its temporary file and reports native.error.dataSaveFailed to its caller only.
+//    On Windows the mode is not applied: the files take the ACL that the profile directory passes on.
+//  - At start (the first queued operation) the temporary files a killed write left behind are removed
+//    (MLX-03-12) once the process that wrote them is gone or they are a day old; a temporary of this process is kept. See sweepTemporaries.
 //  - beginShutdown() flips the store to "closing" synchronously and then drains the queue, so a
 //    write submitted after shutdown began is rejected immediately (code STORE_CLOSING) while every
 //    write accepted before that moment completes before the returned promise resolves.
@@ -173,6 +177,58 @@ async function renameWithRetry(fs, from, to, delaysMs = RENAME_RETRY_DELAYS_MS) 
   }
 }
 
+// Creates the temporary file with its content and syncs it before it is renamed (MLX-03-05): without the sync a power cut can leave the
+// renamed file empty or stale. Same pattern as egress.cjs. A failure closes the handle and throws; the caller removes the file.
+// macOS limit: fsync there does not flush the drive's own cache, and this Node version has no F_FULLFSYNC, so a power cut can still lose
+// a write on macOS. The sync narrows that window; it does not close it.
+async function writeDurably(fs, temporary, body) {
+  const handle = await fs.open(temporary, 'wx', 0o600);
+  try {
+    await handle.writeFile(body, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+// Syncs a directory after a rename so that the new name survives a crash (POSIX; Windows cannot open a directory for sync, so it is skipped).
+// Best effort on purpose: the file is already in place when this runs, and a failure reported as a failed save would leave the caller's memory
+// and the disk apart. EPERM, EISDIR and EINVAL are what some file systems answer to a directory sync; every other failure is ignored the same way.
+async function syncDirectory(fs, directory) {
+  if (process.platform === 'win32') return;
+  let handle = null;
+  try {
+    handle = await fs.open(directory, 'r');
+    await handle.sync();
+  } catch { /* see above */ } finally {
+    if (handle) await handle.close().catch(() => {});
+  }
+}
+
+// The temporary name a writer gives a file: `<name>.<pid>.<uuid>.tmp`, the uuid with dashes (this store, repair-store.cjs, the zip export) or
+// without them (the device and corrections writers of the library). Only this shape is ever swept (MLX-03-12).
+const TEMPORARY_NAME = /^[A-Za-z0-9._-]+\.(\d+)\.(?:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{32})\.tmp$/;
+
+// True when the process that wrote a temporary no longer runs (ESRCH). A process that runs under another user answers EPERM and counts
+// as running. A temporary older than a day is stale whatever its process does (a reused PID, or a write that never finished).
+const STALE_TEMPORARY_MS = 24 * 60 * 60 * 1000;
+function processGone(pid) {
+  try { process.kill(pid, 0); return false; }
+  catch (error) { return error.code === 'ESRCH'; }
+}
+
+// Removes the temporaries of one folder that a killed write left behind (regular files of the shape above only): the writer is gone, or the
+// file is older than a day. A temporary of this process is kept. Used by the store's start sweep and by the other writers of the profile.
+async function sweepTemporaryFolder(fs, folder) {
+  for (const entry of await fs.readdir(folder, { withFileTypes: true }).catch(() => [])) {
+    const match = TEMPORARY_NAME.exec(entry.name);
+    if (!match || !entry.isFile() || Number(match[1]) === process.pid) continue;
+    const file = path.join(folder, entry.name);
+    const stale = processGone(Number(match[1])) || Date.now() - (await fs.stat(file).catch(() => ({ mtimeMs: Date.now() }))).mtimeMs > STALE_TEMPORARY_MS;
+    if (stale) await fs.unlink(file).catch(() => {});
+  }
+}
+
 function serialize(value, maxBytes, t) {
   const text = JSON.stringify(value, null, 2);
   if (typeof text !== 'string') throw storeError('The value cannot be stored as JSON.', 'STORE_NOT_SERIALIZABLE'); // i18n: pending
@@ -186,8 +242,14 @@ function createJsonStore(options) {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw storeError('maxBytes must be a positive integer.', 'STORE_INVALID_OPTIONS'); // i18n: pending
   const renameDelays = retrySchedule(options && options.renameRetryDelaysMs);
   const directory = localAbsolutePath(options && options.directory, t, Boolean(options && options.trusted));
+  // Folders of the profile, outside the store's own, whose temporaries the start sweep also removes (the library's device folder). Only absolute
+  // paths: a relative one is not swept, rather than resolved against the working directory.
+  const temporaryFolders = Object.freeze(((options && options.temporaryFolders) || []).filter((folder) => typeof folder === 'string' && path.isAbsolute(folder)));
   let queue = Promise.resolve();
   let closing = false;
+  let accepted = 0; // accepted operations that have not settled
+  const writing = new Set(); // file names whose atomic write is in progress
+  queue = sweepTemporaries(); // The first queued operation: nothing else of this store runs before it (see sweepTemporaries).
 
   const root = directory.endsWith(path.sep) ? directory : `${directory}${path.sep}`;
   function filenameOf(name) {
@@ -245,16 +307,36 @@ function createJsonStore(options) {
   }
 
   async function atomicWrite(filename, body) {
+    writing.add(filename);
+    try { await atomicWriteOnce(filename, body); } finally { writing.delete(filename); }
+  }
+
+  async function atomicWriteOnce(filename, body) {
     await readersIdle(filename); // Never rename over a file this store still has open (W-win-lifecycle-01).
     const temporary = `${filename}.${process.pid}.${randomUUID()}.tmp`;
     try {
       await fs.mkdir(path.dirname(filename), { recursive: true });
-      await fs.writeFile(temporary, body, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+      await writeDurably(fs, temporary, body);
       await renameWithRetry(fs, temporary, filename, renameDelays);
     } catch (error) {
       await fs.unlink(temporary).catch(() => {});
       throw storeError(t('native.error.dataSaveFailed'), 'STORE_WRITE_FAILED', error);
     }
+    await syncDirectory(fs, path.dirname(filename));
+  }
+
+  // Start-up sweep (MLX-03-12). It is the first queued operation, so no read or write of this store runs before it has finished. The profile
+  // directory and its immediate sub-directories (notes/, workspaces/, readings/), and the temporaryFolders given to the store, are searched
+  // (sweepTemporaryFolder: the temporary name above, regular files only, removed when its writer is gone or it is older than a day).
+  // Never rejects: the queue continues after it whatever happens, and a sweep that cannot finish is simply tried again at the next start.
+  async function sweepTemporaries() {
+    try {
+      const folders = [directory];
+      for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+        if (entry.isDirectory()) folders.push(path.join(directory, entry.name));
+      }
+      for (const folder of [...folders, ...temporaryFolders]) await sweepTemporaryFolder(fs, folder);
+    } catch { /* No profile directory yet (nothing was written) or it cannot be listed: nothing to sweep. */ }
   }
 
   // A write that replaces data of an older shape can keep the old file first: inside the same queue slot, `keep.when(current)` decides on the
@@ -270,12 +352,38 @@ function createJsonStore(options) {
     await atomicWrite(copy, serialize(current, limit, t));
   }
 
+  // Numbered copies (U-02): the old file becomes copy 1 (the newest); copies 1..count-1 each move up one number and the oldest (count) is dropped.
+  // Nothing moves when `when` does not hold, or when copy 1 already holds the same content (a repeated conversion keeps no duplicate). An
+  // unreadable copy 1 counts as different, so the old content is still kept (no data is lost to a damaged copy).
+  async function keepRotated(filename, rotate, limit) {
+    let current;
+    try { current = await readFile(filename, limit); } catch { return; }
+    if (current === MISSING || !rotate.when(current)) return;
+    const newest = filenameOf(rotate.name(1));
+    let same = false;
+    try { const latest = await readFile(newest, limit); same = latest !== MISSING && JSON.stringify(latest) === JSON.stringify(current); } catch { same = false; }
+    if (same) return;
+    await removeIfExists(filenameOf(rotate.name(rotate.count)));
+    for (let index = rotate.count - 1; index >= 1; index--) await moveIfExists(filenameOf(rotate.name(index)), filenameOf(rotate.name(index + 1)));
+    await atomicWrite(newest, serialize(current, limit, t));
+  }
+  async function removeIfExists(target) {
+    await readersIdle(target);
+    try { await fs.unlink(target); } catch (error) { if (!error || error.code !== 'ENOENT') throw storeError(t('native.error.dataSaveFailed'), 'STORE_WRITE_FAILED', error); }
+  }
+  async function moveIfExists(from, to) {
+    await readersIdle(from);
+    try { await renameWithRetry(fs, from, to, renameDelays); } catch (error) { if (!error || error.code !== 'ENOENT') throw storeError(t('native.error.dataSaveFailed'), 'STORE_WRITE_FAILED', error); }
+  }
+
   // Appends an operation to the FIFO queue. The queue tail never rejects, so one failed write
   // cannot block or fail the writes behind it; the failure reaches the operation's own caller.
   function enqueue(operation) {
     if (closing) return Promise.reject(storeError('The data store is shutting down; the write was not accepted.', 'STORE_CLOSING')); // i18n: pending
     const result = queue.then(operation);
     queue = result.then(() => undefined, () => undefined);
+    accepted += 1; // counted until it settles: what a quit that cannot wait longer leaves unfinished (unfinished())
+    result.then(() => { accepted -= 1; }, () => { accepted -= 1; });
     return result;
   }
 
@@ -299,15 +407,22 @@ function createJsonStore(options) {
       return readOptions && Object.hasOwn(readOptions, 'missing') ? readOptions.missing : null;
     },
     // Serializes and size-checks synchronously (before queuing), then writes atomically in order. `options.keepFirst` ({ name, when(current) }) keeps
-    // the old file under another name first, see keepCopy.
+    // the old file under another name first, see keepCopy. `options.keepRotated` ({ name(index), count, when(current) }) keeps it as numbered copies
+    // instead, see keepRotated.
     write(name, value, writeOptions) {
       let filename, body, limit;
       const keep = writeOptions && writeOptions.keepFirst;
+      const rotate = writeOptions && writeOptions.keepRotated;
       try {
         filename = filenameOf(name); limit = limitOf(writeOptions); body = serialize(value, limit, t);
         if (keep && (typeof keep.when !== 'function' || filenameOf(keep.name) === filename)) throw storeError('keepFirst needs a predicate and another name.', 'STORE_INVALID_OPTIONS'); // i18n: pending
+        if (rotate && (typeof rotate.when !== 'function' || typeof rotate.name !== 'function' || !Number.isSafeInteger(rotate.count) || rotate.count < 1)) throw storeError('keepRotated needs a name function, a count and a predicate.', 'STORE_INVALID_OPTIONS');
       } catch (error) { return Promise.reject(error); }
-      return enqueue(async () => { if (keep) await keepCopy(filename, keep, limit); await atomicWrite(filename, body); });
+      return enqueue(async () => {
+        if (keep) await keepCopy(filename, keep, limit);
+        if (rotate) await keepRotated(filename, rotate, limit);
+        await atomicWrite(filename, body);
+      });
     },
     // Read-modify-write inside the queue: the updater receives the committed value (null when the
     // entry does not exist) after every earlier operation has settled, and its result is written.
@@ -342,6 +457,8 @@ function createJsonStore(options) {
         return next;
       });
     },
+    // What is still unfinished: the operations accepted and not settled, and the files whose atomic write is in progress (quit.log).
+    unfinished() { return { queued: accepted, writing: [...writing] }; },
     // Resolves once every operation accepted before this call has settled; never rejects.
     flush() { return queue.then(() => undefined); },
     // Marks the store closing (further writes are rejected) and drains the accepted ones.
@@ -350,5 +467,6 @@ function createJsonStore(options) {
 }
 
 module.exports = Object.freeze({
-  DEFAULT_MAX_BYTES, READ_CHUNK_BYTES, RENAME_RETRY_DELAYS_MS, createJsonStore, createByteBudget, localAbsolutePath, hasStreamSeparator, validateName, readBounded, renameWithRetry, storeError,
+  DEFAULT_MAX_BYTES, READ_CHUNK_BYTES, RENAME_RETRY_DELAYS_MS, STALE_TEMPORARY_MS, createJsonStore, createByteBudget, localAbsolutePath, hasStreamSeparator, validateName, readBounded, renameWithRetry, storeError,
+  processGone, sweepTemporaryFolder,
 });

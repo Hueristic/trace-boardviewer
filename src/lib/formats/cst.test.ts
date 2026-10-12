@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { BoardFormatError } from './common';
 import { parseCst } from './cst';
+import { formatIssue } from '../i18n';
 
 interface CstOptions { layer?: number; pins?: Array<[part: number, net: number, x: number, y: number]>; partCount?: number; netCount?: number; pinCount?: number; cpad?: string; nets?: string[]; parts?: string[]; partLayers?: number[] }
 /** Builds a synthetic CST file with explicit part, net and pin counts. */
@@ -151,5 +152,17 @@ describe('parseCst', () => {
     header.set([0xff, 0x7f]); // 32767 components declared, none present
     expect(error(() => parse(header)).message).toMatch(/truncated/);
     expect(error(() => parse(makeCst({ pinCount: 32767 }))).message).toMatch(/truncated/);
+  });
+
+  it('attaches a catalog issue to each refusal; the PARITY-06 layer refusal renders its developer text in English', () => {
+    const failure = error(() => parse(makeCst({ layer: 0x0a })));
+    expect(failure.message).toBe('CST: component layer code 0x0a occurs in real exports but its top/bottom mapping is not validated.');
+    expect(failure.issue).toEqual({ key: 'parse.error.cstUnvalidatedLayer', params: { code: '0x0a' } });
+    expect(formatIssue('en', failure.issue!)).toBe(failure.message);
+    expect(formatIssue('hu', failure.issue!)).toContain('0x0a');
+    expect(error(() => parse(makeCst({ layer: 255 }))).issue).toEqual({ key: 'parse.error.cstUnknownLayer', params: { code: '0xff', ref: 'U1' } });
+    expect(error(() => parse(makeCst({ pins: [[0, 0, 100, 200], [-1, 0, 101, 201], [1, 0, 102, 202]] }))).issue)
+      .toEqual({ key: 'parse.error.cstPinComponent', params: { pin: '3', component: '1', count: 1 } });
+    expect(error(() => parse(makeCst({ cpad: 'CPax' }))).issue).toEqual({ key: 'parse.error.cstMissingCpad' });
   });
 });

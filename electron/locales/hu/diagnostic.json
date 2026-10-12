@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Kész",
   "diagnostic.bugStageUnknown": "Ismeretlen",
   "diagnostic.bugCleanupTiming": "Ezek a határidők a szokásos ütemezett törlést feltételezik; a tárhelyszolgáltatás kiesése késleltetheti a törlést.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bájt"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bájt",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} karakter",
+  "diagnostic.bugDescriptionLimit": "A leírás legfeljebb {max} karakter lehet. Rövidítsd meg, hogy átnézhesd és elküldhesd."
 }

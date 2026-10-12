@@ -1,0 +1,1 @@
+- On Mac and Linux, a document whose file name contains a backslash keeps its place beside the board after the board is moved; it is found again instead of showing as Missing.

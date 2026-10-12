@@ -23,13 +23,16 @@ files:
   - dist/**/*
   - electron/**/*
   - shared/bug-report-contract.cjs
+  - shared/import-limits.json
   - package.json
   - assets/**/*
   - LICENSE
   - THIRD_PARTY_NOTICES.md
   # Same exclusion as the macOS file: only pdfjs-dist's Node-only canvas path refers to it, and without this line the
   # host's prebuilt .node binary is bundled and unpacked.
+  - node_modules/fflate/**/*
   - '!node_modules/@napi-rs/**'
+  - '!node_modules/!(fflate)/**/*'
 asar: true
 # Merged into the builder's metadata and into the packaged package.json.
 # desktopName: Electron derives the Wayland app_id and the X11 WM_CLASS from it, so running windows match
@@ -46,8 +49,8 @@ electronFuses:
   runAsNode: false
   # NODE_OPTIONS and NODE_EXTRA_CA_CERTS from the environment are ignored.
   enableNodeOptionsEnvironmentVariable: false
-  # --inspect stays available: packaged-build smoke tests attach to the main process through it.
-  enableNodeCliInspectArguments: true
+  # --inspect is OFF in the release build (FUSE-INSPECT, D-42). Packaged QA needs a QA flavour that keeps it on: root decision, see the proposal.
+  enableNodeCliInspectArguments: false
   # Application code only from app.asar.
   onlyLoadAppFromAsar: true
   # Set for parity with the other platforms, inert on Linux: Electron 44 validates embedded ASAR integrity only on macOS

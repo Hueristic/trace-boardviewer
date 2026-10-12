@@ -3,7 +3,7 @@ import { viewportBounds } from '../lib/geometry';
 import type { Bounds2, ViewTransform } from '../lib/geometry';
 import { appendPadPath } from '../lib/render-geometry';
 import type { BoardPin } from '../lib/types';
-import { boundsCover, buildPadLayers, PAD_BATCH_SIZE, PAD_REGION_SLACK, PAD_VIEW_MARGIN_PX, planPadLayers, samePadPlan } from './board-pad-layers';
+import { boundsCover, buildPadLayers, PAD_BATCH_SIZE, PAD_REGION_SLACK, PAD_VIEW_MARGIN_PX, PadBatchCache, padScaleThreshold, planPadLayers, samePadPlan } from './board-pad-layers';
 import type { PadLayers } from './board-pad-layers';
 
 /** A path that only records the operations appended to it. */
@@ -172,5 +172,90 @@ describe('P04 pad layers are built for the visible region only, batched exactly 
     expect(boundsCover(outer, outer)).toBe(true);
     expect(boundsCover(outer, { minX: -0.1, minY: 1, maxX: 9, maxY: 9 })).toBe(false);
     expect(boundsCover(outer, { minX: 1, minY: 1, maxX: 9, maxY: 10.1 })).toBe(false);
+  });
+});
+
+describe('PadBatchCache: the paths of buildPadLayers, with the whole-batch paths kept between builds', () => {
+  const pins = randomPins(1500, 11, 120);
+  const selections: Array<[string | null, string | null]> = [[null, null], ['GND', null], [null, 'C3'], ['VCC', 'C7']];
+  const regions: Bounds2[] = [
+    { minX: -10, minY: -10, maxX: 150, maxY: 100 },
+    { minX: 40, minY: 20, maxX: 95, maxY: 70 },
+    { minX: 43, minY: 22, maxX: 98, maxY: 73 },
+    { minX: 0, minY: 0, maxX: 6, maxY: 6 },
+  ];
+
+  for (const [net, component] of selections) {
+    it(`builds, along a sequence of regions and scales, the paths buildPadLayers builds (net=${JSON.stringify(net)} component=${JSON.stringify(component)})`, () => {
+      const plan = planPadLayers(pins, net, component);
+      const cache = new PadBatchCache(plan, () => new RecordingPath());
+      for (const scale of [0.4, 6.8, 6.8 * 1.0000001, 40, 6.8]) for (const region of regions) {
+        const expected = buildPadLayers(plan, region, scale, factory().create);
+        expect(opsOf(cache.build(region, scale)), `region ${JSON.stringify(region)} at ${scale}`).toEqual(opsOf(expected));
+      }
+    });
+  }
+
+  /** `count` round pads one millimetre apart along x: batch b holds x in [64b, 64b + 63]. */
+  const row = (count: number, radius: number): BoardPin[] => Array.from({ length: count }, (_, i): BoardPin => ({
+    id: `R${i}`, componentId: 'C1', number: String(i), name: String(i), net: 'N', side: 'top', x: i, y: 0, radius, shape: 'round',
+  }));
+  const wide: Bounds2 = { minX: -5, minY: -5, maxX: 200, maxY: 5 };
+
+  it('keeps the whole-batch path of a pad far larger than its marker, and rebuilds one whose marker still matters', () => {
+    const big = new PadBatchCache(planPadLayers(row(130, 0.3), null, null), () => new RecordingPath());
+    const first = big.build(wide, 10);
+    expect(first.ordinary).toHaveLength(3);
+    const second = big.build(wide, 50);
+    second.ordinary.forEach((path, i) => expect(path).toBe(first.ordinary[i]));
+
+    const tinyPins = row(130, 0.01);
+    const tiny = new PadBatchCache(planPadLayers(tinyPins, null, null), () => new RecordingPath());
+    const a = tiny.build(wide, 10), b = tiny.build(wide, 50);
+    b.ordinary.forEach((path, i) => expect(path).not.toBe(a.ordinary[i]));
+    expect(opsOf(b)).toEqual(opsOf(buildPadLayers(planPadLayers(tinyPins, null, null), wide, 50, factory().create)));
+  });
+
+  it('builds a batch that only partly lies in the region again at each build, and keeps the whole batches that lie inside', () => {
+    const cache = new PadBatchCache(planPadLayers(row(130, 0.3), null, null), () => new RecordingPath());
+    const partial: Bounds2 = { minX: 60, minY: -5, maxX: 70, maxY: 5 };
+    const a = cache.build(partial, 10), b = cache.build(partial, 10);
+    expect(b.ordinary[0]).not.toBe(a.ordinary[0]);
+    expect(opsOf(b)).toEqual(opsOf(a));
+
+    const c = cache.build(wide, 10);
+    const d = cache.build(wide, 10);
+    d.ordinary.forEach((path, i) => expect(path).toBe(c.ordinary[i]));
+  });
+
+  it('drops the kept path of a batch that a region stops touching', () => {
+    const cache = new PadBatchCache(planPadLayers(row(130, 0.3), null, null), () => new RecordingPath());
+    const first = cache.build(wide, 10);
+    // batch 2 starts at x 127.7: the region does not touch it, so its path is dropped; batches 0 and 1 stay inside
+    cache.build({ minX: -5, minY: -5, maxX: 120, maxY: 5 }, 10);
+    const back = cache.build(wide, 10);
+    expect(back.ordinary[0]).toBe(first.ordinary[0]);
+    expect(back.ordinary[2]).not.toBe(first.ordinary[2]);
+  });
+
+  it('gives the same geometry at every scale from its threshold on (the reuse rule is exact)', () => {
+    const random = mulberry32(5);
+    for (const pin of pins) {
+      if (!(pin.radius > 0)) continue;
+      for (const marker of [1, 1.8, 2.2]) {
+        const threshold = padScaleThreshold(pin, marker);
+        if (!Number.isFinite(threshold)) continue;
+        const from = threshold * (1 + 1e-6) * (1 + random());
+        const ops = (scale: number) => { const path = new RecordingPath(); appendPadPath(path, pin, scale, marker); return path.ops; };
+        expect(ops(from), pin.id).toEqual(ops(from * 7));
+        expect(ops(from), pin.id).toEqual(ops(1e9));
+      }
+    }
+  });
+
+  it('pads without a size get an infinite threshold: they are rebuilt at every zoom step', () => {
+    const unsized: BoardPin = { ...pins[0], radius: 0, shape: 'round' };
+    expect(padScaleThreshold(unsized, 1)).toBe(Infinity);
+    expect(padScaleThreshold({ ...pins[0], radius: 0.5, shape: 'rect', width: 0, height: 0.5 }, 1)).toBe(Infinity);
   });
 });

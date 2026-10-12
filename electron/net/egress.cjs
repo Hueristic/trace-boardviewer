@@ -34,8 +34,10 @@ const path = require('node:path');
 /** The in-memory (no "persist:" prefix) Electron partition every request goes through: no cookies or cache survive, and none are shared with the page. */
 const PARTITION = 'trace-egress';
 const ACCEPT_LANGUAGE = 'en';
-// The running version, as app.getVersion() reports it. It goes into the User-Agent header, so its characters are restricted.
-const VERSION_PATTERN = /^(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})(-[0-9A-Za-z.]{1,24})?$/;
+// The running version, as app.getVersion() reports it. It goes into the User-Agent header, so its characters are restricted. The suffix alphabet is the one the
+// release jobs publish (windows.yml versionPattern) and a hyphen is a legal SemVer pre-release character: a version the release accepts must be read here too,
+// or the update check silently turns off for that build.
+const VERSION_PATTERN = /^(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})\.(0|[1-9]\d{0,3})(-[0-9A-Za-z.-]{1,32})?$/;
 
 const DEFAULT_LOG_LIMIT = 200;
 const MAX_LOG_LIMIT = 1000;
@@ -46,8 +48,10 @@ const MAX_HEADER_VALUE = 256;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES = 256 * 1024 * 1024;
 const MAX_TIMEOUT_MS = 120 * 1000;
-// A download that is cut off gets this long to remove its temporary file before the caller is answered.
-const CLEANUP_GRACE_MS = 250;
+// A download that is cut off gets this long to remove its temporary file before the caller is answered. Removing a file in %TEMP% can
+// wait behind an antivirus scan for a few hundred milliseconds, so the bound is generous: an aborted body settles at once and removes
+// its file first, and only a fetch that ignores its abort signal waits the whole of it.
+const CLEANUP_GRACE_MS = 2000;
 
 /**
  * The error classes of a log entry and of a result, a closed list (the Settings view has a label for each group of them).
@@ -593,11 +597,13 @@ function createEgress(options = {}) {
  * no download and, as a second line of defence, cancels any request to a URL that no feature may reach. `isAllowed` is egress.isAllowedUrl.
  * This file is the only place of the main process where a fetch is made.
  */
-function createElectronFetch({ session, isAllowed }) {
+function createElectronFetch({ session, isAllowed, certificateVerifier }) {
   let partition = null;
   const sessionOfPartition = () => {
     if (partition) return partition;
     const created = session.fromPartition(PARTITION, { cache: false });
+    // Only the QA build passes a verifier (electron/bug-reports.cjs qaCertificateVerifier); the release passes none and keeps the default.
+    if (typeof certificateVerifier === 'function' && typeof created.setCertificateVerifyProc === 'function') created.setCertificateVerifyProc(certificateVerifier);
     if (typeof created.setPermissionRequestHandler === 'function') created.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
     if (typeof created.setPermissionCheckHandler === 'function') created.setPermissionCheckHandler(() => false);
     if (typeof created.on === 'function') created.on('will-download', (event) => event.preventDefault());

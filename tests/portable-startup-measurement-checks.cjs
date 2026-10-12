@@ -187,7 +187,8 @@ test('the %TEMP% watcher records only NEW ns<letter><hex>.tmp entries, their kin
     const last = entry.contents[entry.contents.length - 1];
     assert.deepEqual(last.names, ['app', 'app-64.7z']);
     assert.deepEqual(last.sizes, { 'app-64.7z': 3 });
-    assert.ok(result.tickStats && result.tickStats.n >= 5 && result.tickStats.median < 50, `tick statistics recorded (Windows timer granularity is ~15.6 ms): ${JSON.stringify(result.tickStats)}`);
+    // The tick median measures the host (Windows timers tick every ~15.6 ms, and a loaded host ticks slower), so it is recorded, not asserted.
+    assert.ok(result.tickStats && result.tickStats.n >= 5 && Number.isFinite(result.tickStats.max), `tick statistics recorded: ${JSON.stringify(result.tickStats)}`);
     assert.equal(result.readErrors, 0);
     await new Promise((resolve) => setTimeout(resolve, 10));
     fs.rmSync(path.join(root, 'nsk58A3.tmp'), { recursive: true, force: true });

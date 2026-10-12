@@ -44,6 +44,9 @@ function chromiumSwitches(argv) {
   return names;
 }
 
+// The messages of the external opens that could not be read, as the window received them ('trace:open-failed').
+const openFailures = (harness) => harness.window.webContents.sent.filter((entry) => entry.channel === 'trace:open-failed').map((entry) => entry.value);
+
 async function desktopHarness(directory, options = {}) {
   const handlers = new Map();
   const messages = new Map();
@@ -64,7 +67,12 @@ async function desktopHarness(directory, options = {}) {
     pathsSet: [], setPath(name, value) { this.pathsSet.push({ name, value, ready }); },
     getPath: (name) => (name === 'appData' && options.appData ? options.appData : directory), isReady: () => ready, getVersion: () => options.version ?? '1.2.0',
     whenReady: () => readyGate ? readyGate.then(() => { ready = true; }) : Promise.resolve(),
-    requestSingleInstanceLock: () => true, quitCount: 0, quit() { this.quitCount++; },
+    requestSingleInstanceLock: () => true, quitCount: 0, quitCalls: 0, exitCodes: [], quit() { this.quitCalls++; this.quitCount++; },
+    // app.exit ends the process in Electron; the harness records the code instead (MLX-03-06: a refused --user-data-dir; the quit sequence ends with app.exit(0)).
+    exit(code) { this.exitCode = code; this.exitCodes.push(code); this.quitCount++; },
+    // A relaunch is recorded with its options; options.relaunchError makes it fail (O-31: the board then stays recorded for the next start).
+    relaunches: [], lockReleased: false, releaseSingleInstanceLock() { this.lockReleased = true; },
+    relaunch(relaunchOptions) { if (options.relaunchError) throw options.relaunchError; this.relaunches.push(relaunchOptions); },
     // Chromium's own command line: the switches of options.argv as Chromium parses them, or options.commandLineSwitches for a line that
     // differs from process.argv (a switch Electron appended itself, e.g. for ELECTRON_DISABLE_SANDBOX).
     commandLine: { hasSwitch: (name) => (options.commandLineSwitches ?? chromiumSwitches(options.argv ?? [])).includes(name) },
@@ -98,9 +106,10 @@ async function desktopHarness(directory, options = {}) {
       this.destroyed = false;
       this.webContents = new EventEmitter();
       Object.assign(this.webContents, {
-        session: defaultSession, mainFrame: { url: '' }, sent: [],
+        session: defaultSession, mainFrame: { url: '' }, sent: [], scripts: [],
         // `onSend` lets a test play the renderer: it sees every message main sends (e.g. 'trace:flush-request').
         send(channel, value) { this.sent.push({ channel, value }); this.onSend?.(channel, value); },
+        executeJavaScript(script) { this.scripts.push(script); return Promise.resolve(); },
         setWindowOpenHandler(callback) { this.popupHandler = callback; },
       });
     }
@@ -204,13 +213,25 @@ async function desktopHarness(directory, options = {}) {
   // The context is returned so a test can reach a top-level function of main.cjs (e.g. openExternalUrl) that no handler exposes.
   // `options.timers` replaces the timer functions main.cjs sees (the fallback show), `options.argv` the launch arguments after the
   // application path, `options.cwd` the working directory of the launch, `options.env` its environment, `options.console` the console.
+  // The grant registry (electron/path-grants.cjs) of this main process is kept, so that the tests can read it and grant a path as a dialog would.
+  const grantRegistries = [];
+  const requireMain = (name) => {
+    const resolved = name.startsWith('.') ? path.resolve(path.dirname(filename), name) : name;
+    const loaded = require(resolved);
+    if (typeof resolved === 'string' && resolved.endsWith('path-grants.cjs')) {
+      return { ...loaded, createPathGrants: (...args) => { const registry = loaded.createPathGrants(...args); grantRegistries.push(registry); return registry; } };
+    }
+    return loaded;
+  };
   const context = {
-    require: (name) => name === 'electron' ? electron : name === 'node:fs/promises' && options.fs ? options.fs : require(name.startsWith('.') ? path.resolve(path.dirname(filename), name) : name),
+    require: (name) => name === 'electron' ? electron : name === 'node:fs/promises' && options.fs ? options.fs : requireMain(name),
     __dirname: path.dirname(filename), Buffer, URL, console: options.console ?? console,
     setTimeout: options.timers?.setTimeout ?? setTimeout, clearTimeout: options.timers?.clearTimeout ?? clearTimeout,
     process: {
       argv: ['electron.exe', 'app', ...(options.argv ?? [])], pid: process.pid, platform: options.platform ?? 'win32', env: { ...options.env },
       cwd: () => options.cwd ?? process.cwd(),
+      // options.stderr receives what main.cjs writes to the standard error (a refused --user-data-dir), nothing else.
+      stderr: options.stderr ?? { write: () => true },
     },
   };
   vm.runInNewContext(source, context, { filename });
@@ -222,13 +243,59 @@ async function desktopHarness(directory, options = {}) {
   if (!options.deferReady && !options.noWindow) await waitForWindow();
   const event = () => ({ sender: window.webContents, senderFrame: window.webContents.mainFrame });
   return {
-    get window() { return window; }, get windows() { return [...created]; }, context, app, dialog, shell, net, partitions, egressSession, menu, nativeImage, session: electron.session, handlers, languageCalls, waitForWindow,
+    get window() { return window; }, get windows() { return [...created]; }, context, app, dialog, shell, net, partitions, egressSession, menu, nativeImage, session: electron.session, handlers, messages, languageCalls, waitForWindow,
     releaseReady: () => markReady(),
-    invoke: (channel, ...args) => handlers.get(channel)(event(), ...args),
+    // The channels that read a path grant it first, as the user's own choice would have (the path gate itself is tested through invokeRaw).
+    invoke: (channel, ...args) => {
+      if (['trace:read-board', 'trace:read-document', 'trace:locate-documents'].includes(channel) && typeof args[0] === 'string' && grantRegistries[0]) grantRegistries[0].grant(args[0], 'dialog');
+      return handlers.get(channel)(event(), ...args);
+    },
+    invokeRaw: (channel, ...args) => handlers.get(channel)(event(), ...args),
+    grants: () => grantRegistries[0],
     message: (channel, ...args) => messages.get(channel)(event(), ...args),
     forgedMessage: (channel, ...args) => messages.get(channel)({ sender: {}, senderFrame: { url: 'https://example.com/' } }, ...args),
   };
 }
+
+// O-38 (simulated volume, every file inside the temp directory): one file reached under two spellings of its name. APFS normalises
+// Unicode, so a decomposed spelling reaches the same device and inode as the composed one. The stored path keeps the spelling it was
+// opened with, which this test models; the native realpath spelling on APFS is a separate acceptance check.
+test('recents: the same file under another Unicode spelling replaces its entry, and a different file is a second entry (O-38, simulated)', async (t) => {
+  const directory = await makeTempDir('trace-recents-identity-');
+  t.after(async () => {
+    const absolute = path.resolve(directory);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  const validText = '$HEADER\nGENCAD 1.4\nUNITS MM\n$ENDHEADER\n$BOARD\nLINE 0 0 10 0\n$ENDBOARD\n';
+  const composed = path.join(directory, 'Plé.CAD');
+  const decomposed = path.join(directory, 'Plé.CAD');
+  const other = path.join(directory, 'Other.CAD');
+  await fs.writeFile(composed, validText);
+  await fs.writeFile(other, validText.replace('LINE 0 0 10 0', 'LINE 1 1 9 0'));
+  // The simulated volume: the decomposed name is the composed file; realpath answers with the spelling it was given.
+  const normalising = new Proxy(fs, {
+    get(target, property) {
+      const member = target[property];
+      if (typeof member !== 'function') return member;
+      if (property === 'realpath') return (value, ...rest) => (value === decomposed ? Promise.resolve(value) : member.call(target, value, ...rest));
+      return (value, ...rest) => member.call(target, value === decomposed ? composed : value, ...rest);
+    },
+  });
+  const harness = await desktopHarness(directory, { fs: normalising });
+  const { invoke } = harness;
+  const first = await invoke('trace:read-board', composed);
+  await invoke('trace:accept-board', first.path, first.key);
+  const second = await invoke('trace:read-board', decomposed);
+  assert.equal(second.key, first.key, 'the two spellings read the same bytes');
+  await invoke('trace:accept-board', second.path, second.key);
+  const recent = await invoke('trace:recent-boards');
+  assert.equal(recent.length, 1, 'one file, one recent entry');
+  assert.equal(recent[0].path, decomposed, 'the newest spelling is kept');
+  const otherPayload = await invoke('trace:read-board', other);
+  await invoke('trace:accept-board', otherPayload.path, otherPayload.key);
+  assert.equal((await invoke('trace:recent-boards')).length, 2, 'a different file is a second entry');
+});
 
 test('desktop IPC, local import, persistence and boundary checks', async (t) => {
   const directory = await makeTempDir('trace-desktop-test-');
@@ -332,6 +399,12 @@ test('desktop IPC, local import, persistence and boundary checks', async (t) => 
     await assert.rejects(invoke('trace:read-board', arbitrary), /üres/);
     await fs.truncate(arbitrary, 64 * 1024 * 1024 + 1);
     await assert.rejects(invoke('trace:read-board', arbitrary), /64 MB/);
+    // The same size with the Allegro database marker ("all" at 0xF8) is a native database: it is read up to the native limit.
+    const native = path.join(directory, 'native-board.brd');
+    const nativeFile = await fs.open(native, 'w');
+    try { await nativeFile.write(Buffer.from('all'), 0, 3, 0xf8); await nativeFile.truncate(64 * 1024 * 1024 + 1); } finally { await nativeFile.close(); }
+    const nativePayload = await invoke('trace:read-board', native);
+    assert.equal(nativePayload.data.byteLength, 64 * 1024 * 1024 + 1, 'a marked native database above the general limit is read in full');
   });
 
   await t.test('W-fin-lifecycle-01: a path that names an NTFS alternate data stream ("host.txt:alt.cad") is an invalid path, never a board or a document', async () => {
@@ -360,8 +433,9 @@ test('desktop IPC, local import, persistence and boundary checks', async (t) => 
     const launched = await desktopHarness(path.join(directory, 'ads-launch-profile'));
     await launched.invoke('trace:initial-board');
     launched.app.emit('second-instance', {}, ['electron.exe', 'app', `--board=${stream}`]);
-    await settle(() => launched.dialog.messages.length >= 1);
-    assert.equal(launched.dialog.messages[0].message, invalid.message);
+    await settle(() => openFailures(launched).length >= 1);
+    assert.equal(openFailures(launched)[0], invalid.message, 'the failure is announced in the window, as a failed interactive open');
+    assert.equal(launched.dialog.messages.length, 0, 'and no native box is shown');
     assert.deepEqual(launched.window.webContents.sent.filter((entry) => entry.channel === 'trace:board-opened'), []);
     // Where a colon is an ordinary file-name character the path check does not interfere (the file just does not exist here).
     const posix = await desktopHarness(path.join(directory, 'ads-posix-profile'), { platform: 'linux' });
@@ -383,7 +457,16 @@ test('desktop IPC, local import, persistence and boundary checks', async (t) => 
     for (const name of ['board.unsupported', 'board.cad.bak', 'unrelated-board', 'board.CAD.exe', 'cad']) {
       await assert.rejects(invoke('trace:read-board', path.join(samples, name)), { message: i18n.translate('hu', 'native.error.unsupportedFile') });
     }
-    // External launches: --board=, a bare absolute path, and an unsupported bare path that is ignored without a dialog.
+    // An AppleDouble companion ("._" name, with an extension or without one) is read on every OS, so its bytes reach the readers, which
+    // refuse them with the named explanation (parse.error.appleDoubleMetadata); it is not refused as an unsupported name here.
+    for (const name of ['._Sample.cad', '._Sample']) {
+      const stub = path.join(samples, name);
+      await fs.writeFile(stub, Buffer.from([0, 5, 0x16, 7, 0, 2, 0, 0]));
+      const payload = await invoke('trace:read-board', stub);
+      assert.equal(payload.name, name);
+    }
+    // External launches: --board=, a bare absolute path, and an unsupported bare path. The last one opens nothing but is announced once in
+    // the window: the user named that file on purpose, so silence would look like the open never happened (the same notice as a dropped file).
     const brd = path.join(samples, 'Launch.brd');
     await fs.writeFile(brd, 'str_length:\n');
     const kicad = path.join(samples, 'Launch.kicad_pcb');
@@ -397,8 +480,9 @@ test('desktop IPC, local import, persistence and boundary checks', async (t) => 
     launched.app.emit('second-instance', {}, ['electron.exe', 'app', kicad]);
     await settle(() => delivered().length >= 2);
     launched.app.emit('second-instance', {}, ['electron.exe', 'app', path.join(samples, 'notes.unsupported')]);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await settle(() => openFailures(launched).length >= 1);
     assert.deepEqual(delivered(), ['Launch.brd', 'Launch.kicad_pcb']);
+    assert.deepEqual(openFailures(launched), [i18n.translate('hu', 'native.error.unsupportedFile')], 'the unsupported file is announced once');
     assert.equal(launched.dialog.messages.length, 0);
     const opened = launched.window.webContents.sent.find((event) => event.channel === 'trace:board-opened').value;
     assert.equal(bytesOf(opened.data).toString('utf8'), 'str_length:\n');
@@ -412,8 +496,10 @@ test('desktop IPC, local import, persistence and boundary checks', async (t) => 
     assert.ok(filters.length > 1);
     assert.equal(filters.at(-1).name, i18n.translate('hu', 'native.dialog.allFiles'));
     assert.deepEqual(Array.from(filters.at(-1).extensions), ['*']);
+    // The family labels come from the catalogue (formats.json keeps the English ids): on a Hungarian system each one is a Hungarian label.
+    const familyLabels = new Set(['native.dialog.familyGenCAD', 'native.dialog.familyBoardview', 'native.dialog.familyEcad', 'native.dialog.familyGerber'].map((key) => i18n.translate('hu', key)));
     for (const filter of filters.slice(1, -1)) {
-      assert.ok(typeof filter.name === 'string' && filter.name && !/[^\x20-\x7e]/.test(filter.name), 'family names are plain English');
+      assert.ok(familyLabels.has(filter.name), `${filter.name} is a catalogue family label`);
       assert.ok(filter.extensions.length);
       for (const extension of filter.extensions) assert.ok(formats.SUPPORTED_EXTENSIONS.includes(`.${extension}`), `${filter.name}: .${extension}`);
     }
@@ -527,6 +613,60 @@ test('desktop IPC, local import, persistence and boundary checks', async (t) => 
     assert.deepEqual(Object.keys(second.companions), ['board']);
     await fs.writeFile(path.join(pair, 'unrelated'), 'synthetic unrelated file');
     await assert.rejects(invoke('trace:read-board', path.join(pair, 'unrelated')), /nem támogatott/);
+  });
+
+  // Case-only sibling policy (electron/main.cjs planCompanions): an exact spelling wins, a unique case variant is still a companion, and
+  // two or more case variants with no exact spelling are refused rather than picked. NTFS cannot
+  // hold two names that differ only by case, so the listing of the board folder is synthetic: the proxy answers readdir, realpath and
+  // stat for the listed names alone, and everything else goes to the real file system. The real folder holds the primary only.
+  const siblingListing = { folder: '', names: [] };
+  const siblingFs = new Proxy(fs, { get(target, property) {
+    if (property === 'readdir') return async (directory, ...rest) => (path.resolve(directory) === path.resolve(siblingListing.folder) ? [...siblingListing.names] : target.readdir(directory, ...rest));
+    const listed = (value) => siblingListing.names.some((name) => path.resolve(siblingListing.folder, name) === path.resolve(value));
+    if (property === 'realpath') return async (value, ...rest) => (listed(value) ? value : target.realpath(value, ...rest));
+    if (property === 'stat') return async (value, ...rest) => (listed(value) ? { isFile: () => true, isDirectory: () => false, size: 4 } : target.stat(value, ...rest));
+    return target[property];
+  } });
+  const siblingFolder = path.join(directory, 'sibling-folder');
+  await fs.mkdir(siblingFolder, { recursive: true });
+  await fs.writeFile(path.join(siblingFolder, 'format.asc'), 'format bytes');
+  await fs.mkdir(path.join(directory, 'sibling-profile'), { recursive: true });
+  const siblingHarness = await desktopHarness(path.join(directory, 'sibling-profile'), { fs: siblingFs });
+  const siblingPrimary = path.join(siblingFolder, 'format.asc');
+  const planWith = (names, primary = siblingPrimary) => {
+    siblingListing.folder = siblingFolder;
+    siblingListing.names = names;
+    return siblingHarness.context.planCompanions(primary, 12);
+  };
+
+  await t.test('case-only sibling policy: ambiguous siblings with no exact spelling are refused, never picked', async () => {
+    await assert.rejects(planWith(['format.asc', 'PINS.ASC', 'Pins.asc', 'nails.asc']), (error) => error.code === 'COMPANION_AMBIGUOUS');
+  });
+
+  await t.test('case-only sibling policy: an ambiguous read is refused through trace:read-board with the localized read failure', async () => {
+    siblingListing.folder = siblingFolder;
+    siblingListing.names = ['format.asc', 'PINS.ASC', 'Pins.asc', 'nails.asc'];
+    await assert.rejects(siblingHarness.invoke('trace:read-board', siblingPrimary),
+      (error) => error.message === i18n.createTranslator('hu')('native.error.boardReadFailed'));
+  });
+
+  await t.test('case-only sibling policy: the exact spelling wins over case variants', async () => {
+    const plan = await planWith(['format.asc', 'pins.asc', 'PINS.ASC', 'nails.asc']);
+    assert.deepEqual(Array.from(plan.items, (item) => item.name).sort(), ['nails.asc', 'pins.asc']);
+    assert.equal(path.basename(plan.items.find((item) => item.name === 'pins.asc').canonical), 'pins.asc');
+  });
+
+  await t.test('case-only sibling policy: a unique mixed-case sibling is still a companion', async () => {
+    const plan = await planWith(['format.asc', 'Pins.Asc', 'nails.asc']);
+    assert.deepEqual(Array.from(plan.items, (item) => item.name).sort(), ['nails.asc', 'pins.asc']);
+    assert.equal(path.basename(plan.items.find((item) => item.name === 'pins.asc').canonical), 'Pins.Asc');
+  });
+
+  await t.test('case-only sibling policy: an ambiguous alternative of an unchosen set is ignored', async () => {
+    // Primary pins.asc belongs to two sets; '@format.asc' is the only member of the second one, and it is ambiguous. The first set
+    // (format.asc, pins.asc, nails.asc) is chosen, so the ambiguity is not part of the read and nothing is refused.
+    const plan = await planWith(['pins.asc', 'format.asc', 'nails.asc', '@FORMAT.ASC', '@Format.asc'], path.join(siblingFolder, 'pins.asc'));
+    assert.deepEqual(Array.from(plan.items, (item) => item.name).sort(), ['format.asc', 'nails.asc']);
   });
 
   const watchedFs = (directory, hooks = {}) => new Proxy(fs, { get(target, property) {
@@ -946,7 +1086,7 @@ test('native localization: language setting, migration, detection, dialogs and m
   await t.test('a pre-language profile keeps every setting and recent file, stays Hungarian and ignores the system language', async () => {
     const directory = await profile('legacy', { version: 1, settings: oldSettings, recentBoards: [oldRecent] });
     const harness = await desktopHarness(directory, { systemLanguages: ['de-DE'] });
-    assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { language: 'hu', ...oldSettings, updateCheck: true }, 'a profile saved before the update check gets it switched on (the default)');
+    assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { language: 'hu', ...oldSettings, updateCheck: false, updateCheckAsked: false }, 'a profile saved before the update check gets it off, and the question unasked (the default)');
     const recents = await harness.invoke('trace:recent-boards');
     assert.equal(recents.length, 1);
     assert.equal(recents[0].path.toLowerCase(), boardFile.toLowerCase());
@@ -955,7 +1095,7 @@ test('native localization: language setting, migration, detection, dialogs and m
     // The first write stores the migrated language and keeps everything else.
     await harness.invoke('trace:save-settings', { ...(await harness.invoke('trace:get-settings')), theme: 'dark' });
     const saved = await readConfig(directory);
-    assert.deepEqual(saved.settings, { language: 'hu', ...oldSettings, updateCheck: true, theme: 'dark' });
+    assert.deepEqual(saved.settings, { language: 'hu', ...oldSettings, updateCheck: false, updateCheckAsked: false, theme: 'dark' });
     assert.equal(saved.recentBoards.length, 1);
   });
 
@@ -963,7 +1103,7 @@ test('native localization: language setting, migration, detection, dialogs and m
     for (const language of ['xx', 42, null, '']) {
       const directory = await profile(`bad-language-${String(language) || 'empty'}`, { version: 1, settings: { ...oldSettings, language }, recentBoards: [oldRecent] });
       const harness = await desktopHarness(directory, { systemLanguages: ['fr-FR'] });
-      assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { language: 'hu', ...oldSettings, updateCheck: true });
+      assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { language: 'hu', ...oldSettings, updateCheck: false, updateCheckAsked: false });
       assert.equal((await harness.invoke('trace:recent-boards')).length, 1);
     }
   });
@@ -971,7 +1111,7 @@ test('native localization: language setting, migration, detection, dialogs and m
   await t.test('one damaged stored field falls back to its default without resetting the other settings', async () => {
     const directory = await profile('damaged-field', { version: 1, settings: { language: 'sk', theme: 'purple', layout: 'focus', motion: 'yes', showLabels: false, showConnections: false }, recentBoards: [oldRecent] });
     const harness = await desktopHarness(directory, { systemLanguages: ['de-DE'] });
-    assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { language: 'sk', theme: 'dark', layout: 'focus', motion: true, showLabels: false, showConnections: false, updateCheck: true });
+    assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { language: 'sk', theme: 'dark', layout: 'focus', motion: true, showLabels: false, showConnections: false, updateCheck: false, updateCheckAsked: false });
     assert.equal((await harness.invoke('trace:recent-boards')).length, 1);
   });
 
@@ -1032,15 +1172,13 @@ test('native localization: language setting, migration, detection, dialogs and m
     const harness = await desktopHarness(directory);
     await harness.invoke('trace:initial-board');
     harness.app.emit('second-instance', {}, ['electron.exe', 'app', `--board=${missing}`]);
-    for (let attempt = 0; attempt < 100 && !harness.dialog.messages.length; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(harness.dialog.messages.length, 1);
-    assert.equal(harness.dialog.messages[0].title, i18n.translate('de', 'native.dialog.openFailedTitle'));
-    assert.equal(harness.dialog.messages[0].message, i18n.translate('de', 'native.error.boardNotFound'));
+    for (let attempt = 0; attempt < 100 && !openFailures(harness).length; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(openFailures(harness), [i18n.translate('de', 'native.error.boardNotFound')]);
+    assert.equal(harness.dialog.messages.length, 0, 'announced in the window, not in a native box');
     await harness.invoke('trace:save-settings', { ...(await harness.invoke('trace:get-settings')), language: 'fr' });
     harness.app.emit('second-instance', {}, ['electron.exe', 'app', `--board=${missing}`]);
-    for (let attempt = 0; attempt < 100 && harness.dialog.messages.length < 2; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
-    assert.equal(harness.dialog.messages[1].title, i18n.translate('fr', 'native.dialog.openFailedTitle'));
-    assert.equal(harness.dialog.messages[1].message, i18n.translate('fr', 'native.error.boardNotFound'));
+    for (let attempt = 0; attempt < 100 && openFailures(harness).length < 2; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(openFailures(harness)[1], i18n.translate('fr', 'native.error.boardNotFound'));
 
     for (const language of ['en', 'uk']) {
       let rejectLoad;
@@ -1072,7 +1210,7 @@ test('native localization: language setting, migration, detection, dialogs and m
   });
 
   await t.test('a damaged, future or incomplete config is an existing profile: Hungarian, never the system language', async () => {
-    const defaults = { language: 'hu', theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: true };
+    const defaults = { language: 'hu', theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: false, updateCheckAsked: false };
     for (const [name, content, recents] of [
       ['garbage', '{ this is not json', 0],
       ['future-version', JSON.stringify({ version: 2, settings: { ...oldSettings, language: 'de' }, recentBoards: [oldRecent] }), 0],
@@ -1120,7 +1258,7 @@ test('native localization: language setting, migration, detection, dialogs and m
   await t.test('every native message key used by the native modules exists in all eight catalogs and none is left unused', async () => {
     // main.cjs hands its translator to store.cjs, repair-store.cjs and documents.cjs, which look up their own keys.
     let source = '';
-    for (const name of ['main', 'store', 'repair-store', 'documents', 'workspace', 'identity', 'formats']) source += await fs.readFile(path.resolve(__dirname, '..', 'electron', `${name}.cjs`), 'utf8');
+    for (const name of ['main', 'app-menu', 'store', 'repair-store', 'documents', 'workspace', 'identity', 'formats']) source +=await fs.readFile(path.resolve(__dirname, '..', 'electron', `${name}.cjs`), 'utf8');
     const used = new Set([...source.matchAll(/\bt\('(native\.[\w.]+)'/g)].map((match) => match[1]));
     assert.ok(used.size >= 25, 'main.cjs should use the native catalog keys');
     // Recognition moved to the renderer parser: the key that judged GENCAD content was removed from every catalog.
@@ -1152,7 +1290,7 @@ test('format manifest: electron/formats.cjs mirrors electron/formats.json and re
     assert.equal(extension, extension.toLowerCase());
   }
   assert.equal(new Set(formats.SUPPORTED_EXTENSIONS).size, formats.SUPPORTED_EXTENSIONS.length, 'no duplicate extensions');
-  for (const required of ['.cad', '.gcd']) assert.ok(formats.SUPPORTED_EXTENSIONS.includes(required), `${required} stays supported`);
+  for (const required of ['.cad', '.gcd', '.epro2']) assert.ok(formats.SUPPORTED_EXTENSIONS.includes(required), `${required} stays supported`);
   const companions = manifest.companions ?? {};
   assert.ok(Object.keys(companions).length >= 1, 'the ASC trio is declared');
   for (const [primary, siblings] of Object.entries(companions)) {
@@ -1216,6 +1354,16 @@ test('format manifest: electron/formats.cjs mirrors electron/formats.json and re
 // ---------------------------------------------------------------------------------------------
 // Workspace, documents and the shutdown gate through main.cjs's real handlers (mocked Electron)
 // ---------------------------------------------------------------------------------------------
+test('a synthetic CST-02 named at start-up is delivered unchanged as the start-up board (argument delivery, TB-322)', async () => {
+  const sample = path.join(__dirname, '..', 'tests', 'fixtures', 'cst', 'cst-02-synthetic.cst');
+  const expected = await fs.readFile(sample);
+  const harness = await desktopHarness(await makeTempDir('trace-cst02-argv-'), { argv: [sample] });
+  const payload = await harness.invoke('trace:initial-board');
+  assert.equal(payload.name, 'cst-02-synthetic.cst');
+  assert.equal(payload.startupSource, 'argument', 'the file named on the command line, not a recent');
+  assert.deepEqual(bytesOf(payload.data), expected, 'the bytes travel unchanged');
+});
+
 test('native workspace, documents and shutdown gate through the IPC handlers', async (t) => {
   const root = await makeTempDir('trace-native-ws-test-');
   t.after(async () => {
@@ -1281,10 +1429,10 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     assert.deepEqual(plain(await harness.invoke('trace:get-notes', KEY)), [component], 'an explicit save recovers a damaged file');
   });
 
-  await t.test('keyed notes: stored and returned as keys next to positional notes, validated like the others; the first save that replaces positional notes keeps the old file once', async () => {
+  await t.test('keyed notes: stored and returned as keys next to positional notes, validated like the others; every save that replaces positional notes keeps the old file as a numbered copy', async () => {
     const directory = profile();
     const harness = await desktopHarness(directory);
-    const file = path.join(directory, 'notes', `${KEY}.json`), copy = `${file}.positional.bak`;
+    const file = path.join(directory, 'notes', `${KEY}.json`), copyOf = (index) => `${file}.positional.bak.${index}`, copy = copyOf(1);
     const exists = (target) => fs.access(target).then(() => true, () => false);
     const positional = [{ id: 'n1', componentId: 'part:1', text: 'old part note', updatedAt: NOW }, { id: 'n2', componentId: 'part:1', pinId: 'pin:4', text: 'old pin note', measurements: { voltage: '0.4 V' }, updatedAt: NOW }];
     // An older writer (or the renderer before the conversion): positional notes, no copy is made of anything.
@@ -1307,13 +1455,35 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     await harness.invoke('trace:save-notes', KEY, [...converted, { id: 'n4', target: { ref: 'R1', at: { side: 'top', x: 12.5, y: -8.25 } }, text: 'duplicate reference, bound by position', updatedAt: NOW }]);
     assert.deepEqual(JSON.parse(await fs.readFile(copy, 'utf8')), before);
     assert.equal(plain(await harness.invoke('trace:get-notes', KEY)).length, 4);
+    // U-02: an older writer writes positional notes again, and the next conversion replaces them. The file replaced last time is copy 1 and the
+    // earlier copy moves to copy 2; nothing is overwritten.
+    const again = [{ id: 'm1', componentId: 'part:9', text: 'written again by an older build', updatedAt: NOW }];
+    const keyedAgain = [{ id: 'm1', target: { ref: 'U9' }, text: 'written again by an older build', updatedAt: NOW }];
+    await harness.invoke('trace:save-notes', KEY, again);
+    await harness.invoke('trace:save-notes', KEY, keyedAgain);
+    assert.deepEqual(JSON.parse(await fs.readFile(copyOf(1), 'utf8')), again, 'the newest replaced file is copy 1');
+    assert.deepEqual(JSON.parse(await fs.readFile(copyOf(2), 'utf8')), before, 'the earlier copy moved up to copy 2');
+    // An identical file is not copied twice: copy 1 already holds these bytes, so copy 2 stays as it was and no copy 3 appears.
+    await harness.invoke('trace:save-notes', KEY, again);
+    await harness.invoke('trace:save-notes', KEY, keyedAgain);
+    assert.deepEqual(JSON.parse(await fs.readFile(copyOf(2), 'utf8')), before, 'an identical newest copy is not repeated');
+    assert.equal(await exists(copyOf(3)), false, 'no third copy for an identical conversion');
+    // Five copies at most: after six more conversions the oldest of the five is dropped and copy 6 never exists.
+    for (let round = 0; round < 6; round++) {
+      await harness.invoke('trace:save-notes', KEY, [{ id: 'r', componentId: `part:${round + 20}`, text: `round ${round}`, updatedAt: NOW }]);
+      await harness.invoke('trace:save-notes', KEY, [{ id: 'r', target: { ref: `R${round + 20}` }, text: `round ${round}`, updatedAt: NOW }]);
+    }
+    assert.deepEqual(JSON.parse(await fs.readFile(copyOf(1), 'utf8')), [{ id: 'r', componentId: 'part:25', text: 'round 5', updatedAt: NOW }], 'copy 1 is the newest replaced file');
+    assert.equal(await exists(copyOf(5)), true, 'copy 5 is kept');
+    assert.equal(await exists(copyOf(6)), false, 'never more than five copies');
+    assert.deepEqual((await fs.readdir(path.join(directory, 'notes'))).filter((name) => name.endsWith('.tmp')), []);
     // The copy is not a note file: another board never sees it, and it is not read as this board's notes.
     assert.deepEqual(plain(await harness.invoke('trace:get-notes', 'b'.repeat(64))), []);
     // A board that never had positional notes gets no copy.
     const other = 'c'.repeat(64);
     await harness.invoke('trace:save-notes', other, [{ id: 'k', target: { ref: 'U1' }, text: 'keyed from the start', updatedAt: NOW }]);
     await harness.invoke('trace:save-notes', other, [{ id: 'k', target: { ref: 'U1' }, text: 'edited', updatedAt: NOW }]);
-    assert.equal(await exists(path.join(directory, 'notes', `${other}.json.positional.bak`)), false);
+    assert.equal(await exists(path.join(directory, 'notes', `${other}.json.positional.bak.1`)), false);
     // The same rules on write and read as for the positional kind (B15): one note per key, canonical names, bounded positions.
     const invalid = { message: text('native.error.invalidNote', { max: 8000 }) };
     const keyed = { id: 'k1', target: { ref: 'U1' }, text: 'a', updatedAt: NOW };
@@ -1324,11 +1494,12 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     await assert.rejects(harness.invoke('trace:save-notes', KEY, [{ ...keyed, componentId: 'U1' }]), invalid, 'a key and a positional id together');
     await assert.rejects(harness.invoke('trace:save-notes', KEY, [{ id: 'n3', componentId: 'part:2', text: 'x', updatedAt: NOW, unresolved: { reason: 'because', at: NOW } }]), invalid);
     // A damaged file is still reported and still recovered by an explicit save, with the copy untouched.
+    const newest = JSON.parse(await fs.readFile(copy, 'utf8'));
     await fs.writeFile(file, JSON.stringify([keyed, { ...keyed, id: 'k2' }]));
     await assert.rejects(harness.invoke('trace:get-notes', KEY), { message: text('native.error.notesUnreadable') });
     await harness.invoke('trace:save-notes', KEY, [keyed]);
     assert.deepEqual(plain(await harness.invoke('trace:get-notes', KEY)), [keyed]);
-    assert.deepEqual(JSON.parse(await fs.readFile(copy, 'utf8')), before);
+    assert.deepEqual(JSON.parse(await fs.readFile(copy, 'utf8')), newest, 'recovery by an explicit save leaves the newest copy as it was');
   });
 
   await t.test('workspace channels: round trip, BOARD_MISMATCH never attaches another board, damaged files are reported and recoverable', async () => {
@@ -1349,7 +1520,7 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     // Damaged files: reported, left unchanged, recoverable by an explicit save.
     const broken = path.join(directory, 'workspaces', `${'c'.repeat(64)}.json`);
     await fs.writeFile(broken, '{ truncated');
-    await assert.rejects(harness.invoke('trace:load-workspace', 'c'.repeat(64)), { code: 'WORKSPACE_UNREADABLE', message: /^\[WORKSPACE_UNREADABLE\] The saved workspace cannot be read/ });
+    await assert.rejects(harness.invoke('trace:load-workspace', 'c'.repeat(64)), { code: 'WORKSPACE_UNREADABLE', message: `[WORKSPACE_UNREADABLE] ${i18n.translate('hu', 'native.error.workspaceUnreadable')}` });
     assert.equal(await fs.readFile(broken, 'utf8'), '{ truncated', 'the damaged file was left unchanged');
     await fs.writeFile(broken, JSON.stringify({ version: 1, board: { key: 'c'.repeat(64) } }));
     await assert.rejects(harness.invoke('trace:load-workspace', 'c'.repeat(64)), { code: 'MANIFEST_INVALID', message: /^\[MANIFEST_INVALID\] Invalid workspace manifest: board\.name\./ });
@@ -1419,10 +1590,15 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
   // 'trace:flush-request' the way preload.cjs + useWorkspace.ts do (write the pending snapshot, then 'trace:flush-done');
   // the real wiring is covered by src/app/useWorkspace.test.ts (the hook) and tests/electron-smoke.cjs (real Electron).
   const flushRequests = (harness) => harness.window.webContents.sent.filter((entry) => entry.channel === 'trace:flush-request');
+  // The answer says whether every write of the request succeeded: a work that throws is "not saved" (U-04), as the renderer's listener is.
   const playRenderer = (harness, work) => {
     harness.window.webContents.onSend = (channel, id) => {
       if (channel !== 'trace:flush-request') return;
-      void (async () => { try { await work(id); } finally { harness.message('trace:flush-done', id); } })();
+      void (async () => {
+        let saved = true;
+        try { await work(id); } catch { saved = false; }
+        harness.message('trace:flush-done', id, saved);
+      })();
     };
   };
   const workspaceFile = (directory) => path.join(directory, 'workspaces', `${KEY}.json`);
@@ -1441,14 +1617,21 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     const harness = await desktopHarness(directory, { fs: flakyFs });
     await harness.invoke('trace:initial-board');
     const pending = manifest(KEY, { updatedAt: '2026-03-04T05:06:09.000Z' }); // What the 400 ms debounce still holds.
-    playRenderer(harness, () => harness.invoke('trace:save-workspace', KEY, pending));
+    // The renderer's save settles when the store has committed, rename retries included, and the window closes on an event: no fixed
+    // wait. Main bounds its own wait for the renderer (FLUSH_TIMEOUT_MS), so the window may close before the retries are over; the store
+    // still commits, and the test waits for that commit instead of assuming it has happened by then (a loaded %TEMP% made it flake).
+    let saved = null;
+    playRenderer(harness, () => { saved = harness.invoke('trace:save-workspace', KEY, pending); return saved; });
+    const closed = new Promise((resolve) => harness.window.once('closed', resolve));
     harness.window.close();
     assert.equal(harness.window.isDestroyed(), false, 'the close is held back until the renderer has written');
     assert.equal(flushRequests(harness).length, 1, 'the renderer was asked to flush');
     harness.window.close(); // A second click on the close button changes nothing and asks nothing.
-    await settle(() => harness.window.isDestroyed());
+    await closed;
     assert.equal(harness.window.isDestroyed(), true, 'then the window really closes');
     assert.equal(flushRequests(harness).length, 1);
+    assert.ok(saved, 'the renderer started its save');
+    await saved;
     assert.equal(renames, 6, 'five failed renames were retried by the store, the sixth committed');
     assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), pending, 'the last change is on disk');
     assert.deepEqual((await fs.readdir(path.join(directory, 'workspaces'))).filter((name) => name.endsWith('.tmp')), []);
@@ -1483,18 +1666,66 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     assert.equal(flushRequests(harness).length, 1);
   });
 
-  await t.test('the close/quit flush is bounded: a renderer that never answers keeps neither the window nor the app open', async () => {
-    const closing = await desktopHarness(profile());
-    const quitting = await desktopHarness(profile());
+  // U-04 / O-31. The dialog answers in turn: a number is the button pressed, a function answers when it is asked (a question that waits).
+  // Out of answers the box gets Cancel, which never quits.
+  const answering = (...replies) => (options) => {
+    const next = replies.length > 0 ? replies.shift() : 2;
+    return typeof next === 'function' ? next(options) : { response: next, checkboxChecked: false };
+  };
+  const saveButtons = ['native.dialog.saveRetry', 'native.dialog.quitWithoutSaving', 'native.dialog.saveCancel'].map((key) => text(key));
+  const confirmButtons = ['native.dialog.quitWithoutSaving', 'native.dialog.saveCancel'].map((key) => text(key));
+  const storeClosing = { message: /^\[STORE_CLOSING\] The data store is shutting down/ };
+  // A renderer whose save fails while failing.on is set: its answer then says the snapshot is not saved (playRenderer).
+  const rendererSaving = (harness, failing, pending) => playRenderer(harness, async () => {
+    if (failing.on) throw new Error('the snapshot cannot be written');
+    await harness.invoke('trace:save-workspace', KEY, pending);
+  });
+
+  await t.test('the close/quit flush is bounded: a renderer that never answers is an unconfirmed save after about three seconds, and the user decides (U-04)', async () => {
+    // Closing: Cancel keeps the window. Quitting: quit without saving, confirmed, so the application quits.
+    const closing = await desktopHarness(profile(), { dialogAnswer: answering(2) });
+    const quitting = await desktopHarness(profile(), { dialogAnswer: answering(1, 0) });
     for (const harness of [closing, quitting]) await harness.invoke('trace:initial-board');
     closing.window.close();
     quitting.app.emit('before-quit', { preventDefault() {} });
     await sleep(300);
     assert.equal(closing.window.isDestroyed(), false, 'still waiting for the renderer');
     assert.equal(quitting.app.quitCount, 0, 'still waiting for the renderer');
-    await settle(() => closing.window.isDestroyed() && quitting.app.quitCount === 1, 250);
-    assert.equal(closing.window.isDestroyed(), true, 'the wait is over after about a second');
-    assert.equal(quitting.app.quitCount, 1);
+    assert.equal(closing.dialog.messages.length, 0, 'nothing is asked before the bound');
+    await settle(() => closing.dialog.messages.length === 1 && quitting.app.quitCount === 1, 500);
+    assert.equal(closing.dialog.messages.length, 1, 'the bound elapsed: the save is unconfirmed');
+    assert.equal(closing.dialog.messages[0].message, text('native.dialog.saveUnconfirmedMessage'));
+    assert.equal(closing.window.isDestroyed(), false, 'Cancel keeps the window open');
+    assert.equal(quitting.dialog.messages[0].message, text('native.dialog.saveUnconfirmedMessage'));
+    assert.equal(quitting.app.quitCount, 1, 'the confirmed quit goes on');
+  });
+
+  await t.test('U-04: an unconfirmed save is asked about natively; Retry asks the renderer again, and a save it confirms closes the window', async () => {
+    const harness = await desktopHarness(profile(), { dialogAnswer: answering(0) });
+    await harness.invoke('trace:initial-board');
+    let requests = 0;
+    harness.window.webContents.onSend = (channel, id) => {
+      if (channel !== 'trace:flush-request') return;
+      requests++;
+      if (requests === 2) harness.message('trace:flush-done', id, true); // The first request is never answered.
+    };
+    harness.window.close();
+    await settle(() => harness.window.isDestroyed(), 500);
+    assert.equal(harness.window.isDestroyed(), true, 'the confirmed retry closes the window');
+    assert.equal(harness.dialog.messages.length, 1, 'one question: the first save was not confirmed');
+    assert.equal(harness.dialog.messages[0].message, text('native.dialog.saveUnconfirmedMessage'));
+    assert.equal(requests, 2, 'Retry asked the renderer again');
+  });
+
+  await t.test('U-04: an answer without the outcome is a failed save, never a saved one (fail-closed): the user is asked with the failed-save message', async () => {
+    const harness = await desktopHarness(profile(), { dialogAnswer: answering(2) });
+    await harness.invoke('trace:initial-board');
+    harness.window.webContents.onSend = (channel, id) => { if (channel === 'trace:flush-request') harness.message('trace:flush-done', id); };
+    harness.window.close();
+    await settle(() => harness.dialog.messages.length === 1);
+    assert.equal(harness.dialog.messages.length, 1, 'asked');
+    assert.equal(harness.dialog.messages[0].message, text('native.dialog.saveFailedMessage'));
+    assert.equal(harness.window.isDestroyed(), false, 'Cancel keeps the window open');
   });
 
   await t.test('nothing is asked before the renderer started or after the window is gone: close and quit go through at once', async () => {
@@ -1524,6 +1755,336 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     assert.equal(flushRequests(quitting).length, 1);
   });
 
+  await t.test('U-04: a quit whose save reached the disk asks nothing: the stores close and the application quits', async () => {
+    const directory = profile();
+    const harness = await desktopHarness(directory, { dialogAnswer: answering() });
+    await harness.invoke('trace:initial-board');
+    const pending = manifest(KEY, { updatedAt: '2026-03-04T05:06:11.000Z' });
+    rendererSaving(harness, { on: false }, pending);
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.quitCount === 1);
+    assert.equal(harness.app.quitCount, 1);
+    assert.equal(harness.dialog.messages.length, 0, 'nothing is asked');
+    assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), pending);
+  });
+
+  await t.test('U-04: a quit whose save failed keeps the application here and asks; Retry saves again and the quit goes on', async () => {
+    const directory = profile();
+    const failing = { on: true };
+    // The answer to the question removes the failure: the retry is the renderer's second attempt and it succeeds.
+    const harness = await desktopHarness(directory, { dialogAnswer: answering(() => { failing.on = false; return { response: 0, checkboxChecked: false }; }) });
+    await harness.invoke('trace:initial-board');
+    const pending = manifest(KEY, { updatedAt: '2026-03-04T05:06:12.000Z' });
+    rendererSaving(harness, failing, pending);
+    let prevented = false;
+    harness.app.emit('before-quit', { preventDefault() { prevented = true; } });
+    assert.equal(prevented, true);
+    await settle(() => harness.app.quitCount === 1);
+    assert.equal(harness.dialog.messages.length, 1, 'one question: the save failed');
+    assert.equal(harness.dialog.messages[0].message, text('native.dialog.saveFailedMessage'));
+    assert.deepEqual(Array.from(harness.dialog.messages[0].buttons), saveButtons);
+    assert.equal(flushRequests(harness).length, 2, 'Retry asked the renderer to write again');
+    assert.equal(harness.app.quitCount, 1, 'the quit went on after the save reached the disk');
+    assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), pending);
+  });
+
+  await t.test('U-04: Cancel keeps the application running with its stores open; a later quit saves and leaves without a question', async () => {
+    const directory = profile();
+    const failing = { on: true };
+    const harness = await desktopHarness(directory, { dialogAnswer: answering(2) });
+    await harness.invoke('trace:initial-board');
+    const pending = manifest(KEY, { updatedAt: '2026-03-04T05:06:13.000Z' });
+    rendererSaving(harness, failing, pending);
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.dialog.messages.length === 1);
+    await sleep(30);
+    assert.equal(harness.app.quitCount, 0, 'no quit after Cancel');
+    assert.equal(harness.window.isDestroyed(), false, 'the window stays open');
+    await harness.invoke('trace:save-workspace', KEY, pending); // Accepted: the stores are still open (STORE_CLOSING otherwise).
+    failing.on = false;
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.quitCount === 1);
+    assert.equal(harness.app.quitCount, 1, 'the later quit goes on');
+    assert.equal(harness.dialog.messages.length, 1, 'the later quit asks nothing');
+    assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), pending);
+  });
+
+  await t.test('U-04: Quit without saving needs a second answer; Cancel there keeps the application open, the confirmed quit leaves the last saved state', async () => {
+    const directory = profile();
+    const failing = { on: false };
+    // Replies in turn: quit without saving, Cancel in the confirmation; then again, and the confirmation this time.
+    const harness = await desktopHarness(directory, { dialogAnswer: answering(1, 1, 1, 0) });
+    await harness.invoke('trace:initial-board');
+    const saved = manifest(KEY, { updatedAt: '2026-03-04T05:06:14.000Z' });
+    await harness.invoke('trace:save-workspace', KEY, saved);
+    failing.on = true;
+    rendererSaving(harness, failing, manifest(KEY, { updatedAt: '2026-03-04T05:06:15.000Z' }));
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.dialog.messages.length === 2);
+    assert.deepEqual(Array.from(harness.dialog.messages[1].buttons), confirmButtons);
+    assert.equal(harness.dialog.messages[1].message, text('native.dialog.discardConfirmMessage'));
+    await sleep(30);
+    assert.equal(harness.app.quitCount, 0, 'Cancel in the confirmation: no quit');
+    await harness.invoke('trace:save-workspace', KEY, saved); // Still open.
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.quitCount === 1);
+    assert.equal(harness.dialog.messages.length, 4, 'both questions again on the second quit');
+    assert.equal(harness.app.quitCount, 1, 'the confirmed quit goes on');
+    await assert.rejects(harness.invoke('trace:save-workspace', KEY, saved), storeClosing);
+    assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), saved, 'the unsaved snapshot is discarded: the last saved state stays');
+  });
+
+  await t.test('U-04: closing the window with a failed save keeps it open and asks; Cancel keeps it open, the next close saves first and closes', async () => {
+    const directory = profile();
+    const failing = { on: true };
+    const harness = await desktopHarness(directory, { dialogAnswer: answering(2) });
+    await harness.invoke('trace:initial-board');
+    const pending = manifest(KEY, { updatedAt: '2026-03-04T05:06:16.000Z' });
+    rendererSaving(harness, failing, pending);
+    harness.window.close();
+    await settle(() => harness.dialog.messages.length === 1);
+    await sleep(30);
+    assert.equal(harness.window.isDestroyed(), false, 'a save that failed keeps the window open');
+    assert.equal(harness.dialog.messages[0].message, text('native.dialog.saveFailedMessage'));
+    failing.on = false;
+    harness.window.close();
+    await settle(() => harness.window.isDestroyed());
+    assert.equal(harness.window.isDestroyed(), true, 'the next close saves first and then closes');
+    assert.equal(harness.dialog.messages.length, 1, 'nothing more is asked');
+    assert.equal(flushRequests(harness).length, 2);
+    assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), pending);
+  });
+
+  await t.test('U-04: closing the window and quitting without saving needs the confirmation; the failed save is not retried', async () => {
+    const directory = profile();
+    const harness = await desktopHarness(directory, { dialogAnswer: answering(1, 0) });
+    await harness.invoke('trace:initial-board');
+    rendererSaving(harness, { on: true }, manifest(KEY, { updatedAt: '2026-03-04T05:06:17.000Z' }));
+    harness.window.close();
+    await settle(() => harness.window.isDestroyed());
+    assert.equal(harness.window.isDestroyed(), true, 'the confirmed close goes through');
+    assert.deepEqual(harness.dialog.messages.map((box) => box.message), [text('native.dialog.saveFailedMessage'), text('native.dialog.discardConfirmMessage')]);
+    assert.equal(flushRequests(harness).length, 1, 'no second save was attempted');
+    assert.equal(harness.app.quitCount, 0, 'closing the window alone quits nothing');
+    await assert.rejects(fs.stat(workspaceFile(directory)), { code: 'ENOENT' }, 'the unsaved snapshot was never written');
+  });
+
+  // O-31: the order is recorded. A board that arrives while the quit waits for the renderer's save cancels that quit before the stores
+  // close (the renderer's write still lands), and the board is delivered in between; the same for Open with (open-file) and for a second launch.
+  for (const [label, emitOpen] of [
+    ['open-file', (harness) => harness.app.emit('open-file', { preventDefault() {} }, boardFile)],
+    ['second-instance', (harness) => harness.app.emit('second-instance', {}, ['electron.exe', 'app', `--board=${boardFile}`])],
+  ]) {
+    await t.test(`O-31: a board that arrives by ${label} during the quit's save cancels the quit before the stores close and opens the usual way`, async () => {
+      const directory = profile();
+      const harness = await desktopHarness(directory);
+      await harness.invoke('trace:initial-board');
+      const pending = manifest(KEY, { updatedAt: '2026-03-04T05:06:18.000Z' });
+      const order = [];
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      harness.window.webContents.onSend = (channel, id) => {
+        if (channel === 'trace:board-opened') { order.push('board-opened'); return; }
+        if (channel !== 'trace:flush-request') return;
+        order.push('flush-request');
+        void (async () => {
+          await gate; // The renderer is still writing when the board arrives.
+          await harness.invoke('trace:save-workspace', KEY, pending);
+          order.push('write-accepted');
+          harness.message('trace:flush-done', id, true);
+        })();
+      };
+      let prevented = false;
+      harness.app.emit('before-quit', { preventDefault() { prevented = true; } });
+      assert.equal(prevented, true);
+      emitOpen(harness);
+      await settle(() => order.includes('board-opened'));
+      assert.deepEqual(order, ['flush-request', 'board-opened'], 'the board is delivered while the quit waits for the save');
+      release();
+      await settle(() => order.includes('write-accepted'));
+      await sleep(30);
+      assert.deepEqual(order, ['flush-request', 'board-opened', 'write-accepted'], 'the renderer write is accepted: the stores were still open');
+      assert.equal(harness.app.quitCount, 0, 'the cancelled quit closed nothing and quit nothing');
+      assert.equal(harness.window.isDestroyed(), false);
+      assert.deepEqual(JSON.parse(await fs.readFile(workspaceFile(directory), 'utf8')), pending);
+      playRenderer(harness, async () => {});
+      harness.app.emit('before-quit', { preventDefault() {} });
+      await settle(() => harness.app.quitCount === 1);
+      assert.equal(harness.app.quitCount, 1, 'a later quit goes on as usual');
+    });
+  }
+
+  await t.test('O-31: a board that arrives while the user answers a failed save cancels the quit; the late answer asks nothing and quits nothing', async () => {
+    const directory = profile();
+    const failing = { on: true };
+    let answerLater;
+    const waiting = new Promise((resolve) => { answerLater = resolve; });
+    const harness = await desktopHarness(directory, { dialogAnswer: () => waiting });
+    await harness.invoke('trace:initial-board');
+    rendererSaving(harness, failing, manifest(KEY, { updatedAt: '2026-03-04T05:06:19.000Z' }));
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.dialog.messages.length === 1);
+    harness.app.emit('open-file', { preventDefault() {} }, boardFile);
+    await settle(() => harness.window.webContents.sent.some((entry) => entry.channel === 'trace:board-opened'));
+    assert.equal(harness.window.webContents.sent.some((entry) => entry.channel === 'trace:board-opened'), true, 'the board opens while the question is open');
+    answerLater({ response: 1, checkboxChecked: false }); // The late answer: quit without saving.
+    await sleep(30);
+    assert.equal(harness.dialog.messages.length, 1, 'the late answer asks nothing more');
+    assert.equal(harness.app.quitCount, 0, 'the late answer quits nothing');
+    assert.equal(harness.window.isDestroyed(), false);
+    await harness.invoke('trace:save-workspace', KEY, manifest(KEY, { updatedAt: '2026-03-04T05:06:20.000Z' })); // The stores are open.
+  });
+
+  // O-31 after the stores closed: the board is recorded in the profile, and the application relaunches with the newest recorded board after
+  // the drain; the new process opens it. A relaunch that fails leaves the record, and the next start tells the user about it. Open with is
+  // open-file on macOS and a second launch elsewhere; every platform takes the same path through the code.
+  const openRequest = (harness, platform, filename) => (platform === 'darwin'
+    ? harness.app.emit('open-file', { preventDefault() {} }, filename)
+    : harness.app.emit('second-instance', {}, ['electron.exe', 'app', `--board=${filename}`]));
+  const recordOf = async (directory) => JSON.parse(await fs.readFile(path.join(directory, 'pending-open.json'), 'utf8'));
+  const archivesOf = async (directory) => (await fs.readdir(directory)).filter((name) => /^pending-open\.\d+\.json$/.test(name));
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    await t.test(`O-31 (${platform}): a board that arrives after the stores started closing is recorded, and the application relaunches with it after the drain`, async () => {
+      const directory = profile();
+      const harness = await desktopHarness(directory, { platform }); // No live renderer: the stores close in this very turn.
+      harness.app.emit('before-quit', { preventDefault() {} });
+      openRequest(harness, platform, boardFile);
+      await settle(() => harness.app.quitCount === 1);
+      assert.equal(harness.app.quitCount, 1, 'the quit goes on');
+      assert.equal(harness.app.lockReleased, true, 'the single-instance lock is released before the relaunch');
+      assert.equal(harness.app.relaunches.length, 1);
+      assert.equal(harness.app.relaunches[0].args.at(-1), boardFile, 'the new process is given the board');
+      assert.equal(harness.window.webContents.sent.some((entry) => entry.channel === 'trace:board-opened'), false, 'nothing is delivered into this closing process');
+      assert.deepEqual((await recordOf(directory)).files, [boardFile], 'the board is on disk before the application goes');
+      const relaunched = await desktopHarness(directory, { platform, argv: [boardFile] });
+      // The start archives the record before it could tell the user (noticePendingOpens): wait for the archive, not for a fixed time.
+      for (let attempt = 0; attempt < 300 && (await archivesOf(directory)).length === 0; attempt++) await sleep(10);
+      assert.equal(relaunched.dialog.messages.length, 0, 'the board the process was started with is not reported');
+      assert.equal((await archivesOf(directory)).length, 1, 'the record is archived, not deleted');
+      await assert.rejects(fs.stat(path.join(directory, 'pending-open.json')), { code: 'ENOENT' });
+    });
+
+    await t.test(`O-31 (${platform}): of two boards recorded during the closing the relaunch opens the newest, and the next start tells the user about the other`, async () => {
+      const directory = profile();
+      const other = path.join(project, 'Other.cad');
+      await fs.writeFile(other, BOARD);
+      const harness = await desktopHarness(directory, { platform });
+      harness.app.emit('before-quit', { preventDefault() {} });
+      openRequest(harness, platform, other);
+      openRequest(harness, platform, boardFile);
+      await settle(() => harness.app.quitCount === 1);
+      assert.equal(harness.app.relaunches[0].args.at(-1), boardFile, 'the newest is opened');
+      assert.deepEqual((await recordOf(directory)).files, [other, boardFile]);
+      const next = await desktopHarness(directory, { platform, argv: [boardFile] });
+      await settle(() => next.dialog.messages.length === 1, 300);
+      assert.equal(next.dialog.messages.length, 1, 'one notice: the other board was not opened');
+      assert.equal(next.dialog.messages[0].message, text('native.dialog.pendingOpenMessage'));
+      assert.equal(next.dialog.messages[0].detail, other);
+    });
+
+    await t.test(`O-31 (${platform}): when the relaunch fails the board stays recorded, and the next start tells the user about it`, async () => {
+      const directory = profile();
+      const harness = await desktopHarness(directory, { platform, relaunchError: new Error('the platform refused the relaunch') });
+      harness.app.emit('before-quit', { preventDefault() {} });
+      openRequest(harness, platform, boardFile);
+      await settle(() => harness.app.quitCount === 1);
+      assert.equal(harness.app.quitCount, 1, 'the application still quits');
+      assert.equal(harness.app.relaunches.length, 0, 'no relaunch was made');
+      const next = await desktopHarness(directory, { platform });
+      await settle(() => next.dialog.messages.length === 1, 300);
+      assert.equal(next.dialog.messages.length, 1, 'the user is told about the board');
+      assert.equal(next.dialog.messages[0].detail, boardFile);
+      assert.equal((await archivesOf(directory)).length, 1, 'the record is archived, not deleted');
+    });
+  }
+
+  // The slow exit (FXQA-20261011-01): the final exit is app.exit after the stores drained, and a write that does not finish within the bound is
+  // named in quit.log, so the exit is not held up by it. Each case uses a renderer that answers the flush at once.
+  await t.test('a quit ends with app.exit once the stores are drained: app.quit is not used for the final exit, and nothing unfinished is logged', async () => {
+    const directory = profile();
+    const harness = await desktopHarness(directory);
+    await harness.invoke('trace:initial-board');
+    playRenderer(harness, async () => {});
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.exitCodes.length === 1);
+    assert.deepEqual(harness.app.exitCodes, [0], 'the final exit is app.exit(0)');
+    assert.equal(harness.app.quitCalls ?? 0, 0, 'app.quit is not used for the final exit');
+    await assert.rejects(fs.stat(path.join(directory, 'quit.log')), { code: 'ENOENT' }, 'nothing was unfinished: no quit log');
+  });
+
+  await t.test('the final exit emits will-quit to the application\'s listeners before app.exit(0), as a normal quit does (the packaged QA observer keeps its final snapshot), and quit only once', async () => {
+    const directory = profile();
+    const harness = await desktopHarness(directory);
+    await harness.invoke('trace:initial-board');
+    playRenderer(harness, async () => {});
+    const seen = [];
+    harness.app.on('will-quit', () => seen.push(`will-quit with ${harness.app.exitCodes.length} exit(s) so far`));
+    harness.app.on('quit', () => seen.push(`quit with ${harness.app.exitCodes.length} exit(s) so far`));
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.exitCodes.length === 1);
+    assert.deepEqual(seen, ['will-quit with 0 exit(s) so far'], 'will-quit runs before the exit; quit is left to Electron, which emits it on app.exit');
+    assert.deepEqual(harness.app.exitCodes, [0]);
+  });
+
+  await t.test('the will-quit guard: a will-quit that already ran (on any path) is not emitted again by the final exit', async () => {
+    const directory = profile();
+    const harness = await desktopHarness(directory);
+    await harness.invoke('trace:initial-board');
+    playRenderer(harness, async () => {});
+    let runs = 0;
+    harness.app.on('will-quit', () => { runs++; });
+    harness.app.emit('will-quit', { preventDefault() {} });
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.exitCodes.length === 1);
+    assert.equal(runs, 1, 'will-quit runs once per process');
+    assert.deepEqual(harness.app.exitCodes, [0]);
+  });
+
+  await t.test('a write that does not finish within the quit bound is named in quit.log, and the application exits anyway', async () => {
+    const directory = profile();
+    let reachedRename = false;
+    const gatedFs = new Proxy(fs, { get(source, property) {
+      if (property === 'rename') return async (from, to) => {
+        if (String(to).endsWith(path.join('notes', `${KEY}.json`))) { reachedRename = true; await new Promise(() => {}); } // a rename that never comes
+        return source.rename(from, to);
+      };
+      return source[property];
+    } });
+    const harness = await desktopHarness(directory, { fs: gatedFs });
+    await harness.invoke('trace:initial-board');
+    playRenderer(harness, async () => {});
+    void harness.invoke('trace:save-notes', KEY, [{ id: 'stuck', componentId: 'U1', text: 'never finishes', updatedAt: NOW }]);
+    await settle(() => reachedRename, 500); // the write is in progress when the quit comes: it has reached its rename (no fixed wait)
+    assert.equal(reachedRename, true, 'the write reached its rename before the quit');
+    const started = Date.now();
+    harness.app.emit('before-quit', { preventDefault() {} });
+    await settle(() => harness.app.exitCodes.length === 1, 700);
+    assert.equal(harness.app.exitCodes.length, 1, 'the application exits at the bound');
+    assert.ok(Date.now() - started < 6000, 'the exit is not held up by the stuck write');
+    const log = await fs.readFile(path.join(directory, 'quit.log'), 'utf8');
+    assert.match(log, /not drained within 2000 ms/, 'the quit log names the bound');
+    assert.match(log, /writing: .*notes/, 'and the write that did not finish');
+  });
+
+  await t.test('a board recorded for the relaunch during the drain whose record never gets written does not hold the exit: the quit is bounded and the relaunch still opens the board', async () => {
+    const directory = profile();
+    const stuckFs = new Proxy(fs, { get(source, property) {
+      if (property === 'writeFile') return async (file, ...rest) => {
+        if (String(file).endsWith('pending-open.json')) await new Promise(() => {}); // the record write that never comes
+        return source.writeFile(file, ...rest);
+      };
+      return source[property];
+    } });
+    const harness = await desktopHarness(directory, { platform: 'win32', fs: stuckFs }); // no renderer: the stores close in this very turn
+    harness.app.emit('before-quit', { preventDefault() {} });
+    openRequest(harness, 'win32', boardFile); // arrives while the drain waits: recorded, and its write never finishes
+    await settle(() => harness.app.exitCodes.length === 1, 400);
+    assert.deepEqual(harness.app.exitCodes, [0], 'the application exits at the bound');
+    assert.equal(harness.app.relaunches.at(-1)?.args.at(-1), boardFile, 'the relaunch still gets the board, which is kept in memory');
+    const log = await fs.readFile(path.join(directory, 'quit.log'), 'utf8');
+    assert.match(log, /not drained within 2000 ms/, 'the quit log names the bound');
+  });
+
   await t.test('preload: onFlushRequest runs every listener and answers trace:flush-done with the request id once all of them settled (also with none, or a failing one)', async () => {
     const handlers = new Map();
     const sent = [];
@@ -1539,7 +2100,7 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     assert.equal(typeof request, 'function', 'the preload listens for the request');
     request({}, 1);
     await sleep(5);
-    assert.deepEqual(sent, [['trace:flush-done', 1]], 'no listener: answered at once');
+    assert.deepEqual(sent, [['trace:flush-done', 1, true]], 'no listener: answered at once, nothing unsaved');
     let release;
     const slow = new Promise((resolve) => { release = resolve; });
     const off = [api.onFlushRequest(() => slow), api.onFlushRequest(() => { throw new Error('a listener that fails'); }), api.onFlushRequest(() => Promise.reject(new Error('and one that rejects')))];
@@ -1548,15 +2109,46 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     assert.equal(sent.length, 1, 'no answer while a listener is still writing');
     release();
     await sleep(5);
-    assert.deepEqual(sent.at(-1), ['trace:flush-done', 2], 'answered after every listener settled, failures included');
+    assert.deepEqual(sent.at(-1), ['trace:flush-done', 2, false], 'answered after every listener settled; one that failed means not saved (U-04)');
     for (const detach of off) detach();
     request({}, 3);
     await sleep(5);
-    assert.deepEqual(sent.at(-1), ['trace:flush-done', 3], 'detached listeners are gone');
+    assert.deepEqual(sent.at(-1), ['trace:flush-done', 3, true], 'detached listeners are gone');
+    const succeeding = api.onFlushRequest(() => {});
+    request({}, 4);
+    await sleep(5);
+    assert.deepEqual(sent.at(-1), ['trace:flush-done', 4, true], 'listeners that all succeed: saved');
+    succeeding();
     for (const bad of ['x', 1.5, undefined, null]) request({}, bad);
     await sleep(5);
-    assert.equal(sent.length, 3, 'a request without a numeric id is ignored');
+    assert.equal(sent.length, 4, 'a request without a numeric id is ignored');
     assert.throws(() => api.onFlushRequest('not a function'), { name: 'TypeError', message: /flush listener must be a function/ });
+  });
+
+  await t.test('TB-041: the saved language is known before the first paint: the preload reads it synchronously, the main process answers only its own window, a new profile has none', async () => {
+    const saved = profile();
+    await fs.mkdir(saved, { recursive: true });
+    await fs.writeFile(path.join(saved, 'config.json'), JSON.stringify({ version: 1, settings: { language: 'de', theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: true }, recentBoards: [] }));
+    const harness = await desktopHarness(saved);
+    // Synchronous IPC: the listener writes its answer into event.returnValue. The app window's own event is the one the harness builds.
+    const ask = (instance, event) => {
+      instance.messages.get('trace:initial-language')(event);
+      return event.returnValue;
+    };
+    const fromWindow = (instance) => ({ sender: instance.window.webContents, senderFrame: instance.window.webContents.mainFrame });
+    assert.equal(ask(harness, { ...fromWindow(harness) }), 'de', 'the main process answers the stored language to the app window');
+    assert.equal(ask(harness, { sender: {}, senderFrame: { url: 'https://example.com/' } }), null, 'a sender that is not the app window gets nothing');
+    const fresh = await desktopHarness(profile());
+    assert.equal(ask(fresh, { ...fromWindow(fresh) }), null, 'a new profile has no stored language yet: the renderer keeps the system language');
+    // The preload reads the same answer synchronously and hands it to the renderer as initialLanguage (electron/preload.cjs).
+    let api;
+    const electron = {
+      contextBridge: { exposeInMainWorld(_name, value) { api = value; } },
+      ipcRenderer: { invoke: () => Promise.resolve(undefined), on() {}, removeListener() {}, send() {}, sendSync: (channel) => (channel === 'trace:initial-language' ? 'de' : undefined) },
+      webUtils: { getPathForFile: () => '' },
+    };
+    vm.runInNewContext(await fs.readFile(path.resolve(__dirname, '..', 'electron', 'preload.cjs'), 'utf8'), { require: (name) => (name === 'electron' ? electron : require(name)) }, { filename: 'preload.cjs' });
+    assert.equal(api.initialLanguage, 'de', 'the preload exposes the saved language before the renderer starts');
   });
 
   await t.test('the code of a rejected invoke reaches the renderer API through preload.cjs: quit-time save has code STORE_CLOSING, other errors pass untouched', async () => {
@@ -1571,9 +2163,10 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     const source = await fs.readFile(path.resolve(__dirname, '..', 'electron', 'preload.cjs'), 'utf8');
     vm.runInNewContext(source, { require: (name) => (name === 'electron' ? electron : require(name)) }, { filename: 'preload.cjs' });
     assert.deepEqual(Object.keys(api).sort(), [
-      'acceptBoard', 'appendReadings', 'checkForUpdates', 'clearNetworkActivity', 'close', 'droppedFilePath', 'exportReadings', 'exportWorkspace', 'getNetworkActivity', 'getNotes', 'getSettings', 'importReadings', 'initialBoard', 'isMaximized',
-      'cancelBugReport', 'checkSupport', 'discardBugReportDraft', 'getBugReportDraft', 'getSupportStatus', 'listReadingFamilies', 'loadWorkspace', 'locateDocuments', 'maximize', 'minimize', 'onFlushRequest', 'onMaximized', 'onOpenBoard', 'openBoard', 'openSupportLink', 'openUpdatePage', 'pickDiagnosticFile', 'pickDocuments', 'prepareBugReport', 'prepareSupport', 'readBoard', 'readDocument', 'readReadings',
-      'recentBoards', 'saveBugReportDraft', 'saveDiagnosticReport', 'saveNotes', 'saveSettings', 'saveWorkspace', 'sendBugReport',
+      'acceptBoard', 'appendReadings', 'checkForStartupUpdates', 'checkForUpdates', 'clearNetworkActivity', 'close', 'droppedFilePath', 'exportReadings', 'exportWorkspace', 'getNetworkActivity', 'getNotes', 'getSettings', 'importReadings', 'initialBoard', 'isMaximized',
+      'cancelBugReport', 'checkSupport', 'discardBugReportDraft', 'getBugReportDraft', 'getConfigState', 'getSupportStatus', 'listReadingFamilies', 'loadWorkspace', 'locateDocuments', 'maximize', 'minimize', 'onFlushRequest', 'onMaximized', 'onOpenBoard', 'onOpenFailed', 'onConfigStateChanged', 'onSettingsChanged', 'openBoard', 'openSupportLink', 'openUpdatePage', 'pickDiagnosticFile', 'pickDocuments', 'prepareBugReport', 'prepareSupport', 'readBoard', 'readDocument', 'readReadings',
+      'qaDeviceDatabase', 'recentBoards', 'saveBugReportDraft', 'saveDiagnosticReport', 'saveNotes', 'saveSettings', 'saveWorkspace', 'sendBugReport',
+      'libraryBoardDetail', 'libraryCancelScan', 'libraryListBoards', 'libraryListFolders', 'libraryListRoots', 'libraryLoadCorrections', 'libraryPickRoot', 'libraryRemoveRoot', 'libraryScan', 'libraryScanSkipStep', 'librarySaveCorrections', 'getNoSandboxConsent', 'revokeNoSandboxConsent', 'initialLanguage',
     ].sort(), 'the preload exposes exactly the TraceDesktop members; support status, preparation and verification accept no argument');
     harness.app.emit('before-quit', { preventDefault() {} });
     for (const call of [() => api.saveNotes(KEY, []), () => api.saveWorkspace(KEY, manifest()), async () => api.saveSettings(await api.getSettings())]) {
@@ -1691,9 +2284,9 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     assert.deepEqual(plain(await harness.invoke('trace:pick-documents')), []);
     const filters = harness.dialog.openOptions.at(-1).filters;
     assert.equal(harness.dialog.openOptions.at(-1).properties.includes('multiSelections'), true);
-    assert.deepEqual(plain(filters.slice(1).map((filter) => filter.name)), ['PDF documents', 'Images', 'Schematics']);
+    assert.deepEqual(plain(filters.slice(1).map((filter) => filter.name)), ['native.dialog.kindPdf', 'native.dialog.kindImage', 'native.dialog.kindSchematic'].map((key) => i18n.translate('hu', key)));
     await harness.invoke('trace:pick-documents', { kinds: ['pdf'], multiple: false });
-    assert.deepEqual(plain(harness.dialog.openOptions.at(-1)), { ...plain(harness.dialog.openOptions.at(-1)), properties: ['openFile'], filters: [{ name: 'PDF documents', extensions: ['pdf'] }] });
+    assert.deepEqual(plain(harness.dialog.openOptions.at(-1)), { ...plain(harness.dialog.openOptions.at(-1)), properties: ['openFile'], filters: [{ name: i18n.translate('hu', 'native.dialog.kindPdf'), extensions: ['pdf'] }] });
     harness.dialog.choice = { canceled: false, filePaths: [pdfFile, pngFile] };
     const picked = await harness.invoke('trace:pick-documents');
     assert.deepEqual(plain(picked.map((item) => [item.name, item.kind, item.format, item.key])), [['ref.pdf', 'pdf', 'pdf', sha256(PDF)], ['photo.png', 'image', 'png', sha256(png)]]);
@@ -1725,7 +2318,7 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     harness.dialog.saveChoice = { canceled: true, filePath: undefined };
     assert.equal(await harness.invoke('trace:export-workspace', { ...request, boardKey: boardKeyOfFile }), null, 'cancel resolves null');
     assert.match(harness.dialog.saveOptions.at(-1).defaultPath, /Board-workspace\.zip$/);
-    assert.deepEqual(plain(harness.dialog.saveOptions.at(-1).filters), [{ name: 'ZIP archive', extensions: ['zip'] }]);
+    assert.deepEqual(plain(harness.dialog.saveOptions.at(-1).filters), [{ name: i18n.translate('hu', 'native.dialog.exportZipFilter'), extensions: ['zip'] }]);
     const target = path.join(root, 'bundle');
     harness.dialog.saveChoice = { canceled: false, filePath: target };
     const result = await harness.invoke('trace:export-workspace', { boardKey: boardKeyOfFile, documentIds: ['d2'], includeBoard: true, includeNotes: true });
@@ -1772,7 +2365,8 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     failures = 1000;
     const stuck = path.join(root, 'stuck-bundle.zip');
     harness.dialog.saveChoice = { canceled: false, filePath: stuck };
-    await assert.rejects(harness.invoke('trace:export-workspace', request), { code: 'EXPORT_WRITE_FAILED', message: /^\[EXPORT_WRITE_FAILED\] / });
+    // O-07: the held destination says that another program has it open (the code stays EXPORT_WRITE_FAILED).
+    await assert.rejects(harness.invoke('trace:export-workspace', request), { code: 'EXPORT_WRITE_FAILED', message: `[EXPORT_WRITE_FAILED] ${text('native.error.fileInUse')}` });
     await assert.rejects(fs.stat(stuck), { code: 'ENOENT' }, 'no partial bundle');
     assert.deepEqual((await fs.readdir(root)).filter((name) => name.endsWith('.tmp')), [], 'no temporary file');
   });
@@ -1901,7 +2495,9 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     await assert.rejects(harness.invoke('trace:pick-documents'), { code: 'DOCUMENT_CLOSING', message: /^\[DOCUMENT_CLOSING\] / });
     assert.equal(harness.dialog.openOptions.length, 0, 'no open dialog after the quit intent');
 
-    // External open (second instance): a read that fails after the quit intent shows no error box and no later delivery starts.
+    // External open (second instance) while the quit waits for the renderer's save (O-31): a read that fails after the quit intent shows no
+    // error box; a second launch with a board cancels the quit before the stores close and its open goes on like any other (its own read,
+    // a failed read reported in the usual way).
     const external = await gatedHarness(profile(), { realpath: (filename) => (filename.endsWith('Gone.cad') ? 'external' : undefined) });
     await external.invoke('trace:initial-board');
     const gate = external.arm('external');
@@ -1913,10 +2509,15 @@ test('native workspace, documents and shutdown gate through the IPC handlers', a
     gate.releases[0]();
     await sleep(30);
     assert.deepEqual(external.dialog.messages, [], 'no message box after the quit intent');
+    assert.deepEqual(openFailures(external), [], 'and no notice either');
     external.app.emit('second-instance', {}, ['electron.exe', 'app', gone]);
-    await sleep(10);
-    assert.deepEqual(external.dialog.messages, []);
-    assert.equal(gate.hits, 1, 'and the new delivery never started');
+    await settle(() => gate.hits === 2);
+    assert.equal(gate.hits, 2, 'the open cancelled the quit and its own read started');
+    assert.equal(external.app.quitCount, 0, 'the quit did not go on');
+    gate.releases[1]();
+    await settle(() => openFailures(external).length === 1);
+    assert.equal(openFailures(external).length, 1, 'the failed open is announced in the window');
+    assert.equal(external.dialog.messages.length, 0, 'and no native box');
   });
 });
 
@@ -2111,6 +2712,22 @@ test('update check (electron/updates.cjs): one fixed HTTPS request, a strict tag
     }
   });
 
+  await t.test('a hyphen in the running pre-release suffix (1.2.0-rc-1) is read like the dotted form: an older release is current, a newer or equal one is available, a suffix past 32 characters is unavailable', async () => {
+    for (const [current, tag, status] of [
+      ['1.2.0-rc-1', 'v1.2.0', 'available'], ['1.2.0-rc-1', 'v1.1.9', 'current'], ['1.2.0-rc-1', 'v1.2.1', 'available'], ['1.2.0-rc-1.2', 'v1.2.0', 'available'],
+      ['1.2.0-alpha-beta', 'v1.2.0', 'available'], ['1.2.0-rc.1-2', 'v1.2.0', 'available'], ['1.2.0-rc-1', 'v1.2.0-rc-2', 'current'],
+    ]) {
+      const { result } = await check(jsonResponse(releaseBody(tag)), { currentVersion: current });
+      assert.equal(result.status, status, `running ${current}, latest ${tag}`);
+      if (status === 'available') assert.deepEqual(result, { status, version: tag.slice(1), tag });
+    }
+    const longest = await check(jsonResponse(releaseBody('v1.2.1')), { currentVersion: `1.2.0-${'a'.repeat(32)}` });
+    assert.deepEqual(longest.result, { status: 'available', version: '1.2.1', tag: 'v1.2.1' }, 'a 32-character suffix is read');
+    const tooLong = await check(jsonResponse(releaseBody('v9.9.9')), { currentVersion: `1.2.0-${'a'.repeat(33)}` });
+    assert.deepEqual(tooLong.result, UNAVAILABLE);
+    assert.equal(tooLong.calls.length, 0, 'no request for a version the app cannot read');
+  });
+
   await t.test('a draft or a pre-release is never offered (current), however new its tag is', async () => {
     for (const extra of [{ prerelease: true }, { draft: true }, { draft: true, prerelease: true }, { prerelease: true, tag_name: 'v9.0.0-beta.1' }]) {
       assert.deepEqual((await check(jsonResponse(releaseBody('v9.0.0', extra)))).result, { status: 'current' }, JSON.stringify(extra));
@@ -2295,7 +2912,7 @@ test('update check (electron/updates.cjs): one fixed HTTPS request, a strict tag
   });
 });
 
-test('update notification: trace:check-for-updates and trace:open-update-page are privileged, read no renderer argument, and open only the release page of the tag the main process validated', async (t) => {
+test('update notification: startup/manual checks and open-page are privileged, read no renderer argument, and open only the page of the validated tag', async (t) => {
   const root = await makeTempDir('trace-update-handlers-test-');
   t.after(async () => {
     const absolute = path.resolve(root);
@@ -2313,9 +2930,9 @@ test('update notification: trace:check-for-updates and trace:open-update-page ar
   const release = (tag, extra) => () => jsonResponse(releaseBody(tag, extra));
   const failing = () => { throw new Error('offline'); };
 
-  await t.test('both channels exist, are privileged handlers, and a forged sender or subframe reaches neither the network nor the browser', async () => {
+  await t.test('all three channels exist, are privileged handlers, and a forged sender or subframe reaches neither the network nor the browser', async () => {
     const harness = await updating(release('v9.9.9'));
-    for (const channel of ['trace:check-for-updates', 'trace:open-update-page']) {
+    for (const channel of ['trace:check-for-startup-updates', 'trace:check-for-updates', 'trace:open-update-page']) {
       const handler = harness.handlers.get(channel);
       assert.equal(typeof handler, 'function', channel);
       await assert.rejects(handler({ sender: {}, senderFrame: { url: 'https://example.com/' } }), /nem az alkalmazás/, channel);
@@ -2521,14 +3138,16 @@ test('update notification: trace:check-for-updates and trace:open-update-page ar
     };
     vm.runInNewContext(preload, { require: (name) => (name === 'electron' ? electron : require(name)) }, { filename: 'preload.cjs' });
     assert.equal(typeof api.checkForUpdates, 'function');
+    assert.equal(typeof api.checkForStartupUpdates, 'function');
     assert.equal(typeof api.openUpdatePage, 'function');
     await api.checkForUpdates('https://evil.example/', { tag: 'v9.9.9' });
+    await api.checkForStartupUpdates('https://evil.example/', { tag: 'v9.9.9' });
     await api.openUpdatePage('https://evil.example/', 'v9.9.9');
-    assert.deepEqual(calls, [['trace:check-for-updates'], ['trace:open-update-page']], 'no renderer argument is forwarded');
+    assert.deepEqual(calls, [['trace:check-for-updates'], ['trace:check-for-startup-updates'], ['trace:open-update-page']], 'no renderer argument is forwarded');
   });
 });
 
-test('settings: updateCheck defaults to on, is validated like the other booleans, and a damaged stored value never resets the other settings', async (t) => {
+test('settings: updateCheck defaults to off, the first-start answer is stored once, is validated like the other booleans, and a damaged stored value never resets the other settings', async (t) => {
   const root = await makeTempDir('trace-update-setting-test-');
   t.after(async () => {
     const absolute = path.resolve(root);
@@ -2545,10 +3164,25 @@ test('settings: updateCheck defaults to on, is validated like the other booleans
   const readConfig = async (directory) => JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8'));
   const stored = { language: 'de', theme: 'light', layout: 'focus', motion: false, showLabels: false, showConnections: false };
 
-  await t.test('a fresh profile and a profile saved before this setting existed have it switched on', async () => {
-    assert.equal((await (await desktopHarness(await profile('fresh'))).invoke('trace:get-settings')).updateCheck, true);
+  await t.test('a fresh profile and a profile saved before this setting existed have it off, and the question not yet asked', async () => {
+    assert.equal((await (await desktopHarness(await profile('fresh'))).invoke('trace:get-settings')).updateCheck, false);
     const legacy = await desktopHarness(await profile('legacy', { version: 1, settings: stored, recentBoards: [] }));
-    assert.deepEqual(plain(await legacy.invoke('trace:get-settings')), { ...stored, updateCheck: true }, 'the other settings are untouched');
+    assert.deepEqual(plain(await legacy.invoke('trace:get-settings')), { ...stored, updateCheck: false, updateCheckAsked: false }, 'the other settings are untouched');
+  });
+
+  await t.test('the first-start answer is stored with the switch, survives a restart, and a caller that omits it keeps it', async () => {
+    const harness = await desktopHarness(await profile('asked'));
+    const settings = plain(await harness.invoke('trace:get-settings'));
+    assert.equal(settings.updateCheckAsked, false, 'not asked on a fresh profile');
+    await harness.invoke('trace:save-settings', { ...settings, updateCheck: true, updateCheckAsked: true });
+    const reopened = await desktopHarness(path.join(root, 'asked'));
+    const again = plain(await reopened.invoke('trace:get-settings'));
+    assert.equal(again.updateCheck, true);
+    assert.equal(again.updateCheckAsked, true, 'the answer survives a restart');
+    const { updateCheckAsked: _omitted, ...withoutAsked } = again;
+    await reopened.invoke('trace:save-settings', { ...withoutAsked, theme: 'light' });
+    assert.equal((await reopened.invoke('trace:get-settings')).updateCheckAsked, true, 'an older caller keeps the answer');
+    await assert.rejects(reopened.invoke('trace:save-settings', { ...again, updateCheckAsked: 'yes' }), /érvénytelenek/);
   });
 
   await t.test('switching it off is saved, survives a restart, and a caller that omits it keeps the current value', async () => {
@@ -2568,13 +3202,13 @@ test('settings: updateCheck defaults to on, is validated like the other booleans
     assert.equal((await readConfig(directory)).settings.updateCheck, true);
   });
 
-  await t.test('a damaged stored value falls back to the default (on) without resetting any other stored setting', async () => {
+  await t.test('a damaged stored value falls back to the default (off) without resetting any other stored setting', async () => {
     for (const [index, bad] of ['false', 'true', 0, 1, null, [], {}, 'yes'].entries()) {
       const harness = await desktopHarness(await profile(`damaged-${index}`, { version: 1, settings: { ...stored, updateCheck: bad }, recentBoards: [] }));
-      assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { ...stored, updateCheck: true }, JSON.stringify(bad));
+      assert.deepEqual(plain(await harness.invoke('trace:get-settings')), { ...stored, updateCheck: false, updateCheckAsked: false }, JSON.stringify(bad));
     }
     const kept = await desktopHarness(await profile('stored-false', { version: 1, settings: { ...stored, updateCheck: false }, recentBoards: [] }));
-    assert.deepEqual(plain(await kept.invoke('trace:get-settings')), { ...stored, updateCheck: false }, 'a valid stored false is kept');
+    assert.deepEqual(plain(await kept.invoke('trace:get-settings')), { ...stored, updateCheck: false, updateCheckAsked: false }, 'a valid stored false is kept');
   });
 
   await t.test('trace:save-settings rejects a value that is not a boolean, writes nothing, and keeps the other settings', async () => {
@@ -2691,6 +3325,7 @@ test('egress registration: a feature needs an exact host list and limits; a bad 
       assert.equal(layer.userAgent, null);
     }
     assert.equal(sampleEgress({ version: '1.3.0-rc.1' }).layer.userAgent, 'TRACE-Boardviewer/1.3.0-rc.1');
+    assert.equal(sampleEgress({ version: '1.3.0-rc-1' }).layer.userAgent, 'TRACE-Boardviewer/1.3.0-rc-1');
   });
 });
 
@@ -3426,7 +4061,7 @@ test('egress isolation: no main-process file but electron/net/egress.cjs reaches
   });
 });
 
-test('network activity in the main process: the update check runs through egress and is logged, and the renderer can read and empty the log but never start a request', async (t) => {
+test('network activity in the main process: update checks use egress, automatic checks honor the saved setting, and the renderer can only read or empty the log', async (t) => {
   const root = await makeTempDir('trace-network-activity-test-');
   t.after(async () => {
     const absolute = path.resolve(root);
@@ -3462,7 +4097,7 @@ test('network activity in the main process: the update check runs through egress
     const harness = await networking(release('v9.9.9'));
     assert.deepEqual(harness.partitions, [], 'no partition at start-up');
     const first = await activity(harness);
-    assert.deepEqual(first.features, [{ id: 'update-check', hosts: ['api.github.com'], methods: ['GET'], optIn: 'updateCheck', enabled: true }, { id: 'support-verification', hosts: [require('../electron/support.cjs').FEATURE.hosts[0]], methods: ['GET'], optIn: 'supportVerification', enabled: false }, { id: 'bug-report', hosts: ['trace-bug-report.trace-boardviewer.workers.dev'], methods: ['POST'], optIn: null, enabled: true }]);
+    assert.deepEqual(first.features, [{ id: 'update-check', hosts: ['api.github.com'], methods: ['GET'], optIn: 'updateCheck', enabled: false }, { id: 'support-verification', hosts: [require('../electron/support.cjs').FEATURE.hosts[0]], methods: ['GET'], optIn: 'supportVerification', enabled: false }, { id: 'bug-report', hosts: ['trace-bug-report.trace-boardviewer.workers.dev'], methods: ['POST'], optIn: null, enabled: true }]);
     assert.deepEqual(first.entries, []);
     assert.equal(first.dropped, 0);
     assert.equal(first.limit, 200);
@@ -3509,18 +4144,37 @@ test('network activity in the main process: the update check runs through egress
     assert.equal(harness.net.requests.length, 5);
   });
 
-  await t.test('the setting is the switch of the automatic check, and Check now (a user action) still goes through with it off; the list shows the state live', async () => {
+  await t.test('main blocks the automatic check when its saved setting is off, while Check now still works; the list shows the state live', async () => {
     const harness = await networking(release('v1.2.1'));
     const settings = plain(await harness.invoke('trace:get-settings'));
-    assert.equal((await activity(harness)).features[0].enabled, true);
+    assert.equal((await activity(harness)).features[0].enabled, false, 'off by default');
+    await harness.invoke('trace:save-settings', { ...settings, updateCheck: true, updateCheckAsked: true });
+    assert.equal((await activity(harness)).features[0].enabled, true, 'on in the list once switched on');
     await harness.invoke('trace:save-settings', { ...settings, updateCheck: false });
     assert.equal((await activity(harness)).features[0].enabled, false, 'off in the list as soon as it is saved');
     assert.equal((await activity(harness)).features[0].optIn, 'updateCheck');
+    assert.deepEqual(plain(await harness.invoke('trace:check-for-startup-updates')), { status: 'unavailable' }, 'main refuses the automatic request when the stored setting is off');
+    assert.equal(harness.net.requests.length, 0, 'the disabled startup path makes no request');
     assert.deepEqual(plain(await harness.invoke('trace:check-for-updates')), { status: 'available', version: '1.2.1' }, 'Check now is the user\'s own request');
     assert.equal(harness.net.requests.length, 1);
     assert.equal((await activity(harness)).entries[0].outcome, 'ok');
     await harness.invoke('trace:save-settings', { ...settings, updateCheck: true });
     assert.equal((await activity(harness)).features[0].enabled, true);
+  });
+
+  await t.test('main runs the automatic check when its saved setting is on: one logged request gets the newer release, and a repeat inside the cooldown is the last answer again', async () => {
+    const harness = await networking(release('v1.2.1'));
+    const later = (ms) => vm.runInContext(`Date.now = ((real, offset) => () => real() + offset)(Date.now, ${ms})`, harness.context);
+    assert.equal(plain(await harness.invoke('trace:get-settings')).updateCheck, false, 'off by default');
+    await harness.invoke('trace:save-settings', { ...plain(await harness.invoke('trace:get-settings')), updateCheck: true, updateCheckAsked: true });
+    assert.deepEqual(plain(await harness.invoke('trace:check-for-startup-updates')), { status: 'available', version: '1.2.1' }, 'the start-up check reports the newer release');
+    assert.equal(harness.net.requests.length, 1, 'exactly one request for the automatic check');
+    assert.equal(harness.net.requests[0].url, `https://api.github.com${UPDATE_PATH}`);
+    assert.deepEqual((await activity(harness)).entries.map((entry) => [entry.feature, entry.outcome, entry.status, entry.error]), [['update-check', 'ok', 200, null]], 'the request is one ok entry in the log');
+    later(1000);
+    assert.deepEqual(plain(await harness.invoke('trace:check-for-startup-updates')), { status: 'available', version: '1.2.1' }, 'inside the cooldown: the last answer again');
+    assert.equal(harness.net.requests.length, 1, 'no second request inside the cooldown');
+    assert.equal((await activity(harness)).entries.length, 1, 'and no second log entry');
   });
 
   await t.test('the egress rules hold for the update feature in the main process: the exact URL only, the exact headers, no credentials, no redirects', async () => {
@@ -3598,6 +4252,32 @@ test('network activity in the main process: the update check runs through egress
   });
 });
 
+// MAC-TEST-20261011-04: the role items of the macOS menu (About, Hide, Quit, Undo, Copy, Zoom, Close Window, ...) showed the system's English
+// text in every language. Each role item keeps its role, so the action stays native, and now carries a translated label.
+test('macOS menu: every role item keeps its role and has a translated label in every language', () => {
+  const { applicationMenuTemplate } = require('../electron/app-menu.cjs');
+  const roleItems = (items) => items.flatMap((item) => [...(item.role ? [item] : []), ...(Array.isArray(item.submenu) ? roleItems(item.submenu) : [])]);
+  const expectedRoles = ['about', 'hide', 'hideOthers', 'unhide', 'quit', 'undo', 'redo', 'cut', 'copy', 'paste', 'selectAll', 'minimize', 'zoom', 'close'];
+  for (const language of i18n.LANGUAGES) {
+    const template = applicationMenuTemplate({ platform: 'darwin', appName: 'TRACE Boardviewer', t: (key, params) => i18n.translate(language, key, params), openSettings() {} });
+    const items = roleItems(template);
+    assert.deepEqual(items.map((item) => item.role), expectedRoles, `${language}: the native roles are unchanged`);
+    for (const item of items) {
+      assert.equal(typeof item.label, 'string', `${language}: ${item.role} has a label`);
+      assert.ok(item.label.trim().length > 0, `${language}: ${item.role} has a non-empty label`);
+      assert.ok(!item.label.startsWith('native.menu.'), `${language}: ${item.role} shows text, not a catalogue key`);
+    }
+    const named = items.filter((item) => ['about', 'hide', 'quit'].includes(item.role));
+    assert.equal(named.filter((item) => item.label.includes('TRACE Boardviewer')).length, 3, `${language}: about, hide and quit name the application`);
+  }
+  assert.equal(i18n.translate('en', 'native.menu.about', { app: 'TRACE Boardviewer' }), 'About TRACE Boardviewer');
+  assert.equal(i18n.translate('hu', 'native.menu.undo'), 'Visszavonás');
+  // The Hungarian application items follow the macOS wording: "A TRACE Boardviewer névjegye", "… elrejtése", "Kilépés a … alkalmazásból".
+  assert.equal(i18n.translate('hu', 'native.menu.about', { app: 'TRACE Boardviewer' }), 'A TRACE Boardviewer névjegye');
+  assert.equal(i18n.translate('hu', 'native.menu.hide', { app: 'TRACE Boardviewer' }), 'A TRACE Boardviewer elrejtése');
+  assert.equal(i18n.translate('hu', 'native.menu.quit', { app: 'TRACE Boardviewer' }), 'Kilépés a TRACE Boardviewer alkalmazásból');
+});
+
 // macOS lifecycle (docs/MAC_VALIDATION.md M-03, M-04 and the native finding N-02). main.cjs reads the platform from process.platform, which the
 // harness fakes through options.platform (default win32). Everything that changes behaviour is darwin-only; the Windows / Linux rows prove it did not.
 // (M-01, "no application menu", was refuted natively: macOS keeps Electron's default menu, View > Reload and Toggle Developer Tools included, even
@@ -3643,10 +4323,11 @@ test('macOS lifecycle: application menu, activate before startup finished, open-
     const [template] = harness.menu.templates;
     assert.equal(harness.menu.applied.length, 1, 'the menu is set once');
     assert.equal(harness.menu.applied[0].template, template, 'the built menu is the one set');
-    assert.deepEqual(plain(template.map((item) => item.label)), ['TRACE Boardviewer', 'Edit', 'Window']);
+    // The harness default is a fresh profile on a Hungarian system: the labels follow the catalogue, Settings… sits after About.
+    assert.deepEqual(plain(template.map((item) => item.label)), ['TRACE Boardviewer', i18n.translate('hu', 'native.menu.edit'), i18n.translate('hu', 'native.menu.window')]);
     assert.equal(template.some((item) => item.role !== undefined), false, 'no role menus at the top level: appMenu / editMenu / windowMenu would add Services, Speech and the window list');
-    assert.deepEqual(plain(template.map((item) => item.submenu.map((entry) => entry.role ?? entry.type))), [
-      ['about', 'separator', 'hide', 'hideOthers', 'unhide', 'separator', 'quit'],
+    assert.deepEqual(plain(template.map((item) => item.submenu.map((entry) => entry.role ?? entry.type ?? entry.label))), [
+      ['about', 'separator', i18n.translate('hu', 'native.menu.settings'), 'separator', 'hide', 'hideOthers', 'unhide', 'separator', 'quit'],
       ['undo', 'redo', 'separator', 'cut', 'copy', 'paste', 'selectAll'],
       ['minimize', 'zoom', 'close'],
     ]);
@@ -3771,6 +4452,17 @@ test('macOS lifecycle: application menu, activate before startup finished, open-
     await early.waitForWindow();
     assert.equal((await early.invoke('trace:initial-board')).startupSource, 'argument');
     assert.equal(early.windows.length, 1);
+  });
+
+  await t.test('M-04: open-file before ready of a file TRACE does not read: the start-up answer is the unsupported-file error, one window, no native box', async () => {
+    const unsupported = path.join(root, 'Opened.unsupported');
+    const early = await desktopHarness(profile(), { platform: 'darwin', deferReady: true });
+    early.app.emit('open-file', openEvent(), unsupported);
+    early.releaseReady();
+    await early.waitForWindow();
+    await assert.rejects(early.invoke('trace:initial-board'), { message: i18n.translate('hu', 'native.error.unsupportedFile') });
+    assert.equal(early.windows.length, 1);
+    assert.equal(early.dialog.messages.length, 0);
   });
 
   await t.test('M-04: open-file while quitting creates no window', async () => {
@@ -3954,7 +4646,7 @@ test('renderer and window lifecycle: a gone or hung renderer, a window that neve
     const recovered = await desktopHarness(await profile());
     await recovered.invoke('trace:initial-board');
     let flushRequests = 0;
-    recovered.window.webContents.onSend = (channel, id) => { if (channel === 'trace:flush-request') { flushRequests++; recovered.message('trace:flush-done', id); } };
+    recovered.window.webContents.onSend = (channel, id) => { if (channel === 'trace:flush-request') { flushRequests++; recovered.message('trace:flush-done', id, true); } };
     let answer;
     recovered.dialog.answer = () => new Promise((resolve) => { answer = resolve; });
     recovered.window.webContents.emit('unresponsive');
@@ -4161,6 +4853,204 @@ test('start-up file and settings file: a failed start-up argument falls through 
     assert.deepEqual(await fs.readdir(stuck), ['config.json']);
     assert.equal(JSON.parse(await fs.readFile(path.join(stuck, 'config.json'), 'utf8')).settings.theme, 'light');
   });
+
+  // HUNT-WIN-20261011-02 and its follow-up: a sharing lock (another program, an antivirus scan) is not a damaged file. A locked file is read again
+  // and the start never waits for it: the window opens at once on defaults, and the renderer reads the state (trace:config-state). A read-only file
+  // is never replaced: the change applies to this session in memory and is saved once the file is writable. A damaged file is kept aside before the
+  // first save. Each case runs on the three platforms' logic (the harness platform), since the decisions are the same there.
+  const lockedFs = (state, code = 'EBUSY') => new Proxy(fs, { get(target, property) {
+    if (property !== 'open') return target[property];
+    return async (filename, ...rest) => {
+      if (String(filename).endsWith('config.json') && state.failing > 0) { state.failing--; throw Object.assign(new Error(code + ': the file is locked'), { code }); }
+      return target.open(filename, ...rest);
+    };
+  } });
+  const savedSettings = { version: 1, settings: { ...settings, language: 'en', updateCheck: false }, recentBoards: [] };
+  const stateOf = async (harness) => (await harness.invoke('trace:config-state')).state;
+  const sentOf = (harness, channel) => harness.window.webContents.sent.filter((entry) => entry.channel === channel).map((entry) => entry.value);
+
+  // J09: a lock that appears while the program runs. The write fails on the rename onto config.json (another program holds the file); the change
+  // stays in memory, the state says so, and the write is tried again until the lock ends.
+  const renameInjection = (state) => new Proxy(fs, { get(target, property) {
+    if (property !== 'rename') return target[property];
+    return async (from, to) => {
+      if (String(to).endsWith('config.json') && state.failing > 0) {
+        state.failing--;
+        throw Object.assign(new Error(`${state.code}: the file is locked`), { code: state.code });
+      }
+      return target.rename(from, to);
+    };
+  } });
+
+  await t.test('J09: a lock that appears while the program runs keeps the change in memory, shows the locked state and refuses the save, leaves the file as it was, and writes the change once the lock ends', async () => {
+    const directory = await profile(savedSettings);
+    const before = await fs.readFile(path.join(directory, 'config.json'));
+    const state = { failing: 0, code: 'EPERM' };
+    const harness = await desktopHarness(directory, { fs: renameInjection(state) });
+    await harness.invoke('trace:initial-board');
+    assert.equal(await stateOf(harness), 'ok', 'the file is writable at the start');
+    state.failing = Infinity;
+    const current = plain(await harness.invoke('trace:get-settings'));
+    await assert.rejects(harness.invoke('trace:save-settings', { ...current, motion: false }), { code: 'CONFIG_LOCKED' });
+    assert.equal(await stateOf(harness), 'locked', 'the state says the settings are not saved');
+    assert.equal(sentOf(harness, 'trace:config-state-changed').slice(-1)[0], 'locked', 'the renderer is told, so the notice shows');
+    assert.deepEqual(await fs.readFile(path.join(directory, 'config.json')), before, 'the file is untouched while the lock holds');
+    assert.equal((await harness.invoke('trace:get-settings')).motion, false, 'the change is kept in memory, not dropped');
+    state.failing = 0;
+    await settle(() => sentOf(harness, 'trace:config-state-changed').slice(-1)[0] === 'ok', 600);
+    assert.equal(sentOf(harness, 'trace:config-state-changed').slice(-1)[0], 'ok', 'the retry writes the change and clears the notice');
+    const written = JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8'));
+    assert.equal(written.settings.motion, false, 'the change reached the file');
+    assert.equal(written.settings.language, 'en', 'the rest of the saved settings are kept');
+    assert.deepEqual(await backups(directory), [], 'nothing is moved aside');
+  });
+
+  await t.test('J09: a write that fails for another reason is not reported as a lock', async () => {
+    const directory = await profile(savedSettings);
+    const state = { failing: 0, code: 'ENOSPC' };
+    const harness = await desktopHarness(directory, { fs: renameInjection(state) });
+    await harness.invoke('trace:initial-board');
+    state.failing = Infinity;
+    const current = plain(await harness.invoke('trace:get-settings'));
+    await assert.rejects(harness.invoke('trace:save-settings', { ...current, motion: false }));
+    assert.equal(await stateOf(harness), 'ok', 'a full disk is not a lock: the state stays ok and no lock notice appears');
+    assert.equal(sentOf(harness, 'trace:config-state-changed').includes('locked'), false);
+  });
+
+  await t.test('HUNT-WIN-20261011-02: a settings file locked for a moment starts on defaults, is read again within a few seconds, and the saved language and opt-out survive the next write', async () => {
+    const directory = await profile(savedSettings);
+    const harness = await desktopHarness(directory, { fs: lockedFs({ failing: 1 }) });
+    await harness.invoke('trace:initial-board');
+    assert.equal(await stateOf(harness), 'locked', 'the first read met the lock');
+    assert.equal(harness.dialog.messages.length, 0, 'no native notice: the renderer shows the state');
+    await settle(() => sentOf(harness, 'trace:settings-changed').length === 1, 600);
+    assert.equal(sentOf(harness, 'trace:settings-changed').length, 1, 'the lock ended and the renderer is told');
+    assert.deepEqual(sentOf(harness, 'trace:config-state-changed').slice(-1), ['ok']);
+    const current = await harness.invoke('trace:get-settings');
+    assert.equal(current.language, 'en');
+    assert.equal(current.updateCheck, false);
+    await harness.invoke('trace:save-settings', { ...plain(current), motion: false });
+    const written = JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8'));
+    assert.equal(written.settings.language, 'en');
+    assert.equal(written.settings.updateCheck, false);
+    assert.equal(written.settings.motion, false);
+    assert.deepEqual(await backups(directory), [], 'nothing is moved aside');
+  });
+
+  await t.test('HUNT-WIN-20261011-02: a settings file locked for good does not hold the start: the window opens at once on defaults, the state says so, the file stays byte for byte, a save is refused, and a board still opens', async () => {
+    const directory = await profile(savedSettings);
+    const before = await fs.readFile(path.join(directory, 'config.json'));
+    // The default wait for the window would fail if the start waited for the reads.
+    const harness = await desktopHarness(directory, { fs: lockedFs({ failing: Infinity }) });
+    await harness.invoke('trace:initial-board');
+    assert.equal((await harness.invoke('trace:get-settings')).language, 'hu', 'defaults while the file is locked');
+    assert.equal(await stateOf(harness), 'locked');
+    assert.equal(harness.dialog.messages.length, 0, 'no parentless native dialog at start-up');
+    await assert.rejects(harness.invoke('trace:save-settings', { ...plain(await harness.invoke('trace:get-settings')), motion: false }), { code: 'CONFIG_LOCKED' });
+    assert.deepEqual(await fs.readFile(path.join(directory, 'config.json')), before, 'the file is untouched, byte for byte');
+    assert.deepEqual(await backups(directory), [], 'nothing is moved aside');
+    const board = path.join(root, 'locked-board', 'Locked.cad');
+    await fs.mkdir(path.dirname(board), { recursive: true });
+    await fs.writeFile(board, validText);
+    const payload = await harness.invoke('trace:read-board', board);
+    await harness.invoke('trace:accept-board', board, payload.key); // the board still opens: only its recents are not kept
+    assert.deepEqual(await fs.readFile(path.join(directory, 'config.json')), before, 'still untouched after opening a board');
+    const next = await desktopHarness(directory);
+    const reread = await next.invoke('trace:get-settings');
+    assert.equal(reread.language, 'en', 'the next start reads the saved language');
+    assert.equal(reread.updateCheck, false, 'and the saved update opt-out');
+    assert.equal(next.dialog.messages.length, 0, 'no notice once the file is readable');
+  });
+
+  await t.test('HUNT-WIN-20261011-02 follow-up: a locked settings file is read again when the lock ends; the renderer is told, and it cannot save before it read them', async () => {
+    const directory = await profile(savedSettings);
+    const state = { failing: Infinity };
+    const harness = await desktopHarness(directory, { fs: lockedFs(state) });
+    await harness.invoke('trace:initial-board');
+    const defaults = plain(await harness.invoke('trace:get-settings')); // the defaults the renderer holds while the file is locked
+    assert.equal(defaults.language, 'hu');
+    await sleep(3500); // at least one check while the lock still holds
+    assert.equal(sentOf(harness, 'trace:settings-changed').length, 0, 'nothing changes while locked');
+    state.failing = 0; // the lock ends
+    await settle(() => sentOf(harness, 'trace:settings-changed').length === 1, 600);
+    assert.equal(sentOf(harness, 'trace:settings-changed').length, 1, 'the renderer is told to read the settings again');
+    await assert.rejects(harness.invoke('trace:save-settings', { ...defaults, motion: false }), { code: 'CONFIG_STALE' }, 'a save from the renderer defaults is refused until it read the saved settings');
+    const fresh = plain(await harness.invoke('trace:get-settings'));
+    assert.equal(fresh.language, 'en', 'the saved language');
+    assert.equal(fresh.updateCheck, false, 'and the saved update opt-out');
+    await harness.invoke('trace:save-settings', { ...fresh, motion: false });
+    const written = JSON.parse(await fs.readFile(path.join(directory, 'config.json'), 'utf8'));
+    assert.equal(written.settings.language, 'en', 'nothing is lost on the next write');
+    assert.equal(written.settings.updateCheck, false);
+    assert.equal(written.settings.motion, false);
+    assert.deepEqual(await backups(directory), [], 'nothing is moved aside');
+  });
+
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    await t.test(`HUNT-WIN-20261011-02 (${platform}): a settings file without write access is never replaced: the change applies to this session in memory, the state says so, and it is saved once the file is writable`, async () => {
+      const directory = await profile(savedSettings);
+      const file = path.join(directory, 'config.json');
+      const before = await fs.readFile(file);
+      await fs.chmod(file, 0o444);
+      try {
+        const harness = await desktopHarness(directory, { platform });
+        await harness.invoke('trace:initial-board');
+        assert.equal(await stateOf(harness), 'readonly', 'the state says the file cannot be written');
+        assert.equal(harness.dialog.messages.length, 0, 'no native notice');
+        await harness.invoke('trace:save-settings', { ...plain(await harness.invoke('trace:get-settings')), motion: false });
+        assert.equal((await harness.invoke('trace:get-settings')).motion, false, 'the change applies to this session');
+        assert.deepEqual(await fs.readFile(file), before, 'the file is not replaced');
+        assert.deepEqual(await backups(directory), [], 'nothing is moved aside');
+        await fs.chmod(file, 0o644);
+        await settle(() => sentOf(harness, 'trace:config-state-changed').includes('ok'), 600);
+        assert.ok(sentOf(harness, 'trace:config-state-changed').includes('ok'), 'the state is ok once the file is writable');
+        const written = JSON.parse(await fs.readFile(file, 'utf8'));
+        assert.equal(written.settings.motion, false, 'the change kept in memory is saved');
+        assert.equal(written.settings.language, 'en');
+      } finally {
+        await fs.chmod(file, 0o644).catch(() => {});
+      }
+    });
+  }
+
+  await t.test('HUNT-WIN-20261011-02 follow-up: the recent boards of the file come back when the lock ends, without opening a board', async () => {
+    const withRecents = { ...savedSettings, recentBoards: [{ name: 'Opened.cad', path: boardFile, openedAt: '2026-01-02T03:04:05.000Z' }] };
+    const directory = await profile(withRecents);
+    const state = { failing: Infinity };
+    const harness = await desktopHarness(directory, { fs: lockedFs(state) });
+    await harness.invoke('trace:initial-board');
+    assert.equal((await harness.invoke('trace:recent-boards')).length, 0, 'no recents while the file is locked');
+    state.failing = 0;
+    await settle(() => sentOf(harness, 'trace:settings-changed').length === 1, 600);
+    assert.deepEqual((await harness.invoke('trace:recent-boards')).map((item) => item.path), [boardFile], 'the recents of the file are back');
+  });
+
+  for (const platform of ['win32', 'linux', 'darwin']) {
+    for (const code of ['EBUSY', 'EACCES', 'EPERM']) {
+      await t.test(`HUNT-WIN-20261011-02 (${platform}, ${code}): a settings file that stays locked does not hold the start: the window opens on defaults, and the state is locked`, async () => {
+        const directory = await profile(savedSettings);
+        // The default wait for the window (about a second) fails if the start waits for the reads.
+        const harness = await desktopHarness(directory, { platform, fs: lockedFs({ failing: Infinity }, code) });
+        await harness.invoke('trace:initial-board');
+        assert.equal(await stateOf(harness), 'locked');
+        assert.equal((await harness.invoke('trace:get-settings')).language, 'hu', 'defaults while locked');
+        assert.equal(harness.dialog.messages.length, 0, 'no parentless native dialog');
+      });
+    }
+  }
+
+  await t.test('HUNT-WIN-20261011-02: a damaged settings file reports the unreadable state, and the first save keeps the old file aside', async () => {
+    const damaged = '{ this is not json';
+    const directory = await profile(damaged);
+    const harness = await desktopHarness(directory);
+    await harness.invoke('trace:initial-board');
+    assert.equal(await stateOf(harness), 'unreadable');
+    await harness.invoke('trace:save-settings', { ...plain(await harness.invoke('trace:get-settings')), layout: 'focus' });
+    assert.equal(await stateOf(harness), 'ok', 'the first save makes the file readable');
+    const [backup] = await backups(directory);
+    assert.ok(backup, 'the damaged file is kept aside');
+    assert.equal(await fs.readFile(path.join(directory, backup), 'utf8'), damaged);
+  });
 });
 
 // The Linux desktop shell. The harness fakes the platform for main.cjs only; paths, URLs and files stay those of the machine that runs the
@@ -4204,6 +5094,15 @@ test('Linux desktop shell: pinned profile directory', async (t) => {
       assert.deepEqual(plain(harness.app.pathsSet), [], platform ?? 'default');
       await assert.rejects(fs.stat(appData), { code: 'ENOENT' });
     }
+  });
+
+  await t.test('TB-075: on Windows and macOS the profile folder follows the packaged app name (trace-boardviewer), not the display name; pinned from the manifest and main.cjs', async () => {
+    const pkg = JSON.parse(await fs.readFile(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
+    const main = await fs.readFile(path.resolve(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+    assert.equal(pkg.name, 'trace-boardviewer', 'Electron reads the app name from the top-level package.json at start-up');
+    assert.equal(Object.hasOwn(pkg, 'productName'), false, 'no top-level productName: the folder stays trace-boardviewer (a root decision would change this)');
+    assert.equal(pkg.build.productName, 'TRACE Boardviewer', 'the installer and the window names come from build.productName');
+    assert.match(main, /app\.setName\('TRACE Boardviewer'\);/, 'the display name is set for dialogs and menus, not for the profile folder');
   });
 });
 
@@ -4251,12 +5150,18 @@ test('Linux desktop shell: file:// URIs and relative paths as launch arguments, 
     assert.deepEqual((await startup('linux', ['--board', 'Launch.cad'], { cwd: boards })).result, { name: 'Launch.cad', source: 'argument' });
   });
 
-  await t.test('linux: URIs of another host or scheme, unsupported files and switches are ignored without a dialog; a --board value that names no local file is reported', async () => {
+  await t.test('linux: URIs of another host or scheme and switches are ignored without a dialog; an unsupported file named on the command line is announced; a --board value that names no local file is reported', async () => {
     const remote = uri(launch).replace(/^file:\/\//, 'file://fileserver');
-    const ignored = [[remote], ['https://example.com/Launch.cad'], ['smb://fileserver/share/Launch.cad'], ['sftp://host/Launch.cad'], ['notes.unsupported'], ['--some-switch=Launch.cad'], ['-x', 'Launch.unsupported']];
+    const ignored = [[remote], ['https://example.com/Launch.cad'], ['smb://fileserver/share/Launch.cad'], ['sftp://host/Launch.cad'], ['--some-switch=Launch.cad']];
     for (const argv of ignored) {
       const { harness, result } = await startup('linux', argv, { cwd: boards });
       assert.equal(result, null, `${argv.join(' ')}: nothing is opened`);
+      assert.equal(harness.dialog.messages.length, 0);
+    }
+    // A file the user named on the command line, but one TRACE does not read: the start-up read reports it, as for a dropped file.
+    for (const argv of [['notes.unsupported'], ['-x', 'Launch.unsupported']]) {
+      const { harness, result } = await startup('linux', argv, { cwd: boards });
+      assert.deepEqual(result, { error: i18n.translate('hu', 'native.error.unsupportedFile') }, `${argv.join(' ')}: announced`);
       assert.equal(harness.dialog.messages.length, 0);
     }
     for (const value of [remote, 'https://example.com/Launch.cad']) {
@@ -4383,7 +5288,7 @@ test('Linux desktop shell: the question before starting without the Chromium san
       detail: `${text('native.dialog.noSandboxRisk')}\n\n${text('native.dialog.noSandboxAdvice')}`,
     };
   };
-  const settings = { language: 'de', theme: 'light', layout: 'focus', motion: false, showLabels: true, showConnections: false, updateCheck: false };
+  const settings = { language: 'de', theme: 'light', layout: 'focus', motion: false, showLabels: true, showConnections: false, updateCheck: false, updateCheckAsked: false };
 
   await t.test('linux with --no-sandbox: one warning box before any window or IPC; Quit (the default, also Esc and closing) ends the start-up and stores nothing', async () => {
     const directory = await profile();
@@ -4499,10 +5404,42 @@ test('Linux desktop shell: the question before starting without the Chromium san
     }
   });
 
+  await t.test('Settings reads and takes back the stored answer: Linux only, the next start without the sandbox asks again, a failed write keeps the answer', async () => {
+    const current = { language: 'hu', theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: true };
+    const directory = await profile({ version: 1, settings: current, recentBoards: [], noSandboxAccepted: true });
+    const linux = await desktopHarness(directory, { platform: 'linux', argv: ['--no-sandbox'], console: recorder().console });
+    assert.deepEqual(plain(await linux.invoke('trace:get-no-sandbox-consent')), { applicable: true, saved: true });
+    assert.deepEqual(plain(await linux.invoke('trace:revoke-no-sandbox')), { applicable: true, saved: false });
+    const afterRevoke = await readConfig(directory);
+    assert.equal('noSandboxAccepted' in afterRevoke, false, 'the stored answer is removed from config.json');
+    assert.equal(afterRevoke.settings.language, 'hu', 'the other settings stay in the file');
+    assert.deepEqual(plain(await linux.invoke('trace:get-no-sandbox-consent')), { applicable: true, saved: false });
+    const again = await desktopHarness(directory, { platform: 'linux', argv: ['--no-sandbox'], dialogResponse: 1, console: recorder().console });
+    assert.equal(again.dialog.messages.length, 1, 'the question comes again at the next start without the sandbox');
+
+    const onWindows = await profile({ version: 1, settings: current, recentBoards: [], noSandboxAccepted: true });
+    const windows = await desktopHarness(onWindows, { platform: 'win32' });
+    assert.deepEqual(plain(await windows.invoke('trace:get-no-sandbox-consent')), { applicable: false, saved: false }, 'Windows is never asked, so nothing is shown as saved');
+    assert.deepEqual(plain(await windows.invoke('trace:revoke-no-sandbox')), { applicable: false, saved: false });
+    assert.equal((await readConfig(onWindows)).noSandboxAccepted, true, 'a revoke off Linux changes nothing');
+
+    const kept = await profile({ version: 1, settings: current, recentBoards: [], noSandboxAccepted: true });
+    // The store writes a new file through open('wx') and then handle.writeFile (writeDurably), so the failure is injected at the open of the temporary file.
+    const blocked = new Proxy(fs, { get(target, property) {
+      if (property === 'open') return async (filename, flags, ...rest) => { if (String(filename).includes('config.json') && flags === 'wx') throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); return target.open(filename, flags, ...rest); };
+      return target[property];
+    } });
+    const failing = await desktopHarness(kept, { platform: 'linux', argv: ['--no-sandbox'], fs: blocked, console: recorder().console });
+    await assert.rejects(failing.invoke('trace:revoke-no-sandbox'), 'a failed write rejects, so Settings can say so');
+    assert.deepEqual(plain(await failing.invoke('trace:get-no-sandbox-consent')), { applicable: true, saved: true }, 'the stored answer is kept');
+    assert.equal((await readConfig(kept)).noSandboxAccepted, true);
+  });
+
   await t.test('a failed write of the answer does not stop the start; the question simply comes again', async () => {
     const directory = await profile();
+    // The store creates its temporary file exclusively ('wx') before the rename: that creation is the step that fails on a read-only profile.
     const failing = new Proxy(fs, { get(target, property) {
-      if (property === 'writeFile') return async (filename, ...rest) => { if (String(filename).includes('config.json')) throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); return target.writeFile(filename, ...rest); };
+      if (property === 'open') return async (filename, flag, ...rest) => { if (flag === 'wx' && String(filename).includes('config.json')) throw Object.assign(new Error('read-only file system'), { code: 'EROFS' }); return target.open(filename, flag, ...rest); };
       return target[property];
     } });
     const log = recorder();
@@ -4609,6 +5546,39 @@ test('readings through the IPC handlers: the repair store, a main-owned import d
     assert.match(csv.split('\r\n')[1], /,known-good,CC0-1\.0,/, 'a row without a licence of its own names the pack licence');
     assert.match(csv.split('\r\n')[2], /,imported,ODbL-1\.0,openboarddata,/, 'the ODbL row keeps its licence and provenance');
     assert.deepEqual((await fs.readdir(folder)).filter((name) => name.endsWith('.tmp')), []);
+  });
+
+  await t.test('O-07 readings: a file another program holds (EBUSY on open, EPERM on the final rename of an export) says so; other failures keep their text', async () => {
+    const text = (key) => i18n.translate('hu', key);
+    // Switches the refusals on for the calls made while a test step runs; every other call goes to the real file system.
+    const holding = { open: false, renameCode: null };
+    const guarded = new Proxy(fs, { get(source, property) {
+      if (property === 'open') return async (...args) => { if (holding.open) throw Object.assign(new Error('EBUSY: simulated sharing violation'), { code: 'EBUSY' }); return source.open(...args); };
+      // Only the export's final rename over the held destination: the profile's own writes (the export record) are not held.
+      if (property === 'rename') return async (...args) => { if (holding.renameCode !== null && String(args[1]).endsWith('held-export.json')) throw Object.assign(new Error(`${holding.renameCode}: simulated`), { code: holding.renameCode }); return source.rename(...args); };
+      return source[property];
+    } });
+    const harness = await desktopHarness(profile(), { fs: guarded });
+    const folder = path.join(root, 'in-use-readings');
+    await fs.mkdir(folder, { recursive: true });
+    const held = path.join(folder, 'held.trace-readings.json');
+    await fs.writeFile(held, '{}');
+    harness.dialog.choice = { canceled: false, filePaths: [held] };
+    holding.open = true;
+    await assert.rejects(harness.invoke('trace:import-readings'), { message: `[READINGS_FILE_UNREADABLE] ${text('native.error.fileInUse')}` });
+    holding.open = false;
+    assert.equal((await harness.invoke('trace:import-readings')).name, 'held.trace-readings.json', 'the same file imports once it is free');
+
+    const target = path.join(folder, 'held-export');
+    harness.dialog.saveChoice = { canceled: false, filePath: target };
+    const request = { format: 'pack', pack: pack([reading('r1', 0.4)]) };
+    holding.renameCode = 'EPERM';
+    await assert.rejects(harness.invoke('trace:export-readings', request), { code: 'READINGS_SAVE_FAILED', message: `[READINGS_SAVE_FAILED] ${text('native.error.fileInUse')}` }, 'EPERM on the final rename: a held destination');
+    holding.renameCode = 'EACCES';
+    await assert.rejects(harness.invoke('trace:export-readings', request), { code: 'READINGS_SAVE_FAILED', message: `[READINGS_SAVE_FAILED] ${text('native.error.dataSaveFailed')}` }, 'EACCES keeps the save text');
+    holding.renameCode = null;
+    assert.deepEqual((await fs.readdir(folder)).filter((name) => name.endsWith('.tmp')), [], 'no temporary file is left behind');
+    assert.equal((await harness.invoke('trace:export-readings', request)).name, 'held-export.json', 'the export succeeds once the destination is free');
   });
 
   await t.test('quit gate: appends and file dialogs are refused once quitting began, reads still answer', async () => {
@@ -4827,5 +5797,359 @@ test('format diagnostic report through the IPC handlers: main-owned dialogs, a n
     const block = main.slice(main.indexOf('async function readDiagnosticFile'), main.indexOf('function acceptBoard'));
     assert.ok(block.length > 1000);
     assert.doesNotMatch(block, /\bfetch\(|egress|shell\.|clipboard|openExternal|net\./, 'the diagnostic block reaches nothing outside the file dialogs');
+  });
+});
+
+
+// Native text of the macOS menu, the attach and export dialogs, and the Library channels (defects O-32, O-33, LIB-05 / O-43). The menu
+// is read as the template main.cjs passes to Menu.buildFromTemplate, for every language; the dialogs through the mocked dialog.
+test('native text follows the language; the Library channels follow the release switch', async (t) => {
+  const root = await makeTempDir('trace-native-text-test-');
+  t.after(async () => {
+    const absolute = path.resolve(root);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  let counter = 0;
+  const profile = () => path.join(root, `profile-${++counter}`);
+  const plain = (value) => JSON.parse(JSON.stringify(value)); // The harness runs main.cjs in another realm.
+  const current = async (harness, language) => ({ ...(await harness.invoke('trace:get-settings')), language });
+
+  await t.test('O-33: every language gets its own Edit and Window labels; Settings… carries Cmd+, and asks the page to open settings; the menu is built again on a language change', async () => {
+    const harness = await desktopHarness(profile(), { platform: 'darwin', systemLanguages: ['hu-HU'] });
+    assert.equal(harness.menu.applied.length, 1, 'the menu is set once at start-up');
+    for (const language of i18n.LANGUAGES) {
+      await harness.invoke('trace:save-settings', await current(harness, language));
+      const [appMenu, edit, window] = harness.menu.applied.at(-1).template;
+      assert.equal(edit.label, i18n.translate(language, 'native.menu.edit'), `${language}: Edit`);
+      assert.equal(window.label, i18n.translate(language, 'native.menu.window'), `${language}: Window`);
+      assert.notEqual(edit.label, 'native.menu.edit', `${language}: the catalogue has the label`);
+      const settings = appMenu.submenu[2];
+      assert.equal(settings.label, i18n.translate(language, 'native.menu.settings'), `${language}: Settings…`);
+      assert.equal(settings.accelerator, 'Cmd+,', `${language}: Cmd+,`);
+      const scripts = harness.window.webContents.scripts.length;
+      settings.click();
+      assert.equal(harness.window.webContents.scripts.length, scripts + 1, `${language}: the click runs one script in the page`);
+      assert.match(harness.window.webContents.scripts.at(-1), /^window\.dispatchEvent\(new Event\('trace:open-settings'\)\);$/, `${language}: the page event`);
+    }
+    // The first language (hu) was already current, so seven changes built seven more menus.
+    assert.equal(harness.menu.applied.length, i18n.LANGUAGES.length, 'a language change rebuilds the menu; the same language does not');
+    await harness.invoke('trace:save-settings', await current(harness, 'hu'));
+    assert.equal(harness.menu.applied.length, i18n.LANGUAGES.length + 1, 'hu is a change from uk and rebuilds once more');
+  });
+
+  await t.test('O-33: Windows and Linux keep no menu bar whatever the language', async () => {
+    for (const platform of ['win32', 'linux']) {
+      const harness = await desktopHarness(profile(), { platform, systemLanguages: ['hu-HU'] });
+      await harness.invoke('trace:save-settings', await current(harness, 'de'));
+      assert.deepEqual(harness.menu.applied, [null], `${platform}: the menu stays cleared`);
+    }
+  });
+
+  await t.test('O-32: the attach and export dialogs take title, button and ZIP filter from the catalogue, for every language', async () => {
+    const harness = await desktopHarness(profile(), { systemLanguages: ['hu-HU'] });
+    const KEY = 'a'.repeat(64);
+    const boardFile = path.join(root, 'Board.cad');
+    const manifest = { version: 1, board: { key: KEY, name: 'Board.cad', path: boardFile, format: 'gencad' }, documents: [], split: { enabled: false, ratio: 0.5, right: null }, activeTab: 'board', cameras: {}, updatedAt: new Date().toISOString() };
+    await harness.invoke('trace:save-workspace', KEY, manifest);
+    for (const language of i18n.LANGUAGES) {
+      await harness.invoke('trace:save-settings', await current(harness, language));
+      harness.dialog.choice = { canceled: true, filePaths: [] };
+      assert.deepEqual(plain(await harness.invoke('trace:pick-documents')), [], `${language}: the attach dialog was cancelled`);
+      const attach = harness.dialog.openOptions.at(-1);
+      assert.equal(attach.title, i18n.translate(language, 'native.dialog.attachTitle'), `${language}: attach title`);
+      assert.equal(attach.buttonLabel, i18n.translate(language, 'native.dialog.attachButton'), `${language}: attach button`);
+      harness.dialog.saveChoice = { canceled: true, filePath: '' };
+      assert.equal(await harness.invoke('trace:export-workspace', { boardKey: KEY, documentIds: [], includeBoard: false, includeNotes: false }), null, `${language}: export cancelled`);
+      const exported = harness.dialog.saveOptions.at(-1);
+      assert.equal(exported.title, i18n.translate(language, 'native.dialog.exportTitle'), `${language}: export title`);
+      assert.equal(exported.buttonLabel, i18n.translate(language, 'native.dialog.exportButton'), `${language}: export button`);
+      assert.equal(exported.filters[0].name, i18n.translate(language, 'native.dialog.exportZipFilter'), `${language}: ZIP filter`);
+      assert.deepEqual(plain(exported.filters[0].extensions), ['zip'], `${language}: ZIP extension`);
+    }
+  });
+
+  await t.test('O-32: the family filters of the open dialog take their labels from the catalogue, for every language', async () => {
+    const harness = await desktopHarness(profile(), { systemLanguages: ['hu-HU'] });
+    const keys = { GenCAD: 'native.dialog.familyGenCAD', Boardview: 'native.dialog.familyBoardview', 'ECAD design': 'native.dialog.familyEcad', Gerber: 'native.dialog.familyGerber' };
+    for (const language of i18n.LANGUAGES) {
+      await harness.invoke('trace:save-settings', await current(harness, language));
+      harness.dialog.choice = { canceled: true, filePaths: [] };
+      assert.equal(await harness.invoke('trace:open-board'), null, `${language}: the open dialog was cancelled`);
+      const names = harness.dialog.openOptions.at(-1).filters.map((filter) => filter.name);
+      for (const { name: family } of formats.FAMILIES) {
+        assert.ok(keys[family], `${family} has a catalogue key`);
+        assert.ok(names.includes(i18n.translate(language, keys[family])), `${language}: the ${family} filter is labelled from the catalogue`);
+      }
+    }
+    assert.equal(i18n.translate('hu', 'native.dialog.familyEcad'), 'ECAD-tervezés');
+  });
+
+  await t.test('i18n rest: the document filter names and the export error without a saved workspace come from the catalogue, for every language', async () => {
+    const harness = await desktopHarness(profile(), { systemLanguages: ['hu-HU'] });
+    const keys = ['native.dialog.allDocuments', 'native.dialog.kindPdf', 'native.dialog.kindImage', 'native.dialog.kindSchematic'];
+    for (const language of i18n.LANGUAGES) {
+      await harness.invoke('trace:save-settings', await current(harness, language));
+      harness.dialog.choice = { canceled: true, filePaths: [] };
+      assert.deepEqual(plain(await harness.invoke('trace:pick-documents')), [], `${language}: the attach dialog was cancelled`);
+      assert.deepEqual(harness.dialog.openOptions.at(-1).filters.map((filter) => filter.name), keys.map((key) => i18n.translate(language, key)), `${language}: the document filters`);
+      await assert.rejects(harness.invoke('trace:export-workspace', { boardKey: 'a'.repeat(64), documentIds: [], includeBoard: false, includeNotes: false }),
+        { code: 'WORKSPACE_NOT_FOUND', message: `[WORKSPACE_NOT_FOUND] ${i18n.translate(language, 'native.error.workspaceNotSaved')}` }, `${language}: export without a saved workspace`);
+    }
+  });
+
+  await t.test('O-43 / LIB-05: no trace:library-* channel is registered while the switch is off, and the main-process switch equals the renderer switch', async () => {
+    const harness = await desktopHarness(profile());
+    const main = await fs.readFile(path.resolve(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+    const feature = await fs.readFile(path.resolve(__dirname, '..', 'src', 'lib', 'library', 'devices', 'feature.ts'), 'utf8');
+    const mainSwitch = /^const DEVICE_DATABASE_ENABLED = (true|false);$/m.exec(main)?.[1];
+    const rendererSwitch = /^export const DEVICE_DATABASE_ENABLED = (true|false);$/m.exec(feature)?.[1];
+    assert.ok(mainSwitch && rendererSwitch, 'both switches are declared');
+    assert.equal(mainSwitch, rendererSwitch, 'electron/main.cjs mirrors src/lib/library/devices/feature.ts');
+    const library = [...harness.handlers.keys()].filter((channel) => channel.startsWith('trace:library-'));
+    assert.equal(library.length, mainSwitch === 'true' ? 11 : 0, `${mainSwitch === 'true' ? 'all eleven' : 'no'} Library channels are registered`);
+  });
+});
+
+test('diagnostic reader: companion sidecars follow the board policy, and an ambiguous chosen set fails with the localized read failure and no name or path', async (t) => {
+  const root = await makeTempDir('trace-diagnostic-sidecar-test-');
+  t.after(async () => {
+    const absolute = path.resolve(root);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  const text = (key, params) => i18n.translate('hu', key, params);
+  const choose = (harness, ...files) => { harness.dialog.choice = { canceled: false, filePaths: files }; };
+  const folders = { exact: path.join(root, 'exact-board'), mixed: path.join(root, 'mixed-board'), ambiguous: path.join(root, 'ambiguous-board') };
+  for (const folder of Object.values(folders)) await fs.mkdir(folder, { recursive: true });
+  await fs.writeFile(path.join(folders.exact, 'format.asc'), 'format bytes');
+  await fs.writeFile(path.join(folders.exact, 'pins.asc'), 'exact pins');
+  await fs.writeFile(path.join(folders.exact, 'nails.asc'), 'nails bytes');
+  await fs.writeFile(path.join(folders.mixed, 'format.asc'), 'format bytes');
+  await fs.writeFile(path.join(folders.mixed, 'Pins.Asc'), 'mixed pins');
+  await fs.writeFile(path.join(folders.mixed, 'nails.asc'), 'nails bytes');
+  await fs.writeFile(path.join(folders.ambiguous, 'format.asc'), 'format bytes');
+  // One synthetic folder listing at a time: NTFS cannot hold case-only siblings. The proxy answers readdir, realpath and stat for the
+  // listed names; a listed name that exists on disk keeps its real size, a listed name that does not gets a fixed size.
+  const listing = { folder: '', names: [] };
+  const listed = (value) => listing.folder !== '' && listing.names.some((name) => path.resolve(listing.folder, name) === path.resolve(value));
+  const listedFs = new Proxy(fs, { get(target, property) {
+    if (property === 'readdir') return async (directory, ...rest) => (listing.folder !== '' && path.resolve(directory) === path.resolve(listing.folder) ? [...listing.names] : target.readdir(directory, ...rest));
+    if (property === 'realpath') return async (value, ...rest) => (listed(value) ? value : target.realpath(value, ...rest));
+    if (property === 'stat') return async (value, ...rest) => {
+      if (!listed(value)) return target.stat(value, ...rest);
+      try { return await target.stat(value, ...rest); } catch { return { isFile: () => true, isDirectory: () => false, size: 4 }; }
+    };
+    return target[property];
+  } });
+  await fs.mkdir(path.join(root, 'profile'), { recursive: true });
+  const harness = await desktopHarness(path.join(root, 'profile'), { fs: listedFs });
+
+  await t.test('an exact companion spelling is accepted with its own bytes, and the payload names no path', async () => {
+    listing.folder = '';
+    choose(harness, path.join(folders.exact, 'format.asc'));
+    const payload = await harness.invoke('trace:diagnostic-pick');
+    assert.deepEqual(Object.keys(payload.companions).sort(), ['nails.asc', 'pins.asc']);
+    assert.equal(bytesOf(payload.companions['pins.asc']).toString('utf8'), 'exact pins');
+    assert.equal(bytesOf(payload.companions['nails.asc']).toString('utf8'), 'nails bytes');
+    for (const name of [payload.name, ...Object.keys(payload.companions)]) assert.doesNotMatch(name, /[\/]/, 'names only, never a path');
+  });
+
+  await t.test('a unique mixed-case sibling is still accepted as the companion', async () => {
+    listing.folder = '';
+    choose(harness, path.join(folders.mixed, 'format.asc'));
+    const payload = await harness.invoke('trace:diagnostic-pick');
+    assert.deepEqual(Object.keys(payload.companions).sort(), ['nails.asc', 'pins.asc']);
+    assert.equal(bytesOf(payload.companions['pins.asc']).toString('utf8'), 'mixed pins');
+  });
+
+  await t.test('an exact spelling wins over a listed case variant of the same companion', async () => {
+    listing.folder = folders.exact;
+    listing.names = ['format.asc', 'pins.asc', 'PINS.ASC', 'nails.asc'];
+    choose(harness, path.join(folders.exact, 'format.asc'));
+    const payload = await harness.invoke('trace:diagnostic-pick');
+    assert.equal(bytesOf(payload.companions['pins.asc']).toString('utf8'), 'exact pins');
+    listing.folder = '';
+  });
+
+  await t.test('an ambiguous chosen companion set fails with the localized read failure, and the message holds no name or path', async () => {
+    listing.folder = folders.ambiguous;
+    listing.names = ['format.asc', 'PINS.ASC', 'Pins.asc', 'nails.asc'];
+    choose(harness, path.join(folders.ambiguous, 'format.asc'));
+    const failure = await harness.invoke('trace:diagnostic-pick').then(() => null, (error) => error);
+    assert.ok(failure, 'the diagnostic read is refused');
+    assert.equal(failure.message, text('native.error.boardReadFailed'));
+    for (const leak of ['PINS', 'Pins', 'ambiguous-board', 'format', root]) assert.ok(!failure.message.includes(leak), `no ${leak} in the message`);
+    assert.equal(failure.code, undefined, 'the caller gets the localized text, not the internal code');
+    listing.folder = '';
+  });
+});
+
+// PARITY-MAC-20261011-01: the caption close button ("Alkalmazás bezárása") quits the application on every platform. On macOS closing the last
+// window keeps the app running, so the button did nothing there. It now takes the Cmd+Q path (app.quit, then before-quit flushes first).
+test('the window close button quits the application on every platform, through the same flush-then-quit path as Cmd+Q', async (t) => {
+  const root = await makeTempDir('trace-close-quit-test-');
+  t.after(async () => {
+    const absolute = path.resolve(root);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  let counter = 0;
+  const profile = () => path.join(root, `profile-${++counter}`);
+  for (const platform of ['darwin', 'win32', 'linux']) {
+    await t.test(`${platform}: the button asks for one quit and leaves the window to the quit path`, async () => {
+      const harness = await desktopHarness(profile(), { platform });
+      const trusted = { sender: harness.window.webContents, senderFrame: harness.window.webContents.mainFrame };
+      harness.messages.get('trace:close')(trusted);
+      assert.equal(harness.app.quitCount, 1, `${platform}: app.quit is called once`);
+      assert.equal(harness.window.closeEvents ?? 0, 0, `${platform}: the button does not close the window itself`);
+      assert.equal(harness.window.isDestroyed(), false, `${platform}: the window stays until the quit path closes it`);
+    });
+    await t.test(`${platform}: a sender that is not the trusted page cannot quit`, async () => {
+      const harness = await desktopHarness(profile(), { platform });
+      harness.messages.get('trace:close')({ sender: {}, senderFrame: { url: 'https://evil.example/' } });
+      assert.equal(harness.app.quitCount, 0, `${platform}: nothing quits`);
+      assert.equal(harness.window.isDestroyed(), false, `${platform}: the window is untouched`);
+    });
+  }
+  await t.test('the quit the button starts is held by before-quit until the renderer and the store have flushed, as with Cmd+Q', async () => {
+    const harness = await desktopHarness(profile(), { platform: 'darwin' });
+    harness.messages.get('trace:close')({ sender: harness.window.webContents, senderFrame: harness.window.webContents.mainFrame });
+    let prevented = false;
+    harness.app.emit('before-quit', { preventDefault() { prevented = true; } });
+    assert.equal(prevented, true, 'before-quit is cancelled so the flush and the store drain run first');
+    assert.equal(harness.app.quitCount, 1, 'no second quit before the flush finished');
+  });
+});
+
+test('file errors: a board another program holds (EBUSY), a network location and an unusable --user-data-dir have their own messages (O-07, O-30, MLX-03-06)', async (t) => {
+  const root = await makeTempDir('trace-file-errors-test-');
+  t.after(async () => {
+    const absolute = path.resolve(root);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  const text = (key) => i18n.translate('hu', key);
+  const boardFile = path.join(root, 'Held.cad');
+  await fs.writeFile(boardFile, '$HEADER\nGENCAD 1.4\nUNITS MM\n$ENDHEADER\n$BOARD\nLINE 0 0 10 0\n$ENDBOARD\n');
+  let counter = 0;
+  const profile = async () => {
+    const directory = path.join(root, `profile-${++counter}`);
+    await fs.mkdir(directory, { recursive: true });
+    return directory;
+  };
+  // A file another program holds exclusively cannot be opened: Windows reports EBUSY while `holding.busy` is set.
+  const holding = { busy: false };
+  const guarded = new Proxy(fs, { get(source, property) {
+    if (property !== 'open') return source[property];
+    return async (...args) => {
+      if (holding.busy) throw Object.assign(new Error('EBUSY: simulated sharing violation'), { code: 'EBUSY' });
+      return source.open(...args);
+    };
+  } });
+  const harness = await desktopHarness(await profile(), { fs: guarded });
+  holding.busy = true;
+  await assert.rejects(harness.invoke('trace:read-board', boardFile), { message: text('native.error.fileInUse') });
+  holding.busy = false;
+  assert.equal((await harness.invoke('trace:read-board', boardFile)).name, 'Held.cad', 'the same board opens once it is free');
+  await assert.rejects(harness.invoke('trace:read-board', '\\\\server\\share\\Held.cad'), { message: text('native.error.networkPathUnsupported') });
+  await assert.rejects(harness.invoke('trace:read-board', '../Held.cad'), { message: text('native.error.invalidPath') }, 'other invalid paths keep the generic text');
+
+  // A --user-data-dir that cannot be used stops the start: its message goes to stderr, the exit code is 2 and no profile is set.
+  for (const [value, key] of [['relative\\profile', 'native.error.invalidPath'], ['\\\\server\\share\\profile', 'native.error.networkPathUnsupported']]) {
+    const written = [];
+    const started = await desktopHarness(await profile(), { argv: [`--user-data-dir=${value}`], stderr: { write: (chunk) => { written.push(String(chunk)); return true; } } });
+    assert.equal(started.app.exitCode, 2, value);
+    assert.equal(started.app.pathsSet.length, 0, `${value}: no profile is set`);
+    assert.deepEqual(written, [`${i18n.translate(i18n.LEGACY_LANGUAGE, key)}\n`], value);
+  }
+});
+
+test('path grants: the renderer reads a file only when the user chose it, the system named it, the profile remembers it, or it is a document of a granted board', async (t) => {
+  const root = await makeTempDir('trace-path-grant-test-');
+  const outsideDir = await makeTempDir('trace-path-grant-outside-');
+  t.after(async () => {
+    for (const directory of [root, outsideDir]) {
+      const absolute = path.resolve(directory);
+      assert.ok(await isInsideTemp(absolute));
+      await fs.rm(absolute, { recursive: true, force: true });
+    }
+  });
+  const validText = '$HEADER\nGENCAD 1.4\nUNITS MM\n$ENDHEADER\n$BOARD\nLINE 0 0 10 0\n$ENDBOARD\n';
+  const boardFile = path.join(root, 'Circuit.CAD');
+  await fs.writeFile(boardFile, validText);
+  const datasheet = path.join(root, 'datasheet.pdf');
+  await fs.writeFile(datasheet, '%PDF-1.4\n');
+  const secret = path.join(outsideDir, 'datasheet.pdf');
+  await fs.writeFile(secret, '%PDF-1.4\n');
+  const KEY = 'a'.repeat(64);
+  const refused = i18n.translate('hu', 'native.error.pathNotGranted');
+  const profile = async (name, config) => {
+    const dir = path.join(root, name);
+    await fs.mkdir(dir, { recursive: true });
+    if (config) await fs.writeFile(path.join(dir, 'config.json'), JSON.stringify(config));
+    return dir;
+  };
+
+  await t.test('a file nobody granted is refused before it is read, and a missing one gets the same refusal (no existence oracle)', async () => {
+    const harness = await desktopHarness(await profile('none'));
+    await assert.rejects(harness.invokeRaw('trace:read-board', boardFile), { message: refused });
+    await assert.rejects(harness.invokeRaw('trace:read-board', path.join(root, 'missing.CAD')), { message: refused });
+    await assert.rejects(harness.invokeRaw('trace:read-document', secret, { kinds: ['pdf'] }), { message: refused });
+    assert.equal(harness.grants().has(boardFile), false);
+  });
+
+  await t.test('a file the user chose in the open dialog is granted: open-board reads it, and read-board reads it again by its path', async () => {
+    const harness = await desktopHarness(await profile('dialog'));
+    harness.dialog.choice = { canceled: false, filePaths: [boardFile] };
+    assert.ok(await harness.invokeRaw('trace:open-board'), 'the board opens');
+    assert.equal(harness.grants().sourceOf(boardFile), 'dialog');
+    assert.ok(await harness.invokeRaw('trace:read-board', boardFile));
+  });
+
+  await t.test('the files the attach dialog returned are granted, the others are not', async () => {
+    const harness = await desktopHarness(await profile('attach'));
+    harness.dialog.choice = { canceled: false, filePaths: [datasheet] };
+    await harness.invokeRaw('trace:pick-documents', { kinds: ['pdf'] }).catch(() => {});
+    assert.equal(harness.grants().sourceOf(datasheet), 'dialog');
+    assert.equal(harness.grants().has(secret), false);
+  });
+
+  await t.test('a board the profile remembers is granted at start: the recent list opens it without a dialog', async () => {
+    const dir = await profile('recent', { version: 1, settings: {}, recentBoards: [{ name: 'Circuit.CAD', path: boardFile, openedAt: '2026-01-02T03:04:05.000Z' }] });
+    const harness = await desktopHarness(dir);
+    assert.equal(harness.grants().sourceOf(boardFile), 'recent');
+    assert.ok(await harness.invokeRaw('trace:read-board', boardFile));
+  });
+
+  await t.test('a board named on the command line (or opened by the system) is granted at start', async () => {
+    const harness = await desktopHarness(await profile('external'), { argv: [boardFile] });
+    assert.equal(harness.grants().sourceOf(boardFile), 'external');
+    assert.ok(await harness.invokeRaw('trace:read-board', boardFile));
+  });
+
+  await t.test('a document located inside the granted board folder is granted; one outside that folder is not, and stays refused', async () => {
+    const harness = await desktopHarness(await profile('located'));
+    harness.dialog.choice = { canceled: false, filePaths: [boardFile] };
+    await harness.invokeRaw('trace:open-board');
+    const located = await harness.invokeRaw('trace:locate-documents', boardFile, [
+      { id: 'inside', kind: 'pdf', path: datasheet, relativePath: 'datasheet.pdf', key: KEY },
+      { id: 'outside', kind: 'pdf', path: secret, key: KEY },
+    ]);
+    assert.equal(located.length, 2);
+    assert.equal(harness.grants().sourceOf(datasheet), 'located');
+    assert.equal(harness.grants().has(secret), false, 'a path outside the board folder is not granted by locating it');
+    await assert.rejects(harness.invokeRaw('trace:read-document', secret, { kinds: ['pdf'] }), { message: refused });
+    await harness.invokeRaw('trace:read-document', datasheet, { kinds: ['pdf'] }).then(() => {}, (error) => assert.notEqual(error.message, refused));
+  });
+
+  await t.test('a dropped file is granted through the preload path; the grant channel refuses a forged sender', async () => {
+    const harness = await desktopHarness(await profile('drop'));
+    harness.message('trace:grant-dropped', datasheet);
+    // The renderer reads at once after the grant, with nothing in between: the first read of a dropped file is not refused.
+    await harness.invokeRaw('trace:read-document', datasheet, { kinds: ['pdf'] }).then(() => {}, (error) => assert.notEqual(error.message, refused, 'the first read after a drop is granted'));
+    assert.equal(harness.grants().sourceOf(datasheet), 'drop');
+    harness.forgedMessage('trace:grant-dropped', secret);
+    assert.equal(harness.grants().has(secret), false, 'a forged sender grants nothing');
   });
 });

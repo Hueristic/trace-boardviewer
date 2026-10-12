@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Completato",
   "diagnostic.bugStageUnknown": "Sconosciuto",
   "diagnostic.bugCleanupTiming": "Questi limiti presuppongono una normale pulizia programmata; interruzioni dell’hosting possono ritardare l’eliminazione.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} byte"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} byte",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} caratteri",
+  "diagnostic.bugDescriptionLimit": "La descrizione può contenere al massimo {max} caratteri. Accorciala per rivederla e inviarla."
 }

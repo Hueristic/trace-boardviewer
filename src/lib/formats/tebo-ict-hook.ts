@@ -2,12 +2,13 @@
 import { NO_SECTION } from '../diagnostics/report';
 import { safeText, textLines, type StructureHook } from '../diagnostics/structure';
 import { hasTeboIctHeader } from './tebo-ict';
-const knownRole = (name: string) => /^(?:board|board_xy)(?:\.ict)?$/.test(name.split(/[\\/]/).pop()?.toLowerCase() ?? '');
+import { sourceBaseName, type SourcePlatform } from './source-name';
+const knownRole = (name: string, platform?: SourcePlatform) => /^(?:board|board_xy)(?:\.ict)?$/.test(sourceBaseName(name, platform).toLowerCase());
 export const teboIctHook: StructureHook = {
   id: 'generic-text', kind: 'text', steps: ['header'], keywords: ['NODE', 'UNITS'],
   collect(input, sink) {
     sink.padAngle('none'); sink.section(NO_SECTION);
-    const files = [input.data, ...Object.entries(input.companions).filter(([name]) => knownRole(name)).map(([, data]) => data)];
+    const files = [input.data, ...Object.entries(input.companions).filter(([name]) => knownRole(name, input.platform)).map(([, data]) => data)];
     sink.count('companionFiles', files.length - 1);
     let geometry = false, program = false;
     for (const data of files) {

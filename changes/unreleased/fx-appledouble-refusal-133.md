@@ -1,0 +1,1 @@
+Opening a macOS metadata file (an AppleDouble "._" companion, or a copy whose name lost its "._") now says in your language that it is not a board file and to open the file with the same name without the "._" prefix, the same way on Windows, macOS and Linux. The format diagnostic reports it as refused, not as unrecognized.

@@ -66,7 +66,9 @@ test('native board restart oracle holds the production camera debounce and waits
   assert.match(fixture, /viewers-camera-after-restart/);
   assert.match(fixture, /await settleBoardSelection\(page, \{ clearWithCanvas: true \}\)/);
   assert.match(fixture, /await settleBoardSelection\(restarted, \{ clearWithCanvas: true \}\)/);
-  assert.match(fixture, /await waitForStableBoardPaint\(restarted\)/);
+  // After a restart the restored board is awaited by its pixels, not by the raster observer (37867ca documents why).
+  assert.match(fixture, /const waitForRestoredBoardFrame = async \(page, expectedPaint/);
+  assert.match(fixture, /await waitForRestoredBoardFrame\(restarted, pendingArrowFrame\.paint\)/);
   assert.match(fixture, /await page\.mouse\.wheel\(0, deltaY\)/);
   assert.match(fixture, /Math\.round\(box\.width \* 0\.13\)/);
   assert.match(fixture, /Math\.round\(box\.height \* 0\.07\)/);
@@ -412,4 +414,18 @@ test('90 degree camera pan maps a downward screen move onto the board x axis', (
   assert.equal(moved.x, 30, 'ArrowDown at 90 degrees changes board x by the scaled screen movement');
   assert.ok(Math.abs(moved.y - original.y) < 1e-10, 'ArrowDown at 90 degrees leaves board y unchanged');
   assert.notDeepEqual(moved, original, 'the complete camera changes for the rotated keyboard pan');
+});
+
+test('Documents-list schematic settlement reads the Schematic tab picker and asserts the second schematic after a cross-probe', () => {
+  const fixture = fs.readFileSync(require.resolve('../scripts/packaged-functional/viewers.cjs'), 'utf8');
+  // A schematic pick replaces the Documents list (the row is gone), so the gate waits for the tab and its picker, not for the row.
+  assert.match(fixture, /const shown = await page\.locator\('\[data-testid=schematic-picker\]'\)/, 'a timeout reports the picker choice');
+  assert.match(fixture, /picked\.includes\(expected\)/, 'the schematic gate waits for the picker to name the requested file');
+  assert.match(fixture, /\[data-testid=tab-schematic\]'\)\?\.getAttribute\('aria-selected'\) === 'true'/, 'the schematic gate waits for the Schematic tab');
+  // The scenario: KiCad cross-probed by the VCC net, then the EAGLE schematic from the list, then the KiCad board again.
+  assert.match(fixture, /a Documents-list pick of the second schematic replaces the cross-probed one, in both directions/);
+  assert.match(fixture, /assert\.match\(eagle\.picked, \/viewer-hierarchical\\.eagle\\.sch\/,/, 'the list pick must show the EAGLE schematic');
+  assert.match(fixture, /assert\.match\(eagle\.diagnostics, \/EAGLE schematic\/,/, 'the diagnostics name the EAGLE format');
+  assert.match(fixture, /\/page 1 of 2\//, 'the canvas summary names two sheets for the EAGLE schematic');
+  assert.match(fixture, /assert\.match\(back\.picked, \/viewer-known-board\\.kicad_sch\/,/, 'the list pick returns to the KiCad board');
 });

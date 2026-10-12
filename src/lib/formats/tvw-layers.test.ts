@@ -146,4 +146,13 @@ describe('readTvwLayers', () => {
     try { readTvwLayers(many, 1); throw new Error('expected a limit error'); }
     catch (error) { expect(error).toBeInstanceOf(BoardFormatError); expect((error as BoardFormatError).code).toBe('LIMIT_EXCEEDED'); }
   });
+
+  it('counts a layer dropped for an out-of-range coordinate apart from structural failures', () => {
+    const outOfRange = readTvwLayers(layer([pad({ x: 2_000_001 })]).data, 1);
+    expect(outOfRange.skippedLayers).toBe(1);
+    expect(outOfRange.rangeSkipped).toBe(1);
+    const structural = readTvwLayers(layer([pad({ net: 2 })]).data, 1);
+    expect(structural.skippedLayers).toBe(1);
+    expect(structural.rangeSkipped).toBeUndefined();
+  });
 });

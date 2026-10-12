@@ -1,0 +1,1 @@
+- An undo that the library store cannot apply because the request is invalid no longer blocks the older corrections: the next undo restores them.

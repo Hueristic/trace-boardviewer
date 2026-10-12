@@ -4,16 +4,20 @@
  * This reader uses the format's record widths and references; it never searches
  * arbitrary payload bytes for plausible components. No external parser code is used.
  */
-import type { Point } from '../types';
-import { BoardFormatError, buildBoard, MAX_IMPORT_BYTES, note, stitchOutline, type BoardParser, type RawPart, type RawPin } from './common';
+import type { ParseIssue, Point } from '../types';
+import { BoardFormatError, buildBoard, MAX_NATIVE_ALLEGRO_IMPORT_BYTES, MAX_NATIVE_ALLEGRO_RECORDS, note, stitchOutline, type BoardParser, type RawPart, type RawPin } from './common';
+import { nativeByteLimitError, nativeRecordLimitError } from './import-limits';
 import { allegro } from './recognizers';
 import type { StructureSink, StructureHook } from './structure-hook';
 
-const MAX_RECORDS = 2_000_000, MAX_STRINGS = 1_000_000, MAX_STRING_BYTES = 64 * 1024;
+const MAX_RECORDS = MAX_NATIVE_ALLEGRO_RECORDS, MAX_STRINGS = 1_000_000, MAX_STRING_BYTES = 64 * 1024;
 type RecordInfo = { tag: number; offset: number; length: number; key: number };
 type Database = ReturnType<typeof readDatabase>;
-function fail(message: string, code: 'INVALID_FORMAT' | 'UNSUPPORTED_VARIANT' | 'LIMIT_EXCEEDED' = 'INVALID_FORMAT'): never {
-  throw new BoardFormatError(`Allegro: ${message}`, code, 'allegro-brd');
+/** `issue`, when given, is the catalog text the user sees; `message` stays the English developer text. */
+function fail(message: string, code: 'INVALID_FORMAT' | 'UNSUPPORTED_VARIANT' | 'LIMIT_EXCEEDED' = 'INVALID_FORMAT', issue?: ParseIssue): never {
+  const error = new BoardFormatError(`Allegro: ${message}`, code, 'allegro-brd');
+  if (issue) error.issue = issue;
+  throw error;
 }
 const align4 = (n: number) => Math.ceil(n / 4) * 4;
 
@@ -37,7 +41,7 @@ function fixedLengths(version: number): Readonly<Record<number, number>> {
 
 /** A bounded record pass, shared with the content-free diagnostic hook. */
 function readDatabase(data: Uint8Array, sink?: StructureSink) {
-  if (data.length > MAX_IMPORT_BYTES) fail('database exceeds the import byte limit.', 'LIMIT_EXCEEDED');
+  if (data.length > MAX_NATIVE_ALLEGRO_IMPORT_BYTES) throw nativeByteLimitError(MAX_NATIVE_ALLEGRO_IMPORT_BYTES);
   const recognized = allegro(data);
   if (!recognized) fail('missing native database signature.');
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
@@ -51,11 +55,13 @@ function readDatabase(data: Uint8Array, sink?: StructureSink) {
   const version = new Map([[0x130000, 160], [0x130400, 162], [0x130500, 162], [0x130c00, 164], [0x131000, 165], [0x131500, 166], [0x140400, 172], [0x140900, 174], [0x141500, 175]]).get(magic);
   if (!version) {
     if (recognized.versionCode) sink?.code('version', recognized.versionCode);
-    fail(`native database layout 0x${magic.toString(16).padStart(8, '0')} is unsupported; this reader requires a documented 16.0–17.5 layout. Export GenCAD from the original software.`, 'UNSUPPORTED_VARIANT');
+    const layout = `0x${magic.toString(16).padStart(8, '0')}`;
+    fail(`native database layout ${layout} is unsupported; this reader requires a documented 16.0–17.5 layout. Export GenCAD from the original software.`, 'UNSUPPORTED_VARIANT', { key: 'parse.error.allegroLayoutUnsupported', params: { layout } });
   }
   need(0, 0x1200);
   const stringCount = u32(0x194), divisor = u32(0x26c), unitCode = data[0x180], declaredObjects = u32(20);
-  if (stringCount > MAX_STRINGS || declaredObjects > MAX_RECORDS) fail('declared database count exceeds the record limit.', 'LIMIT_EXCEEDED');
+  if (stringCount > MAX_STRINGS) fail('declared string count exceeds the string limit.', 'LIMIT_EXCEEDED');
+  if (declaredObjects > MAX_RECORDS) throw nativeRecordLimitError(MAX_RECORDS);
   if (!divisor || divisor > 1e9 || unitCode < 1 || unitCode > 5) fail('invalid units or coordinate divisor.');
   sink?.code('version', version); sink?.code('unitCode', unitCode); sink?.count('blocks', declaredObjects);
   sink?.units('mil', 0.0254 / divisor); sink?.padAngle('absolute'); sink?.reached('header');
@@ -72,7 +78,7 @@ function readDatabase(data: Uint8Array, sink?: StructureSink) {
   }
   const fixed = fixedLengths(version), modern = version >= 172, latest = version >= 174;
   while (offset < data.length && data[offset] !== 0) {
-    if (all.length >= MAX_RECORDS) fail('database exceeds the record limit.', 'LIMIT_EXCEEDED');
+    if (all.length >= MAX_RECORDS) throw nativeRecordLimitError(MAX_RECORDS);
     const start = offset, tag = data[start];
     let length = fixed[tag], keyOffset = 4;
     if (tag === 3) {
@@ -139,14 +145,14 @@ function readBoard(db: Database): { parts: RawPart[]; pins: RawPin[]; outline: P
   for (const instance of db.all.filter(record => record.tag === 45)) {
     if (parts.length >= 250_000) fail('component count exceeds the limit.', 'LIMIT_EXCEEDED');
     const at = instance.offset, side = db.data[at + 2];
-    if (side !== 0 && side !== 1) fail(`unsupported footprint layer code ${side}; supported placed layers are 0 (top) and 1 (bottom). Export GenCAD from the original software.`, 'UNSUPPORTED_VARIANT');
+    if (side !== 0 && side !== 1) fail(`unsupported footprint layer code ${side}; supported placed layers are 0 (top) and 1 (bottom). Export GenCAD from the original software.`, 'UNSUPPORTED_VARIANT', { key: 'parse.error.allegroLayerUnsupported', params: { code: side } });
     const instanceRef = u32(at + (modern ? 40 : 12)), info = instanceRef ? get(instanceRef, 7) : undefined;
     if (info && u32(info.offset + (modern ? 24 : 12)) !== instance.key) fail('component instance links disagree.');
     const ref = info ? string(u32(info.offset + (modern ? 28 : 20))) : '', key = String(instance.key);
     let textKey = u32(at + (modern ? 52 : 44)), value = '';
     const textSeen = new Set<number>();
     while (textKey && textKey !== instance.key) {
-      if (++textSteps > MAX_RECORDS) fail('component text traversal exceeds the record limit.', 'LIMIT_EXCEEDED');
+      if (++textSteps > MAX_RECORDS) throw nativeRecordLimitError(MAX_RECORDS);
       if (textSeen.has(textKey)) fail('cycle in component text list.'); textSeen.add(textKey);
       const text = records.get(textKey);
       if (!text || ![3, 48].includes(text.tag)) fail('invalid component text reference.');
@@ -206,7 +212,7 @@ function readBoard(db: Database): { parts: RawPart[]; pins: RawPin[]; outline: P
     let next = u32(at + (shape.tag === 40 ? modern ? 40 : 32 : modern ? 24 : 20));
     const seen = new Set<number>();
     while (next && next !== shape.key) {
-      if (++outlineSteps > MAX_RECORDS) fail('board-outline traversal exceeds the record limit.', 'LIMIT_EXCEEDED');
+      if (++outlineSteps > MAX_RECORDS) throw nativeRecordLimitError(MAX_RECORDS);
       if (seen.has(next)) fail('cycle in board-outline segments.'); seen.add(next);
       const segment = records.get(next);
       if (!segment || ![1, 21, 22, 23].includes(segment.tag)) fail('invalid board-outline segment reference.');

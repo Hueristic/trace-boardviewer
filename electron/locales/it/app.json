@@ -8,14 +8,19 @@
   "header.settings": "Impostazioni",
   "layout.workshop": "Laboratorio",
   "layout.focus": "Focus",
-
   "window.minimize": "Riduci a icona",
   "window.restore": "Ripristina finestra",
   "window.maximize": "Ingrandisci finestra",
   "window.close": "Chiudi applicazione",
-
   "status.fileInfo": "Informazioni sul file",
   "status.shortcuts": "Scorciatoie da tastiera",
+  "status.saved": "Salvato",
+  "status.saving": "Salvataggio…",
+  "status.unsaved": "Modifiche non salvate",
+  "status.failed": "Salvataggio non riuscito: {message}",
+  "status.notSaved": "Non salvato (modalità browser)",
+  "status.region": "Barra di stato",
+  "status.zoom": "Ingrandimento",
 
   "welcome.eyebrow": "LE CONNESSIONI DIETRO LA SCHEDA",
   "welcome.title1": "Guarda oltre.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Le schede aperte appariranno qui.",
   "welcome.footerLocal": "Spazio di lavoro locale · funziona offline",
   "welcome.shortcuts": "Scorciatoie da tastiera",
-
   "toast.close": "Chiudi notifica",
   "toast.settingsSaveFailed": "Impossibile salvare le impostazioni.",
   "toast.settingsReadFailed": "Impossibile leggere le impostazioni.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Impossibile avviare l'applicazione.",
   "toast.importCancelled": "L’apertura del file è stata annullata.",
   "toast.importStopped": "L’apertura del file è stata interrotta dopo {seconds} secondi senza progressi. Il file potrebbe essere danneggiato o insolitamente complesso.",
-
+  "toast.companionOnlineOnly": "Il file associato è disponibile solo online. Aprilo o allegalo a mano.",
+  "toast.companionOnlineOnlyNames": "File associati interessati: {names}.",
+  "toast.noSandboxRevokeFailed": "Non è stato possibile modificare l'impostazione.",
   "loading.processing": "Elaborazione della scheda…",
   "loading.reading": "Lettura del file…",
   "loading.hint": "Ancora un istante e tutto prende forma.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Questo file richiede più tempo del solito. Puoi attendere o annullare.",
   "loading.cancel": "Annulla",
   "drop.title": "Rilascia la scheda",
-  "fileInput.aria": "File boardview"
+  "fileInput.aria": "File boardview",
+  "toast.componentMissing": "Il componente non è presente su questa scheda.",
+  "toast.documentsAfterBoard": "I documenti trascinati con la scheda saranno allegati dopo la sua apertura. Trascinali di nuovo allora.",
+  "toast.attachedOne": "Allegato «{name}».",
+  "toast.attachedMany": "{count} documenti allegati.",
+
+  "config.locked": "Le impostazioni non possono essere lette perché un altro programma blocca il file; non verranno sovrascritte.",
+  "config.readOnly": "Il file delle impostazioni è di sola lettura: le modifiche valgono solo per questa sessione e il file non viene sostituito.",
+  "config.unreadable": "Il file delle impostazioni è danneggiato o scritto da un’altra versione: il programma è partito con le impostazioni predefinite; il vecchio file viene conservato prima del primo salvataggio."
 }

@@ -4,11 +4,12 @@
  * same head to every adapter.
  */
 import type { SniffInput } from './adapter';
+import { sourceBaseName, type SourcePlatform } from './source-name';
 
-/** Lowercase file name without its directories. */
-export const baseName = (name: string): string => (name.split(/[\\/]/).pop() ?? '').toLowerCase();
+/** Lowercase file name without its directories (on win32 both separators; elsewhere only the slash, see source-name.ts). */
+export const baseName = (name: string, platform?: SourcePlatform): string => sourceBaseName(name, platform).toLowerCase();
 /** Lowercase extension with its dot ('' when there is none). */
-export const extensionOf = (name: string): string => /(\.[^.\\/]+)$/.exec(baseName(name))?.[1] ?? '';
+export const extensionOf = (name: string, platform?: SourcePlatform): string => /(\.[^.\\/]+)$/.exec(baseName(name, platform))?.[1] ?? '';
 /** The head is the whole file: nothing lies beyond the sniff window. */
 export const isComplete = (input: SniffInput): boolean => input.head.length >= input.size;
 /** The head may be only the start of a longer text file: it ends before the file and holds no NUL byte in its first KiB (a binary head is not waiting for text markers). */

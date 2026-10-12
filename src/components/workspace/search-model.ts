@@ -1,4 +1,5 @@
 import type { SearchResult, SearchRow, SearchSource } from '../../lib/crossprobe';
+import type { MessageKey } from '../../lib/i18n';
 
 /** Pure view-model of the unified search list: one flat, virtualizable sequence of group headers and result rows. */
 export type FlatItem =
@@ -8,9 +9,9 @@ export type FlatItem =
 export interface FlatResults { items: FlatItem[]; rows: SearchRow[] }
 export const EMPTY_RESULTS: FlatResults = { items: [], rows: [] };
 
-// i18n: pending
-export const GROUP_LABEL: Record<SearchSource, string> = {
-  'board-components': 'Board components', 'board-nets': 'Board nets', 'schematic-symbols': 'Schematic symbols', 'schematic-nets': 'Schematic nets', documents: 'Documents',
+/** The catalog key of each group header of the unified search list; the view translates it. */
+export const GROUP_LABEL: Record<SearchSource, MessageKey> = {
+  'board-components': 'workspace.groupBoardComponents', 'board-nets': 'workspace.groupBoardNets', 'schematic-symbols': 'workspace.groupSchematicSymbols', 'schematic-nets': 'workspace.groupSchematicNets', documents: 'workspace.tabDocuments',
 };
 
 /** Groups keep searchAll's order (exact literal reference first inside a group); empty groups disappear. */

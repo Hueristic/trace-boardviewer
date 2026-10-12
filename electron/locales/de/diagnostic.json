@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Fertig",
   "diagnostic.bugStageUnknown": "Unbekannt",
   "diagnostic.bugCleanupTiming": "Diese Fristen setzen eine planmäßige Bereinigung voraus; Ausfälle beim Hosting können die Löschung verzögern.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} Byte"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} Byte",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} Zeichen",
+  "diagnostic.bugDescriptionLimit": "Die Beschreibung darf höchstens {max} Zeichen lang sein. Kürze sie, um sie zu prüfen und zu senden."
 }

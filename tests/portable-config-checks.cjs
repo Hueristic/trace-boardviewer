@@ -49,7 +49,7 @@ test('portable config: build.portable.unpackDirName is exactly true (per-launch 
 
 test('build config: the Electron fuses of the portable binary (no run-as-node, no NODE_OPTIONS, code only from the integrity-checked ASAR; --inspect kept for the packaged QA launches)', () => {
   assert.deepEqual(packageJson.build?.electronFuses, {
-    runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: true,
+    runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false,
     onlyLoadAppFromAsar: true, enableEmbeddedAsarIntegrityValidation: true, enableCookieEncryption: true, grantFileProtocolExtraPrivileges: true,
   }, 'tests/mac-config-checks.cjs holds the same list for the Mac file and checks it against the builder schema');
 });
@@ -168,8 +168,10 @@ test('payload: the unused @napi-rs/canvas native binary stays out of the Windows
   const exclusion = '!node_modules/@napi-rs/**';
   assert.ok(build.files.includes(exclusion),
     'package.json build.files must exclude @napi-rs: only pdfjs-dist\'s Node-only canvas path refers to it (the renderer is sandboxed), and without the line the host\'s prebuilt .node binary is bundled and unpacked into app.asar.unpacked.');
-  assert.deepEqual(build.files.filter((pattern) => pattern.startsWith('!')), [exclusion], 'the exclusion is the only negation of the Windows list');
-  assert.equal(build.files.at(-1), exclusion, 'negations come last, after every positive pattern (the order the macOS and Linux files keep, guarded by their drift checks)');
+  const packageExclusion = '!node_modules/!(fflate)/**/*';
+  assert.deepEqual(build.files.filter((pattern) => pattern.startsWith('!')), [exclusion, packageExclusion], 'the two negations are the whole Windows negation list: @napi-rs and every node_modules package but fflate');
+  assert.ok(build.files.includes('node_modules/fflate/**/*'), 'fflate is included by name');
+  assert.equal(build.files.at(-1), packageExclusion, 'negations come last, after every positive pattern (the order the macOS and Linux files keep, guarded by their drift checks)');
   for (const key of ['asarUnpack', 'extraResources', 'extraFiles']) {
     assert.ok(!(key in build) && !(key in (build.win ?? {})) && !(key in (build.portable ?? {})), `${key} could bring the binary back: no extra payload beyond build.files`);
   }

@@ -14,8 +14,16 @@ native database records do not require an activation or file-decryption key.
 The import validates header fields, counts, versioned record widths, string
 references, object types, list ownership and cycles. Declared object counts must
 match all keyed records and strings. A zero terminator cannot hide an unparsed
-nonzero suffix. The 64 MiB input cap and record/string budgets apply before
-building the board.
+nonzero suffix. The native input cap is 240 MiB (other formats keep 64 MiB) and
+the record budget is 4,000,000 declared objects (1,000,000 strings). Both apply
+before the board is built; a database above either one is refused with a named,
+localized LIMIT_EXCEEDED message. The budgets were set so that every supported
+database in the measured sample opens. In a Chromium build of the application,
+every measured sample opened without a renderer crash, and the largest sum of the
+desktop main process and the renderer working set stayed below 2.5 GB.
+The Electron baseline is documented, not changed: these figures exclude the
+Electron shell's own browser-process memory, and the renderer figure includes the
+development-mode page baseline (about 0.2 GB when idle).
 
 Component identity, placement, rotation, values, package names, pin identity,
 nets and pin geometry follow explicit references. Local pad coordinates use

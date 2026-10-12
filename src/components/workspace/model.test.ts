@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { SearchResult, SearchRow } from '../../lib/crossprobe';
 import type { Board, BoardComponent, BoardNote, BoardPin } from '../../lib/types';
-import { PANEL_AUTO_COLLAPSE_BELOW, autoCollapsePanels, deriveSide, noteMatches, normalizeMeasurements, resolvePanels } from './model';
+import { DOCUMENT_PANE_COMPACT_BELOW, PANEL_AUTO_COLLAPSE_BELOW, autoCollapsePanels, deriveSide, documentPaneCompact, noteMatches, normalizeMeasurements, resolvePanels } from './model';
 import { flattenResults, GROUP_LABEL, resultIdentity } from './search-model';
 
 const component = (id: string, ref: string, side: BoardComponent['side']): BoardComponent => ({ id, ref, value: '', package: '', side, bounds: { minX: 0, minY: 0, maxX: 1, maxY: 1 }, position: { x: 0, y: 0 }, rotation: 0, pinIds: [], outline: [] });
@@ -46,6 +46,21 @@ describe('side panels in a narrow window (W-win-viewers-02)', () => {
     expect(resolvePanels({ left: true, right: null }, true)).toEqual({ left: true, right: false });
     expect(resolvePanels({ left: null, right: false }, false)).toEqual({ left: true, right: false });
     expect(resolvePanels({ left: false, right: true }, false)).toEqual({ left: false, right: true });
+  });
+});
+
+describe('document pane compact chrome (O-45, W-dev-ui-01)', () => {
+  it('a document pane below 600 px takes the compact viewer chrome; an unmeasured pane (0) keeps the shell decision', () => {
+    expect(documentPaneCompact(0)).toBe(false);
+    expect(documentPaneCompact(494)).toBe(true);
+    expect(documentPaneCompact(499)).toBe(true);
+    expect(documentPaneCompact(555)).toBe(true);
+    expect(documentPaneCompact(DOCUMENT_PANE_COMPACT_BELOW - 1)).toBe(true);
+  });
+  it('the 1440 px reference window (document pane 628 px) keeps the full chrome, and so does a wide pane', () => {
+    expect(documentPaneCompact(DOCUMENT_PANE_COMPACT_BELOW)).toBe(false);
+    expect(documentPaneCompact(628)).toBe(false);
+    expect(documentPaneCompact(1108)).toBe(false);
   });
 });
 

@@ -5,8 +5,16 @@ import {
   BASE_SCALE, MAX_SCALE, MIN_SCALE, SheetCache, buildNavRows, buildNetHighlight, buildPalette, buildSheetData, cameraToView, clampScale, clampView,
   FALLBACK_TOKENS, fitView, hitTest, instanceChain, K, layoutLabel, layoutPinText, normalizeTextOrientation, paperFrame, panBy, parseKey, queryData,
   resolveChildPath, resolveSelection, robustContentBounds, sameCamera, screenToSheet, segmentDistance, sheetToScreen, symbolDetail, symbolGeometry, textCorners, textWidth,
-  viewBounds, viewToCamera, withAlpha, zoomAt,
+  viewBounds, viewToCamera, withAlpha, zoomAt, drawSheet, ENGLISH_CANVAS_LABELS,
 } from './schematic-render';
+import type { CanvasLabels, SheetData } from './schematic-render';
+
+// drawSheet builds Path2D objects. Node has none, so the canvas-label tests get a no-op stand-in (the painted texts are recorded separately).
+if (typeof globalThis.Path2D === 'undefined') {
+  globalThis.Path2D = class {
+    constructor() { return new Proxy(this, { get: (target, key) => (key in target ? Reflect.get(target, key) : () => undefined) }); }
+  } as unknown as typeof Path2D;
+}
 
 const P = (x: number, y: number) => ({ x, y });
 const near = (a: number, b: number, eps = 1e-6) => expect(Math.abs(a - b)).toBeLessThanOrEqual(eps);
@@ -558,5 +566,58 @@ describe('palette', () => {
       expect(p.net).toBe(FALLBACK_TOKENS[theme].net);
       expect(new Set([p.net, p.wire, p.accent, p.bus]).size).toBe(4);
     }
+  });
+});
+
+describe('canvas labels', () => {
+  const EN = ENGLISH_CANVAS_LABELS;
+  const HU: CanvasLabels = { language: 'hu', title: 'Cím', company: 'Cég', revDate: 'Rev. / dátum', fileSheet: 'Fájl / lap', page: 'lap', file: 'Fájl:', fileMissing: 'a fájl hiányzik' };
+  const ENGLISH_TEXTS = ['Title', 'Company', 'Rev / Date', 'File / Sheet', 'File: power.kicad_sch', 'file missing'];
+  const HUNGARIAN_TEXTS = ['Cím', 'Cég', 'Rev. / dátum', 'Fájl / lap', 'Fájl: power.kicad_sch', 'a fájl hiányzik'];
+  /** A sheet with a title block and one unresolved sub-sheet: both label sets have a title row, a file line and a missing mark. */
+  const labelled = () => makeDef({
+    titleBlock: { title: 'Board', company: 'ACME', rev: 'A', date: '2026-10-11' },
+    sheetRefs: [{ id: 'sr1', name: 'power', file: 'power.kicad_sch', defId: null, at: P(190, 120), size: P(30, 20), pins: [] }],
+  });
+  /** Paints the sheet once on a recording context and returns the painted texts in order. The view is fixed so every label is in reach. */
+  function painted(data: SheetData, labels?: CanvasLabels): string[] {
+    const texts: string[] = [];
+    const noop = () => undefined;
+    const ctx = new Proxy({} as Record<PropertyKey, unknown>, {
+      get: (target, key) => (key === 'fillText' || key === 'strokeText' ? (text: string) => { texts.push(text); } : key in target ? target[key] : noop),
+      set: (target, key, value) => { target[key] = value; return true; },
+    }) as unknown as CanvasRenderingContext2D;
+    drawSheet(ctx, {
+      data, instancePath: '', view: { x: 220, y: 160, scale: 10 }, width: 800, height: 600, dpr: 1, palette: buildPalette(FALLBACK_TOKENS.light, 'light'),
+      refs: [], sheetResolved: [false], netHighlight: null, page: '1', labels,
+    });
+    return texts;
+  }
+
+  it('without labels the sheet is painted with the English defaults', () => {
+    expect(painted(buildSheetData(labelled()))).toEqual(expect.arrayContaining(ENGLISH_TEXTS));
+  });
+  it('a language change repaints the sheet with the labels of the new language', () => {
+    const def = labelled(), cache = new SheetCache(6);
+    expect(painted(cache.get(def, EN), EN)).toEqual(expect.arrayContaining(ENGLISH_TEXTS));
+    const hungarian = painted(cache.get(def, HU), HU);
+    expect(hungarian).toEqual(expect.arrayContaining(HUNGARIAN_TEXTS));
+    expect(hungarian).not.toContain('Title');
+    expect(hungarian).not.toContain('File: power.kicad_sch');
+  });
+  it('the render cache never mixes languages: hu, en, hu returns the hu data again, and en paints English', () => {
+    const def = labelled(), cache = new SheetCache(6);
+    const hu = cache.get(def, HU);
+    const en = cache.get(def, EN);
+    expect(en).not.toBe(hu);
+    expect(cache.get(def, HU)).toBe(hu);
+    expect(painted(cache.get(def, HU), HU)).toEqual(expect.arrayContaining(HUNGARIAN_TEXTS));
+    const english = painted(en, EN);
+    expect(english).toEqual(expect.arrayContaining(ENGLISH_TEXTS));
+    expect(english).not.toContain('Cím');
+  });
+  it('omitting the labels is the English set: the default entry is the English entry', () => {
+    const def = labelled(), cache = new SheetCache(6);
+    expect(cache.get(def)).toBe(cache.get(def, EN));
   });
 });

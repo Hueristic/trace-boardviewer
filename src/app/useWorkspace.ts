@@ -54,7 +54,9 @@ interface FlushRequestSource { onFlushRequest?(listener: () => Promise<void> | v
  * the renderer to write what it still holds (`pagehide` is too late for a direct `app.quit()`, and a destroyed renderer
  * cannot retry a failed write) and waits - bounded - for the answer. The request first behaves like `pagehide`, so views
  * that debounce a camera report it now, then writes the pending workspace snapshot; a write that failed gets one more
- * attempt (a lock that blocked it is often gone by then). Returns the function that detaches the listener.
+ * attempt (a lock that blocked it is often gone by then). A snapshot still unsaved after that rejects, so the answer
+ * reports it as not saved and the main process keeps the window open and asks the user (U-04). Returns the function that
+ * detaches the listener.
  */
 export function attachFlushRequest(
   desktop: unknown,
@@ -64,9 +66,14 @@ export function attachFlushRequest(
   const source = desktop as FlushRequestSource | null | undefined;
   if (typeof source?.onFlushRequest !== 'function') return () => {};
   return source.onFlushRequest(async () => {
+    // An editor that commits when it loses focus (a PDF note still being typed) hands its text over first (U-05): while the window
+    // is still focused, nothing else makes it blur, and its text is not part of the workspace snapshot that is written below.
+    if (typeof document !== 'undefined' && document.activeElement instanceof HTMLElement) document.activeElement.blur();
     pageHide?.dispatchEvent(new Event('pagehide'));
     await controller.flush();
     if (controller.getSnapshot().save.dirty) await controller.flush();
+    // U-04: still unsaved after the second attempt; the rejection is the answer 'not saved' (electron/preload.cjs).
+    if (controller.getSnapshot().save.dirty) throw new Error('The workspace snapshot is still not saved.');
   });
 }
 

@@ -32,4 +32,11 @@ describe('diagnostics use the same verified framing and fixed roles as the reade
       expect(report.structure).toMatchObject({ hook: 'asc', headerOk: true, variant: 'asc-trio' });
     }
   });
+  it('files a GenCAD storage wrapper with non-zero padding under the header stage', async () => {
+    const fixture = gencad.find(entry => entry.label.includes('storage'))!;
+    const data = fixture.data.slice();
+    data[data.length - 1] = 0x07;
+    const report = validateReport(await collectDiagnostic({ name: 'padded.cad', data }, env));
+    expect(report.detection.adapters.find(entry => entry.id === 'gencad')).toMatchObject({ result: 'error', code: 'INVALID_FORMAT', stage: 'header', format: 'gencad' });
+  });
 });

@@ -144,7 +144,10 @@ function observerExpression() {
               if(!sendActionAtDispatch)return;
               if(currentOracle.actionID!==sendActionAtDispatch){sendRequestTokens.delete(sendActionAtDispatch);return}
               const held=heldResponses.has(currentOracle.actionID);
-              const uncertain=value&&value.status==='cancelled';
+              // electron/bug-reports.cjs send() ends a cancelled send with the same shape as cancel(): { status: 'cancelled', uncertain }.
+              // The uncertain flag is true only once the request was attempted; the held-response requirement below also refuses a cancel
+              // that happened before the request reached the network.
+              const uncertain=!!value&&value.status==='cancelled'&&value.uncertain===true;
               currentOracle.heldAtSendTerminal=held;currentOracle.sendTerminalUncertain=!!uncertain&&held;
               currentOracle.sendOutcome=currentOracle.sendTerminalUncertain?'uncertain':uncertain?'uncertain-after-release':value&&typeof value.status==='string'?'other-terminal':'unknown';
             }
@@ -179,7 +182,8 @@ function observerExpression() {
       const list=details&&details.uploadData;
       if(!Array.isArray(list)||list.length!==1)return null;
       const item=list[0];
-      if(!item||typeof item!=='object'||Reflect.ownKeys(item).some(key=>key!=='bytes')||!(Buffer.isBuffer(item.bytes)||item.bytes instanceof Uint8Array))return null;
+      // Electron reports a raw upload item as { type: 'rawData', bytes }; any other key (blobUUID, file) still refuses the body.
+      if(!item||typeof item!=='object'||Reflect.ownKeys(item).some(key=>key!=='bytes'&&!(key==='type'&&item.type==='rawData'))||!(Buffer.isBuffer(item.bytes)||item.bytes instanceof Uint8Array))return null;
       const source=item.bytes;
       if(!Number.isInteger(source.byteLength)||source.byteLength<1||source.byteLength>16384)return null;
       const bytes=Buffer.from(source);

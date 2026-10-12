@@ -509,7 +509,7 @@ describe('selection mapping', () => {
     expect(mapSchematicSelectionToBoard(board, sch, { instancePath: '', symbolId: 'sU1', pinId: 'nope' })).toMatchObject({ status: 'missing', reasons: ['unknown-pin'] });
     const two = buildSchematicIndex([goldenDesign(), goldenDesign()]);
     expect(mapSchematicSelectionToBoard(board, two, { instancePath: '', symbolId: 'sU1' }).status).toBe('missing');
-    expect(mapSchematicSelectionToBoard(board, two, { documentId: 'schematic:1', instancePath: '', symbolId: 'sU1' })).toMatchObject({ status: 'ambiguous', reasons: ['several-schematic-placements'] });
+    expect(mapSchematicSelectionToBoard(board, two, { documentId: 'schematic:1', instancePath: '', symbolId: 'sU1' })).toMatchObject({ status: 'ambiguous', reasons: ['several-schematic-documents'] });
   });
   it('maps nets by exact name or confirmed alias only', () => {
     const { board, sch } = golden();
@@ -556,14 +556,23 @@ describe('bounds, hierarchy and degenerate input', () => {
     const nets = searchAll({ query: 'sw', schematic: index }).groups[3];
     expect(nets.rows.map(r => r.sheetLabel)).toEqual(['main / power / buck A', 'main / power / buck B']);
   });
-  it('treats identical refs of two schematic documents as several placements', () => {
+  it('reports identical refs of two schematic documents as a cross-document duplicate, not as repeated placements (O-42)', () => {
     const one = () => makeDesign({ defs: [{ id: 'a', symbols: [{ id: 's', ref: 'R1', pins: ['1'] }] }], instances: [{ path: '', defId: 'a' }], nets: [] });
     const board = buildBoardIndex(makeBoard([{ ref: 'R1', pins: [['1', 'N']] }]));
     const two = buildSchematicIndex([{ documentId: 'power.sch', design: one() }, { documentId: 'cpu.sch', design: one() }]);
-    expect(linkBoardSchematic(board, two).refs.rows[0]).toMatchObject({ status: 'ambiguous', reasons: ['several-schematic-placements'], schematicPartsTotal: 2 });
+    expect(linkBoardSchematic(board, two).refs.rows[0]).toMatchObject({ status: 'ambiguous', reasons: ['several-schematic-documents'], schematicPartsTotal: 2 });
     expect(mapBoardSelectionToSchematic(board, two, { componentId: 'c0' }).candidates.map(c => c.documentId).sort()).toEqual(['cpu.sch', 'power.sch']);
+    expect(mapBoardSelectionToSchematic(board, two, { componentId: 'c0' }).reasons).toEqual(['several-schematic-documents']);
     const rows = searchAll({ query: 'R1', schematic: two }).groups[2].rows;
     expect(rows.map(r => r.documentId).sort()).toEqual(['cpu.sch', 'power.sch']);
+  });
+  it('shows both reasons when a reference is placed twice in one document and also in another attached document (O-42)', () => {
+    const twice = makeDesign({ defs: [{ id: 'a', symbols: [{ id: 's', ref: 'R1', pins: ['1'] }] }], instances: [{ path: 'a1', defId: 'a' }, { path: 'a2', defId: 'a' }], nets: [] });
+    const once = makeDesign({ defs: [{ id: 'a', symbols: [{ id: 's', ref: 'R1', pins: ['1'] }] }], instances: [{ path: '', defId: 'a' }], nets: [] });
+    const board = buildBoardIndex(makeBoard([{ ref: 'R1', pins: [['1', 'N']] }]));
+    const both = buildSchematicIndex([{ documentId: 'power.sch', design: twice }, { documentId: 'cpu.sch', design: once }]);
+    expect(mapBoardSelectionToSchematic(board, both, { componentId: 'c0' }).reasons).toEqual(['several-schematic-placements', 'several-schematic-documents']);
+    expect(linkBoardSchematic(board, both).refs.rows[0].reasons).toEqual(['several-schematic-placements', 'several-schematic-documents']);
   });
   it('survives empty and hostile input', () => {
     const board = buildBoardIndex(makeBoard([]));

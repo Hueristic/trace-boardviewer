@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Terminé",
   "diagnostic.bugStageUnknown": "Inconnu",
   "diagnostic.bugCleanupTiming": "Ces délais supposent un nettoyage planifié normal ; une panne d’hébergement peut retarder la suppression.",
-  "diagnostic.bugHashBytes": "SHA-256 : {hash} · {bytes} octets"
+  "diagnostic.bugHashBytes": "SHA-256 : {hash} · {bytes} octets",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} caractères",
+  "diagnostic.bugDescriptionLimit": "La description ne peut pas dépasser {max} caractères. Raccourcissez-la pour la vérifier et l’envoyer."
 }

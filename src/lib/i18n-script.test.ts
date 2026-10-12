@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -106,8 +106,10 @@ describe('adding a key', LOADED_MACHINE, () => {
   it('uses a namespace named like the area, even an empty one, and creates a namespace only on request', () => {
     withCopy((root) => {
       const model = script.loadModel(root);
-      expect(script.addKey(model, 'workspace.sampleKey', textValues('Sample'))).toBe('workspace');
-      expect(model.texts.de.workspace).toBe('{\n  "workspace.sampleKey": "Sample de"\n}\n');
+      // A fresh namespace that exists only in this copy, empty: the check is about an empty namespace named like its area.
+      for (const language of Object.keys(model.texts)) model.texts[language].probe = '{}\n';
+      expect(script.addKey(model, 'probe.sampleKey', textValues('Sample'))).toBe('probe');
+      expect(model.texts.de.probe).toBe('{\n  "probe.sampleKey": "Sample de"\n}\n');
       expect(() => script.addKey(model, 'diagnostics.sampleKey', textValues('Sample'))).toThrow(/no namespace holds keys of the area "diagnostics"/);
       expect(() => script.addKey(model, 'diagnostics.sampleKey', textValues('Sample'), { namespace: 'report' })).toThrow(/namespace "report" does not exist/);
       expect(() => script.addKey(model, 'diagnostics.sampleKey', textValues('Sample'), { namespace: 'Bad Name', createNamespace: true })).toThrow(/not a namespace name/);
@@ -308,10 +310,18 @@ describe('the command line', LOADED_MACHINE, () => {
     expect(() => script.parseArguments(['--en'])).toThrow(/--en needs a value/);
   });
 
-  it('lists the namespaces of the real catalogs (read-only)', () => {
-    const output = execFileSync(process.execPath, [path.join(catalogs.LOCALES_DIRECTORY, '..', '..', 'scripts', 'i18n.cjs'), 'namespaces'], { encoding: 'utf8' });
-    for (const namespace of ['app', 'board', 'common', 'dialogs', 'formats', 'kinds', 'native', 'network', 'notes', 'settings', 'support']) expect(output).toContain(namespace);
-    expect(output).toMatch(/workspace\s+0 keys/);
+  it('lists the namespaces of a copy of the catalogs, with a fresh empty namespace (the real catalogs are not touched)', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'trace-i18n-list-'));
+    try {
+      mkdirSync(path.join(directory, 'scripts'), { recursive: true });
+      mkdirSync(path.join(directory, 'electron'), { recursive: true });
+      cpSync(path.join(catalogs.LOCALES_DIRECTORY, '..', '..', 'scripts', 'i18n.cjs'), path.join(directory, 'scripts', 'i18n.cjs'));
+      cpSync(catalogs.LOCALES_DIRECTORY, path.join(directory, 'electron', 'locales'), { recursive: true });
+      for (const language of LANGUAGES) writeFileSync(path.join(directory, 'electron', 'locales', language, 'probe.json'), '{}\n');
+      const output = execFileSync(process.execPath, [path.join(directory, 'scripts', 'i18n.cjs'), 'namespaces'], { encoding: 'utf8' });
+      for (const namespace of ['app', 'board', 'common', 'dialogs', 'formats', 'kinds', 'native', 'network', 'notes', 'settings', 'support']) expect(output).toContain(namespace);
+      expect(output).toMatch(/probe\s+0 keys/);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
   });
 
   it('exits with a message and a non-zero code on a usage error, writing nothing', () => {

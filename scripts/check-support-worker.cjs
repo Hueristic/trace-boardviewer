@@ -19,7 +19,7 @@ const feature = { id: 'support-health', hosts: [new URL(endpoint).hostname], pat
     layer.register(FEATURE);
     const claim = randomBytes(16).toString('hex');
     const service = createSupportService({ store: { read: async () => ({ claim }) }, egress: () => layer, config: { enabled: true, endpoint, publicKey } });
-    receiptCheck = (await service.check()).status;
+    receiptCheck = (await service.check({ userAction: true })).status;
   }
   console.log(JSON.stringify({ status: value.status, httpStatus: answer.status, keyMatches, receiptCheck }));
   if (value.status === 'ready' && !keyMatches) process.exitCode = 1;

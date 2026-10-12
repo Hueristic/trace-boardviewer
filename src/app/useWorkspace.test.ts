@@ -74,7 +74,7 @@ describe('attachFlushRequest (W-fin-lifecycle-02 / W-fin-documents-01: flush bef
     const stuckBridge = fakeBridge();
     const stuck = fakeController(stuckLog, 0);
     attachFlushRequest(stuckBridge, stuck);
-    await expect(stuckBridge.request()).resolves.toBeDefined();
+    await expect(stuckBridge.request()).rejects.toThrow('still not saved'); // U-04: the answer reports it as not saved.
     expect(stuckLog).toEqual(['flush 1', 'flush 2']);
     expect(stuck.getSnapshot().save.dirty).toBe(true);
   });
@@ -89,5 +89,52 @@ describe('attachFlushRequest (W-fin-lifecycle-02 / W-fin-documents-01: flush bef
     detach();
     await bridge.request();
     expect(controller.flush).toHaveBeenCalledTimes(1);
+  });
+
+  it('a focused editor that commits on blur (a PDF note still being typed) loses focus before the snapshot is written (U-05)', async () => {
+    const log: string[] = [];
+    class FakeHtmlElement { blur(): void { log.push('blur'); } }
+    vi.stubGlobal('HTMLElement', FakeHtmlElement);
+    vi.stubGlobal('document', { activeElement: new FakeHtmlElement() });
+    try {
+      const bridge = fakeBridge();
+      const controller = { flush: vi.fn(async () => { log.push('flush'); }), getSnapshot: () => ({ save: { dirty: false, saving: false, failure: null } }) };
+      attachFlushRequest(bridge, controller, { dispatchEvent: () => { log.push('pagehide'); return true; } });
+      await bridge.request();
+      expect(log).toEqual(['blur', 'pagehide', 'flush']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('a snapshot still unsaved after the second attempt rejects the request, so the answer reports it as not saved (U-04)', async () => {
+    const controller = fakeController([], 0);
+    const bridge = fakeBridge();
+    attachFlushRequest(bridge, controller);
+    await expect(bridge.request()).rejects.toThrow('still not saved');
+    expect(controller.flush).toHaveBeenCalledTimes(2);
+  });
+
+  it('a snapshot the second attempt saves answers normally: nothing is reported as unsaved (U-04)', async () => {
+    const controller = fakeController([], 2);
+    const bridge = fakeBridge();
+    attachFlushRequest(bridge, controller);
+    await expect(bridge.request()).resolves.toEqual([undefined]);
+    expect(controller.flush).toHaveBeenCalledTimes(2);
+  });
+
+  it('with nothing focused (or no document) the request only writes: nothing is blurred', async () => {
+    const log: string[] = [];
+    vi.stubGlobal('HTMLElement', class {});
+    vi.stubGlobal('document', { activeElement: null });
+    try {
+      const bridge = fakeBridge();
+      const controller = { flush: vi.fn(async () => { log.push('flush'); }), getSnapshot: () => ({ save: { dirty: false, saving: false, failure: null } }) };
+      attachFlushRequest(bridge, controller);
+      await bridge.request();
+      expect(log).toEqual(['flush']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

@@ -203,7 +203,7 @@ describe('parseFz', () => {
 
   it('offers a session-key retry only when the default cannot open encrypted data, and rejects mistyped explicit keys', () => {
     const missing = error(() => parse(encrypted()));
-    expect(missing).toMatchObject({ code: 'KEY_REQUIRED', format: 'FZ/CAE', keyKind: 'fz' });
+    expect(missing).toMatchObject({ code: 'KEY_REQUIRED', format: 'FZ/CAE', keyKind: 'fz', issue: { key: 'parse.error.fzKeyRequired', params: { format: 'FZ (RC6)' } } });
     expect(missing.message).toMatch(/built-in key does not open it/);
     expect(error(() => parse(encrypted(), 'b.fz', { fzKey: KEY.slice(0, 43) })).code).toBe('INVALID_KEY');
     expect(error(() => parse(encrypted(), 'b.fz', { fzKey: [...KEY.slice(0, 43), -5] })).code).toBe('INVALID_KEY');
@@ -350,7 +350,7 @@ describe('parseFz', () => {
 
   it('CAE: explicit key variants preserve the encrypt-then-parse workflow and keyKind fallback', () => {
     const data = encrypted(container(), CAE_KEY);
-    expect(error(() => parse(data, 'x.cae'))).toMatchObject({ code: 'KEY_REQUIRED', format: 'FZ/CAE', keyKind: 'fz' });
+    expect(error(() => parse(data, 'x.cae'))).toMatchObject({ code: 'KEY_REQUIRED', format: 'FZ/CAE', keyKind: 'fz', issue: { key: 'parse.error.fzKeyRequired', params: { format: 'CAE' } } });
     expect(error(() => parse(data, 'x.cae', { fzKey: parityKey(14, 'cae') }))).toMatchObject({ code: 'INVALID_KEY', keyKind: 'fz' });
     const board = parse(data, 'x.cae', { fzKey: CAE_KEY })!;
     expect(board.format).toBe('CAE'); expect(board.pins).toHaveLength(6);

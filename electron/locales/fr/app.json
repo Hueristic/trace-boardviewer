@@ -8,14 +8,19 @@
   "header.settings": "Paramètres",
   "layout.workshop": "Atelier",
   "layout.focus": "Focus",
-
   "window.minimize": "Réduire la fenêtre",
   "window.restore": "Restaurer la fenêtre",
   "window.maximize": "Agrandir la fenêtre",
   "window.close": "Fermer l’application",
-
   "status.fileInfo": "Informations sur le fichier",
   "status.shortcuts": "Raccourcis clavier",
+  "status.saved": "Enregistré",
+  "status.saving": "Enregistrement…",
+  "status.unsaved": "Modifications non enregistrées",
+  "status.failed": "Échec de l’enregistrement : {message}",
+  "status.notSaved": "Non enregistré (mode navigateur)",
+  "status.region": "Barre d’état",
+  "status.zoom": "Grossissement",
 
   "welcome.eyebrow": "LES CONNEXIONS DERRIÈRE LA CARTE",
   "welcome.title1": "Voir clair.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Les cartes ouvertes apparaîtront ici.",
   "welcome.footerLocal": "Espace de travail local · fonctionne hors ligne",
   "welcome.shortcuts": "Raccourcis clavier",
-
   "toast.close": "Fermer la notification",
   "toast.settingsSaveFailed": "Impossible d’enregistrer les paramètres.",
   "toast.settingsReadFailed": "Impossible de lire les paramètres.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Impossible de démarrer l’application.",
   "toast.importCancelled": "L’ouverture du fichier a été annulée.",
   "toast.importStopped": "L’ouverture du fichier a été interrompue après {seconds} secondes sans progression. Le fichier est peut-être endommagé ou d’une complexité inhabituelle.",
-
+  "toast.companionOnlineOnly": "Le fichier associé n'est disponible qu'en ligne. Ouvrez-le ou joignez-le à la main.",
+  "toast.companionOnlineOnlyNames": "Fichiers associés concernés : {names}.",
+  "toast.noSandboxRevokeFailed": "Le réglage n'a pas pu être modifié.",
   "loading.processing": "Traitement de la carte…",
   "loading.reading": "Lecture du fichier…",
   "loading.hint": "Encore un instant et l’image se dessine.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Ce fichier prend un temps inhabituel. Vous pouvez patienter ou annuler.",
   "loading.cancel": "Annuler",
   "drop.title": "Déposer la carte",
-  "fileInput.aria": "Fichier boardview"
+  "fileInput.aria": "Fichier boardview",
+  "toast.componentMissing": "Le composant ne se trouve pas sur cette carte.",
+  "toast.documentsAfterBoard": "Les documents glissés avec la carte seront joints une fois celle-ci ouverte. Glissez-les à nouveau alors.",
+  "toast.attachedOne": "Joint : « {name} ».",
+  "toast.attachedMany": "{count} documents joints.",
+
+  "config.locked": "Les réglages ne peuvent pas être lus, car un autre programme verrouille le fichier ; ils ne seront pas écrasés.",
+  "config.readOnly": "Le fichier des réglages est en lecture seule : les modifications ne valent que pour cette session, et le fichier n’est pas remplacé.",
+  "config.unreadable": "Le fichier des réglages est endommagé ou vient d’une autre version : le programme a démarré avec les réglages par défaut ; l’ancien fichier est conservé avant le premier enregistrement."
 }

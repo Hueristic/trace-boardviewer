@@ -16,7 +16,7 @@ import { Canvas2DBoardRenderer } from './board-render-2d';
 import type { Layer2D } from './board-render-2d';
 import type { BoardRenderState, RenderStats } from './board-renderer';
 import { buildBoardScene } from './board-scene';
-import { canvasToBoard, fullPane, paneAt } from './board-view';
+import { bitmapSize, canvasToBoard, fullPane, paneAt } from './board-view';
 import type { BoardPane } from './board-view';
 
 export interface BoardCanvasProps {
@@ -265,7 +265,8 @@ function BoardCanvas(props: BoardCanvasProps) {
       const width = Math.max(1, rect.width), height = Math.max(1, rect.height);
       const dpr = Math.min(window.devicePixelRatio || 1, 2.5);
       dimensionsRef.current = { width, height, dpr };
-      canvas.width = Math.round(width * dpr); canvas.height = Math.round(height * dpr);
+      const bitmap = bitmapSize(width, height, dpr);
+      canvas.width = bitmap.width; canvas.height = bitmap.height;
       overlay.width = canvas.width; overlay.height = canvas.height;
       const fit = fitView(propsRef.current.board.bounds, width, height, viewRef.current.rotation, propsRef.current.side === 'bottom');
       fitScaleRef.current = fit.scale;
@@ -538,9 +539,10 @@ function BoardCanvas(props: BoardCanvasProps) {
       <canvas
         ref={canvasRef}
         className="board-canvas"
+        role="application"
         tabIndex={0}
         aria-label={t(props.side === 'top' ? (props.measureMode ? 'canvas.ariaTopMeasure' : 'canvas.ariaTopSelect') : (props.measureMode ? 'canvas.ariaBottomMeasure' : 'canvas.ariaBottomSelect'))}
-        style={{ width: '100%', height: '100%', display: 'block', touchAction: 'none', outline: 'none', cursor: dragging ? 'grabbing' : props.measureMode ? 'crosshair' : hover ? 'pointer' : 'grab' }}
+        style={{ width: '100%', height: '100%', display: 'block', touchAction: 'none', cursor: dragging ? 'grabbing' : props.measureMode ? 'crosshair' : hover ? 'pointer' : 'grab' }}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}

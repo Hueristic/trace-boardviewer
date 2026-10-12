@@ -1,0 +1,1 @@
+- The documentation now names the data folder as the packaged app's name: on Windows `%APPDATA%\trace-boardviewer` and on macOS `~/Library/Application Support/trace-boardviewer` (previously `TRACE Boardviewer` on Windows). These two locations are not yet confirmed on native builds; Linux is unchanged. The application itself does not move any data.

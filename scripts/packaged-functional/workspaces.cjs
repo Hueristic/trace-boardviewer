@@ -33,6 +33,8 @@ function pngPixel(red, green, blue) {
 }
 const png = pngPixel(30, 60, 90);
 const pngAlt = pngPixel(90, 60, 30);
+// A third, distinct content for the "changed on disk" case: the workspace refuses to accept bytes another document already has.
+const pngChanged = pngPixel(200, 200, 40);
 const pdf = makeImageOnlyPdf(['SYNTHETIC']);
 
 function testId(page, id) { return page.getByTestId(id); }
@@ -110,6 +112,8 @@ async function readStoreFiles(profile, directory) {
   })));
 }
 
+// Case-distinct names: a string hasText is case-insensitive, so a row is matched by a case-sensitive prefix of its stored basename.
+const caseSensitiveRow = (page, name) => page.getByTestId('document-row').filter({ hasText: new RegExp('^' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
 async function run(ctx) {
   assert.ok(ctx && ctx.options && ctx.fixtureDir && ctx.profile && ctx.root, 'native module context is complete');
   for (const method of ['getPage', 'step', 'registerFixture', 'withOpenDialog', 'withSaveDialog', 'waitBoard', 'dismissSupport', 'withProfile', 'restart', 'screenshot']) {
@@ -129,9 +133,16 @@ async function run(ctx) {
     await openWorkspace(page, ctx, board);
     await clickVisible(page, 'tab-documents');
     await ctx.withOpenDialog([firstDoc, caseDoc, pdfDoc], async () => clickVisible(page, 'attach'));
-    await page.getByTestId('document-row').filter({ hasText: path.basename(pngName) }).waitFor({ state: 'visible', timeout: 15000 });
-    await page.getByTestId('document-row').filter({ hasText: path.basename(pngCaseName) }).waitFor({ state: 'visible', timeout: 15000 });
+    // Case-distinct names: hasText with a string is case-insensitive, so match the stored basename as a case-sensitive prefix instead.
+    const rowNamed = (name) => page.getByTestId('document-row').filter({ hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) });
+    await rowNamed(path.basename(pngName)).waitFor({ state: 'visible', timeout: 15000 });
+    await rowNamed(path.basename(pngCaseName)).waitFor({ state: 'visible', timeout: 15000 });
     await page.getByTestId('document-row').filter({ hasText: 'Ω-repair.pdf' }).waitFor({ state: 'visible', timeout: 15000 });
+    // A PDF row stays "loading" for a moment after it is listed: wait for every row to reach its ready state before reading them.
+    await page.waitForFunction(() => {
+      const rows = [...document.querySelectorAll('[data-testid=document-row]')];
+      return rows.length === 3 && rows.every((row) => row.getAttribute('data-status') === 'ready');
+    }, null, { timeout: 30000 });
     const docs = await page.getByTestId('document-row').evaluateAll((rows) => rows.map((row) => ({
       name: row.querySelector('.wsp-doc-title')?.textContent?.trim(), status: row.getAttribute('data-status'),
     })));
@@ -150,7 +161,7 @@ async function run(ctx) {
       page = ctx.getPage();
       await ctx.dismissSupport();
       await clickVisible(page, 'tab-documents');
-      const firstRow = page.getByTestId('document-row').filter({ hasText: path.basename(pngName) });
+      const firstRow = caseSensitiveRow(page, path.basename(pngName));
       await firstRow.waitFor({ state: 'visible', timeout: 15000 });
       assert.equal(await firstRow.getAttribute('data-status'), 'missing', 'a missing workspace document is identified without dropping its record');
       await fs.writeFile(firstDoc, original);
@@ -158,12 +169,12 @@ async function run(ctx) {
       await ctx.withOpenDialog([firstDoc], async () => firstRow.getByTestId('relink-row').click());
       await page.waitForFunction((name) => [...document.querySelectorAll('[data-testid="document-row"]')].some((row) => row.textContent.includes(name) && row.getAttribute('data-status') === 'ready'), path.basename(pngName), { timeout: 15000 });
 
-      await fs.writeFile(firstDoc, pngAlt);
+      await fs.writeFile(firstDoc, pngChanged);
       await ctx.restart();
       page = ctx.getPage();
       await ctx.dismissSupport();
       await clickVisible(page, 'tab-documents');
-      const changedRow = page.getByTestId('document-row').filter({ hasText: path.basename(pngName) });
+      const changedRow = caseSensitiveRow(page, path.basename(pngName));
       await changedRow.waitFor({ state: 'visible', timeout: 15000 });
       assert.equal(await changedRow.getAttribute('data-status'), 'changed', 'a byte hash change is shown before the workspace adopts it');
       await changedRow.getByTestId('accept-row').click();
@@ -175,7 +186,7 @@ async function run(ctx) {
       page = ctx.getPage();
       await ctx.dismissSupport();
       await clickVisible(page, 'tab-documents');
-      const restoredRow = page.getByTestId('document-row').filter({ hasText: path.basename(pngName) });
+      const restoredRow = caseSensitiveRow(page, path.basename(pngName));
       await restoredRow.waitFor({ state: 'visible', timeout: 15000 });
       assert.equal(await restoredRow.getAttribute('data-status'), 'changed', 'restoring different bytes is detected after restart');
       await restoredRow.getByTestId('accept-row').click();
@@ -196,7 +207,8 @@ async function run(ctx) {
     const pinRow = page.getByTestId('pin-row').filter({ hasText: /^1/ }).first();
     await pinRow.waitFor({ state: 'visible', timeout: 10000 });
     assert.equal(await pinRow.getAttribute('aria-pressed'), 'true', 'canvas hit testing selected the rendered pad for pin 1');
-    await testId(page, 'add-note').click();
+    // Two add-note buttons are visible once a pin is selected: name the pin's button exactly.
+    await page.getByRole('button', { name: 'Add a note to U1 pin 1', exact: true }).click();
     await requireVisible(page, 'note-dialog');
     await page.locator('#note-draft').fill('Synthetic pin observation');
     await testId(page, 'measure-voltage').fill('1.8 V');
@@ -206,7 +218,7 @@ async function run(ctx) {
     assert.equal(await page.getByTestId('note-card').count(), 1, 'pin note is visible after save');
     await requireVisible(page, 'tab-board');
     await selectReference(page, 'U1');
-    await testId(page, 'add-note').click();
+    await page.getByRole('button', { name: 'Add a note to U1 (component)', exact: true }).click();
     await requireVisible(page, 'note-dialog');
     await page.locator('#note-draft').fill('Synthetic component inspection');
     await testId(page, 'measure-voltage').fill('3.3 V');
@@ -234,6 +246,9 @@ async function run(ctx) {
     await page.getByRole('button', { name: /Edit note/i }).first().click();
     await requireVisible(page, 'note-dialog');
     await testId(page, 'note-delete').click();
+    // A note with text asks before its text is removed (U-01): the confirmation is part of the deletion.
+    await requireVisible(page, 'note-remove-confirm-row');
+    await testId(page, 'note-remove-confirm').click();
     await page.getByTestId('note-dialog').waitFor({ state: 'detached', timeout: 10000 });
     const notes = (await readStoreFiles(ctx.profile, 'notes')).flatMap((entry) => Array.isArray(entry.value) ? entry.value : []);
     assert.ok(!notes.some((note) => note.text === 'Synthetic component inspection revised'), 'component note deletion reaches the native store');
@@ -260,7 +275,7 @@ async function run(ctx) {
     const measureText = await measured.innerText();
     const distance = Number(measureText.match(/([\d.,]+)\s*mm/)?.[1]?.replace(',', '.'));
     assert.ok(Number.isFinite(distance) && Math.abs(distance - 2) <= 0.15, `known 2 mm fixture pad spacing is measured within 0.15 mm (actual ${measureText})`);
-    await page.getByRole('button', { name: /finish measurement/i }).click();
+    await page.getByRole('button', { name: 'Finish measuring', exact: true }).click(); // measure.finish (en)
     await clickVisible(page, 'settings-button');
     await requireVisible(page, 'settings-dialog');
     await page.locator('.settings-options').nth(1).locator('button').nth(1).click();
@@ -294,9 +309,10 @@ async function run(ctx) {
     assert.equal(await docs.count(), 3, 'export lists the three workspace documents');
     await docs.nth(0).check();
     await testId(page, 'export-notes').check();
-    assert.match(await testId(page, 'export-summary').innerText(), /1 document/);
-    await ctx.withSaveDialog(destination, async () => testId(page, 'export-run').click());
-    await requireVisible(page, 'export-result');
+    // The summary is localized (this step runs in the Ukrainian interface): the selected document count is the digit in every language.
+    assert.match(await testId(page, 'export-summary').innerText(), /\b1\b/, 'the summary counts the one selected document');
+    // The chooser override must stay active until the export reports its result: the main process asks for the path after the click returns.
+    await ctx.withSaveDialog(destination, async () => { await testId(page, 'export-run').click(); await requireVisible(page, 'export-result'); });
     const bytes = await fs.readFile(destination);
     assert.equal(bytes.readUInt32LE(0), 0x04034b50, 'selected workspace bundle is a ZIP written by the native exporter');
     const digest = sha256(bytes);

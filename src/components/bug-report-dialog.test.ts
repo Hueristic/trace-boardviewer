@@ -45,6 +45,14 @@ describe('in-app bug report dialog markup', () => {
     expect(html).not.toMatch(/type="(?:email|password|file)"|name="(?:email|password|account|attachment)"/i);
   });
 
+  it('shows the description counter and never caps the textarea, so no text is cut silently', () => {
+    const html = markup('en');
+    expect(html).not.toContain('maxLength=');
+    expect(html).toContain('id="bug-report-counter"');
+    expect(html).toContain('aria-describedby="bug-report-hint bug-report-counter"');
+    expect(html).toContain('0 / 2,000 characters');
+  });
+
   it('copies only after an explicit call and writes only the current description', async () => {
     const clipboard = { writeText: vi.fn(async () => undefined) };
     expect(await copyBugReportText('Current local text.', clipboard)).toBe(true);

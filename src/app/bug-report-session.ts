@@ -5,6 +5,9 @@ export type BugReportOutcome = 'idle' | 'received' | 'uncertain' | 'failed' | 'u
 type BugReportSurface = NonNullable<BugReportInput['context']>['surface'];
 type BugReportImport = NonNullable<BugReportInput['context']>['lastImport'];
 
+/** The text and privacy choice as last saved to the local draft (or restored from it). Null when nothing is saved since the form opened. */
+export type BugReportSavedState = Readonly<{ description: string; includeDiagnostics: boolean }> | null;
+
 export type BugReportSessionSnapshot = Readonly<{
   input: BugReportInput;
   phase: BugReportPhase;
@@ -13,10 +16,17 @@ export type BugReportSessionSnapshot = Readonly<{
   attempted: boolean;
   busy: boolean;
   error: string | null;
+  saved: BugReportSavedState;
 }>;
 
+/**
+ * The close prompt asks only about unsaved changes. A form that was never saved asks while it has text. A form whose text and
+ * privacy choice match the last saved draft closes at once: the draft stays on this device, so nothing is lost.
+ */
 export function shouldPromptForBugReportClose(snapshot: BugReportSessionSnapshot): boolean {
-  return !snapshot.busy && snapshot.phase !== 'result' && snapshot.input.description.trim().length > 0;
+  if (snapshot.busy || snapshot.phase === 'result') return false;
+  if (snapshot.saved === null) return snapshot.input.description.trim().length > 0;
+  return snapshot.input.description !== snapshot.saved.description || snapshot.input.includeDiagnostics !== snapshot.saved.includeDiagnostics;
 }
 
 export function shouldPreserveBugReportOnBoardChange(activeModal: string | null): boolean {
@@ -72,7 +82,7 @@ export class BugReportSession {
     this.contextSnapshot = Object.freeze({ surface: options.surface, lastImport: options.lastImport ?? null });
     this.snapshot = Object.freeze({
       input: Object.freeze({ description: '', includeDiagnostics: true, context: this.contextSnapshot }),
-      phase: 'editing', outcome: 'idle', preview: null, attempted: false, busy: false, error: null,
+      phase: 'editing', outcome: 'idle', preview: null, attempted: false, busy: false, error: null, saved: null,
     });
   }
 
@@ -97,7 +107,19 @@ export class BugReportSession {
     this.request++;
     if (input.context) this.contextSnapshot = Object.freeze({ ...input.context });
     const context = input.includeDiagnostics ? (input.context ?? this.contextSnapshot) : null;
-    this.update({ input: Object.freeze({ ...input, context }), attempted: pending, outcome: pending ? 'uncertain' : 'idle', preview: null, phase: 'editing', busy: false, error: null });
+    // A plain saved draft is saved state. A pending retry is not: it was never confirmed, so closing still asks.
+    const saved = pending ? null : Object.freeze({ description: input.description, includeDiagnostics: input.includeDiagnostics });
+    this.update({ input: Object.freeze({ ...input, context }), attempted: pending, outcome: pending ? 'uncertain' : 'idle', preview: null, phase: 'editing', busy: false, error: null, saved });
+  }
+
+  /** Call after the local draft has been written: the form now matches what is saved, so closing it asks nothing until it changes. */
+  markSaved(input: BugReportInput): void {
+    this.update({ saved: Object.freeze({ description: input.description, includeDiagnostics: input.includeDiagnostics }) });
+  }
+
+  /** Call after the local draft has been discarded: nothing is saved any more, so unsaved text asks again. */
+  markDiscarded(): void {
+    this.update({ saved: null });
   }
 
   restoreIfUnchanged(input: BugReportInput, pending: boolean, expectedRevision: number): boolean {
@@ -150,7 +172,8 @@ export class BugReportSession {
     catch { result = { status: 'error', error: 'unknown' }; }
     if (request !== this.request) return null;
     if (result.status === 'received') this.update({ busy: false, phase: 'result', outcome: 'received', error: null });
-    else this.update({ busy: false, phase: 'result', outcome: 'uncertain', error: result.error });
+    // Every cancelled or failed send stays "unconfirmed" for the user, whatever the `uncertain` flag says.
+    else this.update({ busy: false, phase: 'result', outcome: 'uncertain', error: result.status === 'error' ? result.error : 'cancelled' });
     return result;
   }
 

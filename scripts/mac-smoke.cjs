@@ -388,7 +388,7 @@ async function collectStaticEvidence({ appPath, artifact, env }) {
     minimumSystemVersion: plistValue(plist, 'LSMinimumSystemVersion'), iconFile: plistValue(plist, 'CFBundleIconFile'),
     machO: { file: fileOutput.stdout.trim(), lipo: lipo.stdout.trim(), archs: binaryArchs },
     codesign: { ...parseCodesign(codesignText), describeExit: describe.status, verifyExit: verify.status, verifyOutput: (verify.stderr + verify.stdout).trim().slice(0, 600) },
-    gatekeeperAssessment: { exit: gatekeeper.status, output: (gatekeeper.stderr + gatekeeper.stdout).trim().slice(0, 400), note: 'informational: an ad-hoc signed app is expected to be rejected' },
+    gatekeeperAssessment: { exit: gatekeeper.status, output: (gatekeeper.stderr + gatekeeper.stdout).trim().slice(0, 400), note: 'recorded, not a gate: an ad-hoc or unsigned build is expected to be rejected (docs/MAC_VALIDATION.md section 4)' },
     layout: {
       appAsar: await exists(path.join(contents, 'Resources', 'app.asar')),
       appAsarUnpacked: await exists(path.join(contents, 'Resources', 'app.asar.unpacked')),
@@ -409,7 +409,8 @@ function staticChecks({ requestedArch, app, artifact }) {
   const add = (name, ok, detail) => results.push({ name, status: ok ? 'pass' : 'fail', ...(detail ? { detail } : {}) });
   add('main binary is a single-architecture Mach-O matching the requested arch', app.machO.archs.length === 1 && app.machO.archs[0] === requestedArch, `${app.machO.archs.join(',') || 'none'} (requested ${requestedArch})`);
   add('bundle identifier is hu.trace.boardviewer', app.bundleId === 'hu.trace.boardviewer', String(app.bundleId));
-  add('code signature is ad-hoc with no Team ID (no certificate was used)', app.codesign.signed && app.codesign.adhoc && !app.codesign.hasTeamIdentifier && app.codesign.authorities.length === 0, JSON.stringify({ signed: app.codesign.signed, adhoc: app.codesign.adhoc, team: app.codesign.teamIdentifier }));
+  // Not an ad-hoc requirement: a build signed with an identity is recorded as such, and docs/MAC_VALIDATION.md decides acceptance.
+  add('code signature is present and recorded (ad-hoc or with an identity)', app.codesign.signed, JSON.stringify({ adhoc: app.codesign.adhoc, team: app.codesign.teamIdentifier, authorities: app.codesign.authorities }));
   add('codesign --verify --deep --strict accepts the bundle', app.codesign.verifyExit === 0, app.codesign.verifyOutput.slice(0, 200));
   add('app.asar is present and nothing is unpacked beside it (no native module shipped)', app.layout.appAsar && !app.layout.appAsarUnpacked);
   add('no app-update.yml (no repository metadata embedded)', !app.layout.appUpdateYml);
@@ -666,9 +667,22 @@ async function runSmoke(options) {
   let checks = [];
   let runtime = null;
   let classification = null;
+  let extracted = null;
   try {
     if (!(await fs.stat(absoluteApp).then((entry) => entry.isDirectory(), () => false))) throw new Error(`not a directory: ${absoluteApp}`);
-    stat = await collectStaticEvidence({ appPath: absoluteApp, artifact: artifact ? path.resolve(artifact) : null, env });
+    // The downloaded ZIP is what users get, so when one is given its extracted copy is checked and launched. ditto keeps the
+    // bundle's links and modes. The --app directory is the build output the ZIP was made from.
+    let testedApp = absoluteApp;
+    if (artifact && path.resolve(artifact).endsWith('.zip')) {
+      extracted = await fs.mkdtemp(path.join(os.tmpdir(), 'trace-mac-smoke-'));
+      const unpacked = tool('/usr/bin/ditto', ['-x', '-k', path.resolve(artifact), extracted], { timeoutMs: 600000 });
+      if (unpacked.status !== 0) throw new Error(`ditto could not extract the ZIP: ${(unpacked.stderr || unpacked.error || '').trim().slice(0, 300)}`);
+      const bundle = (await fs.readdir(extracted)).find((name) => name.endsWith('.app'));
+      if (!bundle) throw new Error('the ZIP holds no .app at its top level');
+      testedApp = path.join(extracted, bundle);
+    }
+    stat = await collectStaticEvidence({ appPath: testedApp, artifact: artifact ? path.resolve(artifact) : null, env });
+    stat.app.testedCopy = testedApp === absoluteApp ? 'app-directory' : 'downloaded-zip';
     checks = staticChecks({ requestedArch: arch, app: stat.app, artifact: stat.artifact });
     if (!evidenceOnly) {
       const flow = await runFlow({ executable: stat.app.executable, requestedArch: arch, hostArch: stat.host.hostArch, keepTemp, log });
@@ -691,6 +705,7 @@ async function runSmoke(options) {
     await fs.writeFile(target, home && home.length > 1 ? text.split(home).join('~') : text);
     log(`Evidence: ${target}`);
     evidence.path = target;
+    if (extracted && !keepTemp) await fs.rm(extracted, { recursive: true, force: true });
   }
   return evidence;
 }

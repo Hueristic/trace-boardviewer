@@ -29,6 +29,11 @@ function safeResult(error, retryAfterSeconds) {
   const closed = ERRORS.has(error) ? error : 'unknown';
   return { status: 'error', error: closed, ...(Number.isInteger(retryAfterSeconds) ? { retryAfterSeconds } : {}) };
 }
+// One shape for every cancelled send, both from send() and from cancel(). `uncertain` is true only once the request may have left
+// this machine; a cancel before that point is not uncertain.
+function cancelledSend(attempted) {
+  return { status: 'cancelled', uncertain: attempted === true };
+}
 function validateLastImport(value) {
   if (value === null) return null;
   if (!ownRecord(value, ['outcome', 'stage', 'formatId', 'extensionClass', 'errorCode'])) return null;
@@ -80,9 +85,9 @@ function stateValue(raw, now) {
 function parseJson(text) { try { return JSON.parse(text); } catch { return null; } }
 function sha256(value) { return crypto.createHash('sha256').update(value, 'utf8').digest('hex'); }
 
-function createBugReportService({ store, egress, getVersion, platform = process.platform, arch = process.arch, locale = () => 'en', now = Date.now, randomUUID = crypto.randomUUID, config = fileConfig } = {}) {
+function createBugReportService({ store, egress, getVersion, platform = process.platform, arch = process.arch, locale = () => 'en', now = Date.now, randomUUID = crypto.randomUUID, config = fileConfig, flavour, env = process.env } = {}) {
   if (!store || typeof store.update !== 'function' || typeof store.read !== 'function' || !egress || typeof egress.request !== 'function') throw new TypeError('Bug report service dependencies are incomplete.');
-  const endpoint = config && config.enabled === true && config.endpoint === FEATURE_ENDPOINT() ? config.endpoint : null;
+  const endpoint = resolveEndpoint({ config, flavour, env });
   let active = null;
   let sending = null;
   let closed = false;
@@ -181,7 +186,7 @@ function createBugReportService({ store, egress, getVersion, platform = process.
     }
     if (state.controller.signal.aborted || closed || state.epoch !== lifecycleEpoch || !active || active.prepareId !== state.prepareId) {
       if (sending === state) sending = null;
-      return safeResult('cancelled');
+      return cancelledSend(state.attempted);
     }
     state.attempted = true;
     let response;
@@ -193,12 +198,12 @@ function createBugReportService({ store, egress, getVersion, platform = process.
     } catch { response = { ok: false, error: 'network' }; }
     if (state.cancelled || state.controller.signal.aborted || closed || state.epoch !== lifecycleEpoch || !active || active.prepareId !== state.prepareId) {
       if (sending === state) sending = null;
-      return safeResult('cancelled');
+      return cancelledSend(state.attempted);
     }
     if (!response || response.ok !== true || !Buffer.isBuffer(response.body) || response.body.length > MAX_REPLY_BYTES || ![200, 201].includes(response.status)) {
       const result = transportError(response);
       if (sending === state) sending = null;
-      return result;
+      return result.error === 'cancelled' ? cancelledSend(state.attempted) : result;
     }
     const ack = parseJson(response.body.toString('utf8'));
     if (!contract.isValidAcknowledgement(ack, prepared.report.reportId, prepared.payloadHash)) {
@@ -222,7 +227,7 @@ function createBugReportService({ store, egress, getVersion, platform = process.
     if (!sending || sending.prepareId !== raw.prepareId || sending.acknowledged) return safeResult('stale-preview');
     sending.cancelled = true;
     sending.controller.abort();
-    return { status: 'cancelled', uncertain: sending.attempted };
+    return cancelledSend(sending.attempted);
   }
   async function getDraft() {
     try {
@@ -285,4 +290,58 @@ function transportError(response) {
 }
 function FEATURE_ENDPOINT() { return 'https://trace-bug-report.trace-boardviewer.workers.dev/v1/reports'; }
 
-module.exports = Object.freeze({ FEATURE, CONFIG: fileConfig, STATE_NAME, STATE_MAX_BYTES, RETENTION_MS, HANDLE_TTL_MS, SEND_TIMEOUT_MS, MAX_REPLY_BYTES, createBugReportService, transportError });
+// The receiver endpoint is fixed in every release. Only the QA flavour (the package.json flag traceBuildFlavor, written by the QA
+// configs) may send to a loopback https mock instead, and only when TRACE_QA_BUG_REPORT_ENDPOINT names one. Any other value,
+// and any value outside the QA flavour, is ignored: the release endpoint stays the fixed one.
+const QA_ENDPOINT_ENV = 'TRACE_QA_BUG_REPORT_ENDPOINT';
+function isLoopbackEndpoint(value) {
+  if (typeof value !== 'string') return false;
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  return url.href === value && url.protocol === 'https:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost') && url.port !== '' &&
+    url.username === '' && url.password === '' && url.search === '' && url.hash === '' && url.pathname === '/v1/reports';
+}
+function resolveEndpoint({ config = fileConfig, flavour, env = process.env } = {}) {
+  if (!config || config.enabled !== true || config.endpoint !== FEATURE_ENDPOINT()) return null;
+  const override = env ? env[QA_ENDPOINT_ENV] : undefined;
+  if (flavour === 'qa' && isLoopbackEndpoint(override)) return override;
+  return config.endpoint;
+}
+// The egress feature for registration: the fixed host, plus the loopback host of a QA override. The rest of the descriptor is unchanged.
+function featureFor({ flavour, env = process.env, config = fileConfig } = {}) {
+  const endpoint = resolveEndpoint({ config, flavour, env });
+  if (!endpoint || endpoint === FEATURE_ENDPOINT()) return FEATURE;
+  return Object.freeze({ ...FEATURE, hosts: Object.freeze([...FEATURE.hosts, new URL(endpoint).hostname]) });
+}
+
+// The QA mock uses a certificate that no system trusts. The QA build may accept exactly that certificate for the loopback override host,
+// and only when the operator pins its SHA-256 fingerprint (QA_FINGERPRINT_ENV, hex as openssl prints it, or Electron's "sha256/<base64>").
+// Every other certificate keeps the default verification (-3), so the release and the QA flavour alike still refuse unknown certificates.
+const QA_FINGERPRINT_ENV = 'TRACE_QA_BUG_REPORT_CERT_SHA256';
+function fingerprintHex(value) {
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  let hex;
+  if (text.startsWith('sha256/')) hex = Buffer.from(text.slice('sha256/'.length), 'base64').toString('hex');
+  else if (/^[0-9a-fA-F:]+$/.test(text)) hex = text.replace(/:/g, '').toLowerCase();
+  else hex = Buffer.from(text, 'base64').toString('hex');
+  return /^[0-9a-f]{64}$/.test(hex) ? hex : null;
+}
+function qaCertificateVerifier({ flavour, env = process.env, config = fileConfig } = {}) {
+  if (flavour !== 'qa') return null;
+  const endpoint = resolveEndpoint({ config, flavour, env });
+  if (!endpoint || endpoint === FEATURE_ENDPOINT()) return null;
+  const pinned = fingerprintHex(env ? env[QA_FINGERPRINT_ENV] : undefined);
+  if (!pinned) return null;
+  const host = new URL(endpoint).hostname;
+  return (request, callback) => {
+    const accept = request.hostname === host && fingerprintHex(request.certificate && request.certificate.fingerprint) === pinned;
+    callback(accept ? 0 : -3);
+  };
+}
+
+module.exports = Object.freeze({
+  QA_FINGERPRINT_ENV, fingerprintHex, qaCertificateVerifier,
+  FEATURE, CONFIG: fileConfig, STATE_NAME, STATE_MAX_BYTES, RETENTION_MS, HANDLE_TTL_MS, SEND_TIMEOUT_MS, MAX_REPLY_BYTES, QA_ENDPOINT_ENV,
+  createBugReportService, transportError, resolveEndpoint, featureFor,
+});

@@ -1,5 +1,8 @@
+import { createRequire } from 'node:module';
 import { describe, expect, it } from 'vitest';
-import { findSensitiveDescriptionDetails, removeSensitiveDescriptionDetails } from './bug-report-description';
+import { countDescriptionCodePoints, findSensitiveDescriptionDetails, isDescriptionOverLimit, isDescriptionTooLargeToSave, MAX_DESCRIPTION_CODE_POINTS, MAX_DESCRIPTION_RAW_CODE_UNITS, removeSensitiveDescriptionDetails } from './bug-report-description';
+
+const contract = createRequire(import.meta.url)('../../shared/bug-report-contract.cjs') as { MAX_DESCRIPTION_CODE_POINTS: number; MAX_DESCRIPTION_RAW_CODE_UNITS: number };
 
 describe('bug report description privacy helper', () => {
   it('finds common full local paths across Windows, UNC, and POSIX forms', () => {
@@ -97,5 +100,107 @@ describe('bug report description privacy helper', () => {
     const bounded = `${'x'.repeat(1900)}${'C:\\'.repeat(30)}`;
     expect(() => findSensitiveDescriptionDetails(bounded)).not.toThrow();
     expect(() => findSensitiveDescriptionDetails('x'.repeat(8193))).toThrowError('Unsupported description text.');
+  });
+
+  it('removes only the detected path and keeps the sentence around it', () => {
+    const cases: Array<[string, string]> = [
+      ['Board C:\\Users\\tech\\A123.brd does not power on.', 'Board [removed] does not power on.'],
+      ['Saved to /home/tech/projects/A123.brd, please check.', 'Saved to [removed], please check.'],
+      ['Share \\\\fileserver\\share\\repair\\boardview.brd then retry', 'Share [removed] then retry'],
+      ['Stored at C:\\Users\\tech name\\Boards\\My Board Rev B.brd today', 'Stored at [removed] today'],
+      ['Folder C:\\Users\\tech\\Boards\\ is empty', 'Folder [removed] is empty'],
+    ];
+    for (const [text, expected] of cases) {
+      expect(removeSensitiveDescriptionDetails(text, '[removed]'), text).toBe(expected);
+    }
+  });
+
+  it('detects home-relative and drive-less relative paths', () => {
+    const cases: Array<[string, string]> = [
+      ['Copy ~/Boards/A123.brd to the bench.', '~/Boards/A123.brd'],
+      ['Use ~\\Boards\\A123.brd today', '~\\Boards\\A123.brd'],
+      ['Look in Boards\\Dell\\A123.brd and retry.', 'Boards\\Dell\\A123.brd'],
+      ['Missing files: boards/A123/notes.txt', 'boards/A123/notes.txt'],
+      ['Try boards/A123.brd once.', 'boards/A123.brd'],
+    ];
+    for (const [text, value] of cases) {
+      const details = findSensitiveDescriptionDetails(text);
+      expect(details.map(({ kind }) => kind), text).toEqual(['path']);
+      expect(text.slice(details[0].start, details[0].end), text).toBe(value);
+    }
+  });
+
+  it('does not redact ordinary slash-separated words, ratios, dates, or times', () => {
+    const texts = [
+      'Read/write mode and I/O errors on the TCP/IP stack.',
+      'Ask and/or call the tech at 9:30 on 10/11/2026 or 3/4 load.',
+      'The file is only named boardview.brd and nothing else.',
+      'Press ~ then c/o the lab; see 2.1/3.4 and e.g. the manual.',
+    ];
+    for (const text of texts) {
+      expect(findSensitiveDescriptionDetails(text), text).toEqual([]);
+      expect(removeSensitiveDescriptionDetails(text, '[removed]'), text).toBe(text);
+    }
+  });
+
+  it('counts code points against the contract limits and never changes the text', () => {
+    expect(MAX_DESCRIPTION_CODE_POINTS).toBe(contract.MAX_DESCRIPTION_CODE_POINTS);
+    expect(MAX_DESCRIPTION_RAW_CODE_UNITS).toBe(contract.MAX_DESCRIPTION_RAW_CODE_UNITS);
+    const overLimit = '🙂'.repeat(MAX_DESCRIPTION_CODE_POINTS + 1);
+    expect(countDescriptionCodePoints(overLimit)).toBe(MAX_DESCRIPTION_CODE_POINTS + 1);
+    expect(isDescriptionOverLimit(overLimit)).toBe(true);
+    expect(isDescriptionOverLimit('🙂'.repeat(MAX_DESCRIPTION_CODE_POINTS))).toBe(false);
+    expect(isDescriptionOverLimit('short text')).toBe(false);
+    // 2001 emoji are 4002 UTF-16 units: over the review limit, but still allowed as a saved draft.
+    expect(isDescriptionTooLargeToSave(overLimit)).toBe(false);
+    expect(isDescriptionTooLargeToSave('x'.repeat(MAX_DESCRIPTION_RAW_CODE_UNITS))).toBe(false);
+    expect(isDescriptionTooLargeToSave('x'.repeat(MAX_DESCRIPTION_RAW_CODE_UNITS + 1))).toBe(true);
+    // The helpers only report; the text they examine is still whole.
+    expect(overLimit).toHaveLength(2 * (MAX_DESCRIPTION_CODE_POINTS + 1));
+  });
+
+  // Privacy: over-redacting is preferred to leaking. Each shape is checked on Windows, macOS and Linux forms.
+  it.each([
+    ['Windows absolute, no extension', 'Saved to C:\\Users\\tech\\Customer Board, please check.', 'Saved to [removed], please check.'],
+    ['macOS absolute, no extension', 'Copied to /Users/tech/Customer Board, please check.', 'Copied to [removed], please check.'],
+    ['Linux absolute, no extension', 'Copied to /home/tech/Customer Board, please check.', 'Copied to [removed], please check.'],
+    ['UNC share, no extension at end of text', 'Share \\\\fileserver\\share\\Customer Board', 'Share [removed]'],
+    // A name without an extension runs up to ten words, so the lower-case "now" is taken too: over-redaction, not a leak.
+    ['home-relative, no extension', 'Open ~/My Boards/Customer Board now', 'Open [removed]'],
+    ['Windows relative, spaced directory', 'See Dell Boards\\A123.brd and retry', 'See [removed] and retry'],
+    ['POSIX-style relative, spaced directory', 'See Dell Boards/A123.brd and retry', 'See [removed] and retry'],
+  ])('redacts the whole spaced name: %s', (_name, text, expected) => {
+    expect(removeSensitiveDescriptionDetails(text, '[removed]')).toBe(expected);
+  });
+
+  it('detects a schemeless URL host with a path as a whole, but not as a file path', () => {
+    const cases: Array<[string, string]> = [
+      ['Open www.site.com/a/b now', 'Open [removed] now'],
+      ['Visit example.test/help/page.html for details', 'Visit [removed] for details'],
+    ];
+    for (const [text, expected] of cases) {
+      expect(removeSensitiveDescriptionDetails(text, '[removed]'), text).toBe(expected);
+      const details = findSensitiveDescriptionDetails(text);
+      expect(details.map(({ kind }) => kind), text).toEqual(['url']);
+    }
+  });
+
+  it('keeps a scheme URL unchanged, as the contract examples require', () => {
+    expect(findSensitiveDescriptionDetails('Open https://www.site.com/a/b now')).toEqual([]);
+  });
+
+  it('still detects a slash-separated file name with an extension as a path, on purpose', () => {
+    const text = 'Read input/output.log after the run.';
+    const details = findSensitiveDescriptionDetails(text);
+    expect(details.map(({ kind }) => kind)).toEqual(['path']);
+    expect(text.slice(details[0].start, details[0].end)).toBe('input/output.log');
+  });
+
+  it('keeps abbreviations, ratios and version pairs that only look like hosts', () => {
+    for (const text of ['Compare 2.1/3.4 and e.g./i.e. values, version 1.0/2.0.', 'Read input/output.log after the run.']) {
+      const details = findSensitiveDescriptionDetails(text);
+      expect(details.every(({ kind }) => kind !== 'url'), text).toBe(true);
+    }
+    expect(findSensitiveDescriptionDetails('Compare 2.1/3.4 and e.g./i.e. values.')).toEqual([]);
   });
 });

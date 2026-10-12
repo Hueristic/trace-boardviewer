@@ -3,6 +3,8 @@ import { MAX_IMPORT_BYTES } from './common';
 import { genCadStorageText, hasGenCadStorageHeader } from './gencad-framing';
 import { parseBoardDetailed } from './dispatch';
 import fixtures from './adapters/gencad/fixtures';
+import { GenCadParseError } from '../gencad';
+import { formatIssue } from '../i18n';
 
 const text = new TextDecoder().decode(fixtures[0].data).replace(/\r?\n/g, '\r\n');
 const wrap = (value = text): Uint8Array => {
@@ -33,12 +35,28 @@ describe('bounded GenCAD CAD storage framing', () => {
     const reserved = wrap(); reserved[8] = 1; expect(genCadStorageText(reserved)).toBeNull();
     const shifted = new Uint8Array(4097); shifted.set(wrap(), 1); expect(genCadStorageText(shifted)).toBeNull();
     expect(() => parseBoardDetailed({ name: 'bad.cad', data: wrap(text + '<html>FOREIGN</html>\r\n') })).toThrow(/outside/);
-    expect(() => genCadStorageText(wrap(text + '\x07'))).toThrow(/complete line/);
+    expect(() => genCadStorageText(wrap(text.trimEnd()))).toThrow(/complete line/);
+    expect(() => genCadStorageText(wrap(text + '\x07'))).toThrow(GenCadParseError);
     expect(() => parseBoardDetailed({ name: 'bad.cad', data: wrap(text.replace('UNITS MM', 'UNITS MM\0')) })).toThrow();
   });
   it('retains the GenCAD version guard and full source byte budget', () => {
     expect(() => parseBoardDetailed({ name: 'bad.cad', data: wrap(text.replace('GENCAD 1.4', 'GENCAD 1.3')) })).toThrow(/1.4/);
     const huge = new Uint8Array(MAX_IMPORT_BYTES + 4096); huge.set(wrap().subarray(0, 64));
     expect(() => genCadStorageText(huge)).toThrow(/import limit/);
+  });
+  it('refuses non-zero storage padding with a GenCAD 1.4 export request, with or without an inner version', () => {
+    const refusalOf = (data: Uint8Array): GenCadParseError => {
+      try { parseBoardDetailed({ name: 'wrapped.cad', data }); } catch (error) { if (error instanceof GenCadParseError) return error; throw error; }
+      throw new Error('the wrapper was accepted');
+    };
+    const bell = refusalOf(wrap(text + '\x07\x07'));
+    expect(bell.issue).toEqual({ key: 'parse.error.gencadStorageTrailingBytes' });
+    expect(bell.message).toContain('GENCAD 1.4');
+    expect(formatIssue('hu', bell.issue)).toContain('GENCAD 1.4');
+    expect(formatIssue('hu', bell.issue)).not.toBe(bell.message);
+    // Padding of 0x07 with no inner version: the same refusal, and no version is guessed.
+    expect(refusalOf(wrap(text.replace('GENCAD 1.4', 'GENCAD') + '\x07')).issue).toEqual({ key: 'parse.error.gencadStorageTrailingBytes' });
+    // Zero padding with no inner version keeps the existing GENCAD 1.4 requirement.
+    expect(refusalOf(wrap(text.replace('GENCAD 1.4', 'GENCAD'))).issue).toEqual({ key: 'parse.error.requiresGencad14' });
   });
 });

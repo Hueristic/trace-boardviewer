@@ -10,6 +10,7 @@
  *   buildFormatsManifest()                 electron/formats.json for the main process (registry.test.ts fails on drift)
  * Detection never depends on the order here: the dispatcher ranks adapters by their sniff confidence.
  */
+import { sourceBaseName, type SourcePlatform } from './source-name';
 import { ADAPTER_API_VERSION, DIALOG_FAMILIES, type BoardAdapter, type ContainerAdapter, type ContainerCapability, type FormatAdapter, type FormatCapability, type RealFileEvidence } from './adapter';
 
 const EXTENSION = /^\.[a-z0-9_]+$/, ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/, COMPANION = /^@?[a-z0-9_][a-z0-9_. -]*$/;
@@ -61,10 +62,10 @@ const companionTable = (sets: readonly (readonly string[])[]): Map<string, strin
   return table;
 };
 const COMPANIONS = companionTable(COMPANION_SETS);
-const basename = (name: string): string => name.split(/[\\/]/).pop()?.toLowerCase() ?? '';
-/** Choose among overlapping sets by available fixed names; declaration order breaks ties. Missing siblings remain a parser error. */
-export function selectCompanionSet(sets: readonly (readonly string[])[], name: string, availableNames: readonly string[]): readonly string[] | undefined {
-  const base = basename(name), available = new Set(availableNames.map(basename));
+const basename = (name: string, platform?: SourcePlatform): string => sourceBaseName(name, platform).toLowerCase();
+/** Choose among overlapping sets by available fixed names; declaration order breaks ties. Missing siblings remain a parser error. The platform is the one of the names (see source-name.ts). */
+export function selectCompanionSet(sets: readonly (readonly string[])[], name: string, availableNames: readonly string[], platform?: SourcePlatform): readonly string[] | undefined {
+  const base = basename(name, platform), available = new Set(availableNames.map(member => basename(member, platform)));
   available.add(base);
   let chosen: readonly string[] | undefined, most = -1;
   for (const set of sets) {
@@ -75,9 +76,9 @@ export function selectCompanionSet(sets: readonly (readonly string[])[], name: s
   return chosen;
 }
 /** Lowercase basenames of the sidecars that belong to `name` in the same directory ([] for single-file formats). */
-export function companionNames(name: string, availableNames?: readonly string[]): string[] {
-  const base = basename(name);
-  if (availableNames) return [...selectCompanionSet(COMPANION_SETS, base, availableNames) ?? []].filter(member => member !== base);
+export function companionNames(name: string, availableNames?: readonly string[], platform?: SourcePlatform): string[] {
+  const base = basename(name, platform);
+  if (availableNames) return [...selectCompanionSet(COMPANION_SETS, base, availableNames, platform) ?? []].filter(member => member !== base);
   return [...COMPANIONS.get(base) ?? []];
 }
 

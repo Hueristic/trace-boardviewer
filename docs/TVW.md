@@ -69,8 +69,9 @@ not establish that every TVW dialect is supported.
 
 Still refused, with a precise message, because the available record facts are
 not enough to read them safely: an export whose layer headers use a prefix other
-than the known one, an AppleDouble companion file (a `._` name; macOS writes
-these next to the real file and they are not boardviews) and any record that
+than the known one, an AppleDouble companion file (macOS writes a `._` name next to the
+real file; its header identifies it under any name, and it is not a
+boardview) and any record that
 does not fit the known component framing. Every declared count is bounded and
 the searches are linear.
 

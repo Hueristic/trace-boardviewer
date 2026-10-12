@@ -1,0 +1,50 @@
+# TRACE Boardviewer QA - Windows QA flavour (portable EXE): the release app with the inspector kept ON, for the packaged QA runs
+# (scripts/packaged-functional-qa.cjs) that attach to the main process. Never published; the output is "release-qa", never "release".
+#
+# Use only through an explicit --config:
+#   electron-builder --win portable --x64 --config config/electron-builder.qa.yml --publish never
+#
+# With --config, electron-builder reads ONLY this file and ignores the "build" block of package.json. Everything below is the
+# release "build" block of package.json with the QA identity (appId, productName, output, artifact name) and the inspector ON.
+# tests/qa-flavour-checks.cjs keeps the two equal except for those deltas, and checks both files against the builder schema.
+appId: hu.trace.boardviewer.qa
+productName: TRACE Boardviewer QA
+directories:
+  output: release-qa
+publish: null
+electronDist: node_modules/electron/dist
+files:
+  - dist/**/*
+  - electron/**/*
+  - shared/bug-report-contract.cjs
+  - shared/import-limits.json
+  - package.json
+  - assets/**/*
+  - LICENSE
+  - THIRD_PARTY_NOTICES.md
+  - node_modules/fflate/**/*
+  - '!node_modules/@napi-rs/**'
+  - '!node_modules/!(fflate)/**/*'
+asar: true
+beforePack: scripts/before-pack.cjs
+# The build flavour, read by electron/main.cjs from the packaged package.json (absent in the release, which keeps remote debugging closed).
+extraMetadata:
+  traceBuildFlavor: qa
+electronFuses:
+  runAsNode: false
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: true
+  onlyLoadAppFromAsar: true
+  # OFF in the QA build only (never published): the testers' timestamped test log is written into app.asar, and an integrity-checked
+  # archive would refuse it. The release file keeps this fuse on.
+  enableEmbeddedAsarIntegrityValidation: false
+  enableCookieEncryption: true
+  grantFileProtocolExtraPrivileges: true
+win:
+  target:
+    - portable
+  icon: assets/icon.ico
+  signExecutable: false
+portable:
+  artifactName: 'TRACE-Boardviewer-QA-${version}.exe'
+  unpackDirName: true

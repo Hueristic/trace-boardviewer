@@ -136,14 +136,14 @@ describe('PDF readiness follows the pdf.js session (I06 / W-win-viewers-04)', ()
     seedWorkspace(h, 1, '/boards/a.cad', [PDF]);
     await openNative(h, 'a.cad', 1);
     h.pdf.sessions[0].update(rejected);
-    expect(doc(h, 'doc-pdf')).toMatchObject({ status: 'error', message: 'Invalid PDF structure.' });
+    expect(doc(h, 'doc-pdf')).toMatchObject({ status: 'error', message: { text: 'Invalid PDF structure.' } });
     expect(doc(h, 'doc-pdf').pdf).toBeDefined(); // the viewer keeps rendering its own error panel (code included) from the session
     const ready = createHarness();
     seedWorkspace(ready, 1, '/boards/a.cad', [PDF]);
     await openNative(ready, 'a.cad', 1);
     expect(doc(ready, 'doc-pdf').status).toBe('ready');
     ready.pdf.sessions[0].update(rejected);
-    expect(doc(ready, 'doc-pdf')).toMatchObject({ status: 'error', message: 'Invalid PDF structure.' });
+    expect(doc(ready, 'doc-pdf')).toMatchObject({ status: 'error', message: { text: 'Invalid PDF structure.' } });
   });
 
   it('a password prompt stays ready (the viewer owns that interactive state) and the document becomes ready again once unlocked', async () => {
@@ -193,7 +193,7 @@ describe('PDF readiness follows the pdf.js session (I06 / W-win-viewers-04)', ()
       h.controller.subscribe(() => { const bad = doc(h, 'doc-bad'); if (bad) seen.add(bad.status); });
       await openNative(h, 'a.cad', 1);
       await vi.waitFor(() => { expect(doc(h, 'doc-bad').status).toBe('error'); expect(doc(h, 'doc-good').status).toBe('ready'); }, { timeout: 20_000, interval: 25 });
-      expect(doc(h, 'doc-bad').message).toMatch(/\S/);
+      expect(doc(h, 'doc-bad').message).toMatchObject({ text: expect.stringMatching(/\S/) });
       expect(doc(h, 'doc-bad').pdf?.getSnapshot()).toMatchObject({ status: 'error', error: { code: 'INVALID_PDF' } });
       expect(doc(h, 'doc-good').pdf?.getSnapshot().status).toBe('ready');
       expect(seen.has('ready')).toBe(false);

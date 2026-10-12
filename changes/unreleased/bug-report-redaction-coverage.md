@@ -1,0 +1,1 @@
+The bug report form now also detects file names that contain spaces, relative paths with spaces in a folder name, and web addresses written without http, so more personal text is removed before you review it.

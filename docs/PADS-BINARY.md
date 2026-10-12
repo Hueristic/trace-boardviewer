@@ -4,7 +4,7 @@ TRACE identifies native PADS PowerPCB SDB `.pcb` databases with version `0x2026`
 
 ## Actual KiCad conversion trials
 
-Read-only trials on 2026-10-08 attempted all 21 distinct investigated native databases with CLI runtimes extracted from two official signed Windows packages. Neither build produced a converted board:
+The trials recorded here were read-only, ran on 2026-10-08 and attempted all 21 distinct investigated native databases with CLI runtimes extracted from two official signed Windows packages. They were not repeated for the 1.3.2 source. Neither build produced a converted board:
 
 | Tested build | Native PADS result |
 | --- | --- |

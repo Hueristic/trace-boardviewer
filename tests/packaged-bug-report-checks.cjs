@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { feedReleaseVersion } = require('../scripts/packaged-functional/update-version.cjs');
 const crypto = require('node:crypto');
 const { runInNewContext } = require('node:vm');
 const {
@@ -53,8 +54,11 @@ const retry = Object.freeze({ ...uncertain, launch: 3, actionID: 'bug-report-sen
 const allowed = (item) => Object.freeze({ targetID: REPORT_ID, method: 'POST', bytes: item.bytes, sha256: item.sha256,
   actionID: item.actionID, decision: 'allow' });
 const allowedRecord = allowed(action);
-const support = Object.freeze({ session: 'trace-egress', url: 'https://trace-support.trace-boardviewer.workers.dev/receipt?claim=synthetic',
+const support = Object.freeze({ session: 'trace-egress', url: 'https://trace-support.trace-boardviewer.workers.dev/receipt?claim=0123456789abcdef0123456789abcdef',
   method: 'GET', cancelledBeforeNetwork: true, source: 'Electron webRequest pre-main observer' });
+const updateCheck = Object.freeze({ session: 'trace-egress', url: 'https://api.github.com/repos/trace-boardviewer/trace-boardviewer/releases/latest',
+  method: 'GET', cancelledBeforeNetwork: true, source: 'Electron webRequest pre-main observer' });
+const releasePage = `https://github.com/trace-boardviewer/trace-boardviewer/releases/tag/v${feedReleaseVersion()}`;
 const counts = (overrides = {}) => ({ version: 2, allowedCount: 0, deniedCount: 0, gateArms: 0, gateFailures: 0, responseArms: 0, responseFailures: 0, ...overrides });
 
 const response = Object.freeze({ actionID: uncertain.actionID, mode: 'hold-and-cancel', phase: 'cancelled', outcome: 'cancelled', statusCode: 200 });
@@ -79,7 +83,7 @@ function makeEvidence() {
   });
   const launches = [launch(1, [support], [], counts(), [], [], ['https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00','https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00']),
     launch(2, [allowed(action), allowed(uncertain)], [allowed(action), allowed(uncertain)], counts({ allowedCount: 2, gateArms: 2, responseArms: 1 }), [response], [cancelOracle]),
-    launch(3, [allowed(retry)], [allowed(retry)], counts({ allowedCount: 1, gateArms: 1 }))];
+    launch(3, [allowed(retry), updateCheck], [allowed(retry)], counts({ allowedCount: 1, gateArms: 1 }), [], [], [releasePage])];
   const aggregate=counts({allowedCount:3,gateArms:3,responseArms:1});
   return {
     launches,
@@ -98,12 +102,26 @@ test('closed report evidence accepts one exact acknowledged Send and the existin
   assert.equal(JSON.stringify(evidence).includes('report body'), false);
 });
 
+test('network reconciliation refuses unexpected external intents and extra update checks', () => {
+  const intentEvidence = makeEvidence();
+  intentEvidence.launches[2].externalIntents = [releasePage, 'https://example.invalid/unexpected'];
+  intentEvidence.launches[2].startupObservation.finalExternalIntents = 2;
+  assert.ok(reconcileBugReportNetworkEvidence(intentEvidence).some((problem) => /unexpected or unreconciled external intents/.test(problem)));
+  const updateEvidence = makeEvidence();
+  updateEvidence.launches[2].networkAttempts = [...updateEvidence.launches[2].networkAttempts, updateCheck];
+  updateEvidence.networkAttempts = updateEvidence.launches.flatMap((entry) => entry.networkAttempts);
+  assert.ok(reconcileBugReportNetworkEvidence(updateEvidence).some((problem) => /beyond the one blocked support verification request/.test(problem)));
+});
+
 test('supplemental scope keeps the support denial sentinel and exact reports but requires zero intents', () => {
   const evidence = makeEvidence();
   for (const launch of evidence.launches) {
     launch.externalIntents = [];
     launch.startupObservation.finalExternalIntents = 0;
+    launch.networkAttempts = launch.networkAttempts.filter((entry) => entry.url !== updateCheck.url);
+    launch.startupObservation.finalNetworkCount = launch.networkAttempts.length;
   }
+  evidence.networkAttempts = evidence.launches.flatMap((entry) => entry.networkAttempts);
   assert.deepEqual(reconcileBugReportNetworkEvidence(evidence, { scope: 'bug-report-supplemental' }), []);
   assert.ok(reconcileBugReportNetworkEvidence(evidence, { scope: 'unexpected' }).some((problem) => /scope options/.test(problem)));
   assert.ok(reconcileBugReportNetworkEvidence(evidence, {}).some((problem) => /scope options/.test(problem)));

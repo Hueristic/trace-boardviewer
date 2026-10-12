@@ -9,6 +9,10 @@
   "update.openFailed": "Impossible d’ouvrir la page de téléchargement.",
   "update.download": "Télécharger",
   "update.dismiss": "Masquer",
+  "update.askText": "Rechercher de nouvelles versions de TRACE au démarrage ? La vérification ne contacte que la page des versions sur GitHub. Vous pouvez la modifier dans les Réglages.",
+  "update.askYes": "Oui, vérifier au démarrage",
+  "update.askNo": "Non, laisser désactivé",
+  "update.askSkip": "Passer",
 
   "network.title": "Réseau",
   "network.intro": "TRACE n’utilise Internet que pour les fonctions listées ici. Chaque requête est consignée dans la liste d’activité ci-dessous, et rien sur vos cartes, notes ou documents n’est jamais envoyé.",
@@ -46,5 +50,6 @@
   "network.bugReport": "Rapport de problème",
   "network.bugReportHint": "Un rapport est envoyé uniquement si vous choisissez Envoyer dans le formulaire.",
   "network.resultCancelled": "Annulé",
-  "network.resultHttpStatus": "Statut HTTP non accepté : {status}"
+  "network.resultHttpStatus": "Statut HTTP non accepté : {status}",
+  "network.stateOnDemand": "Seulement quand vous cliquez sur « Vérifier le paiement »"
 }

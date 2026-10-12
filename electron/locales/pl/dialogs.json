@@ -13,16 +13,31 @@
   "help.footer": "Kółko myszy: powiększanie w miejscu kursora. Przeciąganie: przesuwanie płytki. Kliknięcie: wybór elementu lub pinu.",
   "help.diagnosticReport": "Raport diagnostyczny formatu…",
   "help.diagnosticHint": "Opisuje plik, który się nie otwiera, bez jego zawartości.",
-
+  "help.settings": "Otwórz ustawienia",
   "recents.title": "Ostatnie płytki",
   "recents.empty": "Nie otwarto jeszcze żadnego pliku.",
   "recents.openOther": "Otwórz inny plik",
-
   "info.title": "Informacje o płytce",
   "info.format": "Format",
   "info.size": "Rozmiar płytki",
   "info.counts": "Elementy / piny / sieci",
   "info.footer": "Linie pomocnicze pokazują łączność sieci. Nie zastępują geometrii ścieżek miedzianych zapisanej w pliku.",
+  "key.skipHelp": "Możesz pominąć ten krok i dalej korzystać z aplikacji. Ten zaszyfrowany plik pozostanie zamknięty do czasu podania pasującego klucza.",
+  "help.shortcutTabs": "Karta / Schemat / Dokumenty",
+  "help.shortcutSplit": "Widok podzielony włączony / wyłączony",
+  "help.shortcutResize": "Zmiana rozmiaru podzielonych paneli (separator aktywny)",
+  "help.shortcutResults": "Wyniki wyszukiwania: przesuń / otwórz",
+  "help.shortcutClearSearch": "Wyczyść pole wyszukiwania (drugie naciśnięcie wychodzi)",
 
-  "key.skipHelp": "Możesz pominąć ten krok i dalej korzystać z aplikacji. Ten zaszyfrowany plik pozostanie zamknięty do czasu podania pasującego klucza."
+  "dialogs.keyTitleFz": "Klucz szyfrowania FZ / CAE",
+  "dialogs.keyTitleXzz": "Klucz szyfrowania XZZ",
+  "dialogs.keyLabelFz": "Wklej 44 szesnastkowe 32-bitowe słowa klucza producenta (0x jest opcjonalne; oddziel je spacjami, przecinkami lub nowymi wierszami).",
+  "dialogs.keyLabelXzz": "Wpisz 16 cyfr szesnastkowych klucza.",
+  "dialogs.keyValid": "Format klucza jest poprawny. Jest zachowywany tylko na czas tej sesji i nigdy nie jest zapisywany.",
+  "dialogs.keyUse": "Użyj klucza",
+  "dialogs.shortcutResizeKeys": "← →  ·  Shift = duże kroki  ·  Enter = resetuj",
+  "dialogs.keyXzzHexOnly": "Dozwolone są tylko cyfry szesnastkowe (0-9, a-f).",
+  "dialogs.keyXzzCount": "Wpisz dokładnie 16 cyfr szesnastkowych (dotąd: {count}).",
+  "dialogs.keyFzWordInvalid": "\"{word}\" nie jest szesnastkowym słowem 32-bitowym.",
+  "dialogs.keyFzWordCount": "Wpisz 44 szesnastkowe słowa 32-bitowe (dotąd: {count})."
 }

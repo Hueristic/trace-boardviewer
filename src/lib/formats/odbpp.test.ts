@@ -455,3 +455,12 @@ describe('timing', () => {
     expectScaling('stacked pins', [250, 1000, 4000], count => { const data = archive(count); return () => read(data); });
   });
 });
+
+describe('the board name of an ODB++ archive follows the platform of the archive name', () => {
+  it('a POSIX backslash is part of the archive name; on win32 the folders of the name are dropped', () => {
+    const data = tgzOf(writeJob(CANONICAL));
+    expect(parseOdbpp({ name: 'dir\\job.tgz', data, platform: 'linux' })?.name).toBe('dir\\job');
+    expect(parseOdbpp({ name: 'dir\\job.tgz', data, platform: 'win32' })?.name).toBe('job');
+    expect(parseOdbpp({ name: 'dir\\job.tgz', data })?.name).toBe('job');
+  });
+});

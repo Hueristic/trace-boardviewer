@@ -5,6 +5,7 @@
   "common.delete": "Löschen",
   "common.note": "Notiz",
   "common.skip": "Überspringen",
+  "common.cancel": "Abbrechen",
 
   "unit.components": { "one": "{count} Bauteil", "other": "{count} Bauteile" },
   "unit.pins": { "one": "{count} Pin", "other": "{count} Pins" },

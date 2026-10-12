@@ -13,5 +13,10 @@
   "settings.labelsHint": "Reference designators that scale with zoom",
   "settings.connections": "Connection guide lines",
   "settings.connectionsHint": "Straight lines between the selected pin and the pads of its net",
-  "settings.autosave": "Settings are saved automatically."
+  "settings.autosave": "Settings are saved automatically.",
+  "settings.noSandbox.title": "Linux: start without the sandbox",
+  "settings.noSandbox.hint": "If you chose “Do not ask again”, TRACE does not ask again. Taking it back takes effect at the next start.",
+  "settings.noSandbox.saved": "Saved: TRACE does not ask again",
+  "settings.noSandbox.unsaved": "Not saved: the question appears at each start without the sandbox",
+  "settings.noSandbox.revoke": "Ask again at the next start"
 }

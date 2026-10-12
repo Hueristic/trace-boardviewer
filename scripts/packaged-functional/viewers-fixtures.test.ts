@@ -117,6 +117,20 @@ describe('packaged viewer authored KiCad hierarchy fixture', () => {
     expect(mapSchematicNetToBoard(board, schematic, { documentId: 'known-baseline', netId: vcc!.id })).toMatchObject({ status: 'unique', candidates: [{ name: 'VCC', via: 'exact' }] });
   });
 
+  it('gives the Documents-list settlement scenario two distinguishable schematics: a one-sheet KiCad board and a two-sheet EAGLE file', async () => {
+    const registered = new Map<string, Uint8Array>();
+    await registerViewerFixtures({ registerFixture: async (name, data) => { registered.set(name, data); return name; } });
+    const kicad = loadSchematicDesign({ name: 'viewer-known-board.kicad_sch', data: registered.get('viewer-known-board.kicad_sch')! });
+    const eagle = loadSchematicDesign({ name: 'viewer-hierarchical.eagle.sch', data: registered.get('viewer-hierarchical.eagle.sch')! });
+    // The harness reads these in the Schematic tab: the diagnostics label and sheet count, and the canvas "page 1 of N" summary.
+    expect(kicad.schematic.formatLabel).toMatch(/^KiCad schematic/);
+    expect(kicad.schematic.instances).toHaveLength(1);
+    expect(eagle.schematic.formatLabel).toMatch(/^EAGLE schematic/);
+    expect(eagle.schematic.instances).toHaveLength(2);
+    expect(eagle.schematic.instances.map(instance => instance.page)).toEqual(['1', '2']);
+    expect(eagle.schematic.defs.every(def => def.file === 'viewer-hierarchical.eagle.sch')).toBe(true);
+  });
+
   it('reports an absent EAGLE net as unresolved instead of borrowing a match from another document', async () => {
     const registered = new Map<string, Uint8Array>();
     await registerViewerFixtures({ registerFixture: async (name, data) => { registered.set(name, data); return name; } });

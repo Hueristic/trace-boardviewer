@@ -7,6 +7,7 @@
  */
 import { Inflate } from 'fflate';
 import type { ContainerEntry, ContainerLimits } from './adapter';
+import type { ParseIssue } from '../types';
 import { localizedFormatError } from './common';
 
 const EOCD = 0x06054b50, ZIP64_LOCATOR = 0x07064b50, ZIP64_EOCD = 0x06064b50, CENTRAL = 0x02014b50, LOCAL = 0x04034b50;
@@ -17,7 +18,7 @@ const INPUT_CHUNK = 4096;
 const RATIO_FLOOR = 1 << 20;
 const FORMAT = 'ZIP archive';
 
-const damaged = (detail: string) => localizedFormatError(`ZIP archive: ${detail}`, 'INVALID_FORMAT', { key: 'parse.error.archiveDamaged' }, FORMAT);
+const damaged = (detail: string, issue: ParseIssue) => localizedFormatError(`ZIP archive: ${detail}`, 'INVALID_FORMAT', issue, FORMAT);
 
 const CP437_HIGH = 'ÇüéâäàåçêëèïîìÄÅÉæÆôöòûùÿÖÜ¢£¥₧ƒáíóúñÑªº¿⌐¬½¼¡«»░▒▓│┤╡╢╖╕╣║╗╝╜╛┐└┴┬├─┼╞╟╚╔╩╦╠═╬╧╨╤╥╙╘╒╓╫╪┘┌█▄▌▐▀αßΓπΣσµτΦΘΩδ∞φε∩≡±≥≤⌠⌡÷≈°∙·√ⁿ²■ ';
 /** Entry names are UTF-8 when general-purpose bit 11 says so (or when they decode as UTF-8), otherwise IBM code page 437. */
@@ -63,45 +64,45 @@ export interface ZipEntry extends ContainerEntry {
  */
 export function readZip(data: Uint8Array, limits: ContainerLimits): ZipEntry[] {
   if (data.length > limits.maxArchiveBytes) throw localizedFormatError('ZIP archive exceeds the import limit.', 'LIMIT_EXCEEDED', { key: 'parse.error.archiveTooLarge', params: { max: Math.floor(limits.maxArchiveBytes / 1048576) } }, FORMAT);
-  if (data.length < EOCD_SIZE) throw damaged('the file is shorter than an end-of-central-directory record.');
+  if (data.length < EOCD_SIZE) throw damaged('the file is shorter than an end-of-central-directory record.', { key: 'parse.error.zipIncomplete' });
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   const u16 = (at: number) => view.getUint16(at, true), u32 = (at: number) => view.getUint32(at, true);
-  const u64 = (at: number) => { const value = view.getBigUint64(at, true); if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw damaged('a ZIP64 field is out of range.'); return Number(value); };
+  const u64 = (at: number) => { const value = view.getBigUint64(at, true); if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw damaged('a ZIP64 field is out of range.', { key: 'parse.error.zip64Damaged' }); return Number(value); };
 
   let eocd = -1;
   for (let at = data.length - EOCD_SIZE, stop = Math.max(0, data.length - EOCD_SIZE - MAX_COMMENT); at >= stop; at--) {
     if (u32(at) === EOCD && at + EOCD_SIZE + u16(at + 20) === data.length) { eocd = at; break; }
   }
-  if (eocd < 0) throw damaged('no end-of-central-directory record was found.');
+  if (eocd < 0) throw damaged('no end-of-central-directory record was found.', { key: 'parse.error.zipIncomplete' });
   let disk = u16(eocd + 4), cdDisk = u16(eocd + 6), diskEntries = u16(eocd + 8), entries = u16(eocd + 10), cdSize = u32(eocd + 12), cdOffset = u32(eocd + 16);
   let cdEnd = eocd;
   if (entries === 0xffff || diskEntries === 0xffff || cdSize === 0xffffffff || cdOffset === 0xffffffff) {
     const locator = eocd - 20;
-    if (locator < 0 || u32(locator) !== ZIP64_LOCATOR) throw damaged('the ZIP64 end-of-central-directory locator is missing.');
+    if (locator < 0 || u32(locator) !== ZIP64_LOCATOR) throw damaged('the ZIP64 end-of-central-directory locator is missing.', { key: 'parse.error.zip64Damaged' });
     const record = u64(locator + 8);
-    if (record + 56 > locator || u32(record) !== ZIP64_EOCD) throw damaged('the ZIP64 end-of-central-directory record is missing.');
+    if (record + 56 > locator || u32(record) !== ZIP64_EOCD) throw damaged('the ZIP64 end-of-central-directory record is missing.', { key: 'parse.error.zip64Damaged' });
     disk = u32(record + 16); cdDisk = u32(record + 20); diskEntries = u64(record + 24); entries = u64(record + 32); cdSize = u64(record + 40); cdOffset = u64(record + 48);
     cdEnd = record;
   }
   if (disk !== 0 || cdDisk !== 0 || diskEntries !== entries) {
     throw localizedFormatError('ZIP archive: split (multi-disk) archives are not supported.', 'UNSUPPORTED_VARIANT', { key: 'parse.error.archiveSplit' }, FORMAT);
   }
-  if (entries > limits.maxEntries) throw localizedFormatError(`ZIP archive lists ${entries} entries; at most ${limits.maxEntries} are read.`, 'LIMIT_EXCEEDED', { key: 'parse.error.archiveTooManyEntries', params: { max: limits.maxEntries } }, FORMAT);
+  if (entries > limits.maxEntries) throw localizedFormatError(`ZIP archive lists ${entries} entries; at most ${limits.maxEntries} are read.`, 'LIMIT_EXCEEDED', { key: 'parse.error.archiveEntryCount', params: { entries, max: limits.maxEntries } }, FORMAT);
   // Data in front of the archive (a self-extractor stub) shifts every stored offset by the same amount.
   const shift = cdEnd - cdSize - cdOffset;
-  if (shift < 0 || cdOffset + shift + cdSize > cdEnd) throw damaged('the central directory lies outside the archive.');
-  if (entries * CENTRAL_SIZE > cdSize) throw damaged('the central directory is shorter than its entry count.');
+  if (shift < 0 || cdOffset + shift + cdSize > cdEnd) throw damaged('the central directory lies outside the archive.', { key: 'parse.error.zipIncomplete' });
+  if (entries * CENTRAL_SIZE > cdSize) throw damaged('the central directory is shorter than its entry count.', { key: 'parse.error.zipIncomplete' });
 
   const list: ZipEntry[] = [], seen = new Set<string>();
   let at = cdOffset + shift;
   const end = at + cdSize;
   for (let index = 0; index < entries; index++) {
-    if (at + CENTRAL_SIZE > end || u32(at) !== CENTRAL) throw damaged(`central directory record ${index + 1} is missing or damaged.`);
+    if (at + CENTRAL_SIZE > end || u32(at) !== CENTRAL) throw damaged(`central directory record ${index + 1} is missing or damaged.`, { key: 'parse.error.zipDirectoryRecord', params: { record: index + 1 } });
     const flags = u16(at + 8), method = u16(at + 10), crc = u32(at + 16);
     let compressedSize = u32(at + 20), size = u32(at + 24), localOffset = u32(at + 42);
     const nameLength = u16(at + 28), extraLength = u16(at + 30), commentLength = u16(at + 32);
     const nameAt = at + CENTRAL_SIZE, extraAt = nameAt + nameLength, next = extraAt + extraLength + commentLength;
-    if (next > end) throw damaged(`central directory record ${index + 1} runs past the directory.`);
+    if (next > end) throw damaged(`central directory record ${index + 1} runs past the directory.`, { key: 'parse.error.zipDirectoryRecord', params: { record: index + 1 } });
     // ZIP64 extended information: the 64-bit values follow in this order, each present only where the 32-bit field is saturated.
     if (size === 0xffffffff || compressedSize === 0xffffffff || localOffset === 0xffffffff) {
       let field = extraAt, found = false;
@@ -110,7 +111,7 @@ export function readZip(data: Uint8Array, limits: ContainerLimits): ZipEntry[] {
         if (body + length > extraAt + extraLength) break;
         if (id === 0x0001) {
           let cursor = body;
-          const take = () => { if (cursor + 8 > body + length) throw damaged('a ZIP64 extra field is truncated.'); const value = u64(cursor); cursor += 8; return value; };
+          const take = () => { if (cursor + 8 > body + length) throw damaged('a ZIP64 extra field is truncated.', { key: 'parse.error.zip64Damaged' }); const value = u64(cursor); cursor += 8; return value; };
           if (size === 0xffffffff) size = take();
           if (compressedSize === 0xffffffff) compressedSize = take();
           if (localOffset === 0xffffffff) localOffset = take();
@@ -118,7 +119,7 @@ export function readZip(data: Uint8Array, limits: ContainerLimits): ZipEntry[] {
         }
         field = body + length;
       }
-      if (!found) throw damaged('a ZIP64 entry lacks its extended size field.');
+      if (!found) throw damaged('a ZIP64 entry lacks its extended size field.', { key: 'parse.error.zip64Damaged' });
     }
     const raw = decodeName(data.subarray(nameAt, extraAt), (flags & 0x0800) !== 0);
     const normalized = normalizePath(raw);
@@ -128,7 +129,7 @@ export function readZip(data: Uint8Array, limits: ContainerLimits): ZipEntry[] {
     const path = normalized ?? '';
     if (!skipped) {
       const folded = path.toLowerCase();
-      if (seen.has(folded)) throw damaged(`the entry ${path.slice(0, 120)} is listed twice.`);
+      if (seen.has(folded)) throw damaged(`the entry ${path.slice(0, 120)} is listed twice.`, { key: 'parse.error.zipEntryHeader', params: { entry: path.slice(0, 120) } });
       seen.add(folded);
     }
     list.push(makeEntry(data, view, { path, size, compressedSize, method, crc, flags, localOffset: localOffset + shift, directory, skipped, cdStart: cdOffset + shift, limits }));
@@ -149,12 +150,13 @@ function makeEntry(data: Uint8Array, view: DataView, spec: EntrySpec): ZipEntry 
     if (encrypted) throw localizedFormatError(`ZIP archive: ${label} is encrypted.`, 'UNSUPPORTED_VARIANT', { key: 'parse.error.archiveEncrypted', params: { entry: label } }, FORMAT);
     if (method !== 0 && method !== 8) throw localizedFormatError(`ZIP archive: ${label} uses compression method ${method}.`, 'UNSUPPORTED_VARIANT', { key: 'parse.error.archiveMethod', params: { entry: label, method } }, FORMAT);
     const local = spec.localOffset;
-    if (local + LOCAL_SIZE > spec.cdStart || view.getUint32(local, true) !== LOCAL) throw damaged(`the local header of ${label} is missing.`);
+    if (local + LOCAL_SIZE > spec.cdStart || view.getUint32(local, true) !== LOCAL) throw damaged(`the local header of ${label} is missing.`, { key: 'parse.error.zipEntryHeader', params: { entry: label } });
     const start = local + LOCAL_SIZE + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
-    if (start + compressedSize > spec.cdStart) throw damaged(`the data of ${label} runs past the archive.`);
-    if (method === 0 && compressedSize !== size) throw damaged(`the stored entry ${label} has inconsistent sizes.`);
+    if (start + compressedSize > spec.cdStart) throw damaged(`the data of ${label} runs past the archive.`, { key: 'parse.error.zipEntryHeader', params: { entry: label } });
+    if (method === 0 && compressedSize !== size) throw damaged(`the stored entry ${label} has inconsistent sizes.`, { key: 'parse.error.zipEntryData', params: { entry: label } });
     if (method === 8 && size > RATIO_FLOOR && size / Math.max(1, compressedSize) > spec.limits.maxRatio) {
-      throw localizedFormatError(`ZIP archive: ${label} declares a ${Math.round(size / Math.max(1, compressedSize))}:1 expansion.`, 'LIMIT_EXCEEDED', { key: 'parse.error.archiveRatio', params: { entry: label, ratio: spec.limits.maxRatio } }, FORMAT);
+      const declared = Math.round(size / Math.max(1, compressedSize));
+      throw localizedFormatError(`ZIP archive: ${label} declares a ${declared}:1 expansion.`, 'LIMIT_EXCEEDED', { key: 'parse.error.archiveRatioDeclared', params: { entry: label, declared, limit: spec.limits.maxRatio } }, FORMAT);
     }
     return data.subarray(start, start + compressedSize);
   };
@@ -174,10 +176,10 @@ function makeEntry(data: Uint8Array, view: DataView, spec: EntrySpec): ZipEntry 
       for (let offset = 0; offset < input.length && !over && !(filled >= out.length && !whole); offset += INPUT_CHUNK) {
         stream.push(input.subarray(offset, offset + INPUT_CHUNK), offset + INPUT_CHUNK >= input.length);
       }
-    } catch { throw damaged(`the compressed data of ${label} is damaged.`); }
+    } catch { throw damaged(`the compressed data of ${label} is damaged.`, { key: 'parse.error.zipEntryData', params: { entry: label } }); }
     if (whole) {
-      if (over) throw damaged(`${label} holds more data than its declared size.`);
-      if (!ended || filled !== size) throw damaged(`${label} holds less data than its declared size.`);
+      if (over) throw damaged(`${label} holds more data than its declared size.`, { key: 'parse.error.zipEntryData', params: { entry: label } });
+      if (!ended || filled !== size) throw damaged(`${label} holds less data than its declared size.`, { key: 'parse.error.zipEntryData', params: { entry: label } });
     }
     return filled === out.length ? out : out.subarray(0, filled);
   };
@@ -185,9 +187,9 @@ function makeEntry(data: Uint8Array, view: DataView, spec: EntrySpec): ZipEntry 
     path, size, compressedSize, method, encrypted, directory: spec.directory, ...(spec.skipped ? { skipped: spec.skipped } : {}),
     head: (limit: number) => inflate(Math.max(0, Math.min(limit, size)), false),
     read(budget: number): Uint8Array {
-      if (size > budget) throw localizedFormatError(`ZIP archive: ${label} is larger than the remaining unpack budget.`, 'LIMIT_EXCEEDED', { key: 'parse.error.archiveTooLarge', params: { max: Math.floor(spec.limits.maxExtractedBytes / 1048576) } }, FORMAT);
+      if (size > budget) throw localizedFormatError(`ZIP archive: ${label} is larger than the remaining unpack budget.`, 'LIMIT_EXCEEDED', { key: 'parse.error.archiveBudget', params: { entry: label, max: Math.floor(spec.limits.maxExtractedBytes / 1048576) } }, FORMAT);
       const bytes = inflate(size, true);
-      if (crc32(bytes) !== spec.crc) throw damaged(`the CRC-32 of ${label} does not match.`);
+      if (crc32(bytes) !== spec.crc) throw damaged(`the CRC-32 of ${label} does not match.`, { key: 'parse.error.zipEntryData', params: { entry: label } });
       return bytes;
     },
   });

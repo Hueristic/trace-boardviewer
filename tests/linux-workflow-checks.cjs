@@ -1,6 +1,6 @@
 'use strict';
 
-// STATIC / SIMULATED checks for the Linux lane of the release workflow. This is NOT Linux runtime acceptance: it never builds a
+// STATIC / SIMULATED checks for the Linux job of the release workflow. This is NOT Linux runtime acceptance: it never builds a
 // package, never launches the app and says nothing about how the product behaves on Linux (the linux job of the workflow does that
 // on an Ubuntu 24.04 runner). It parses .github/workflows/windows.yml with the pinned electron-builder's own YAML loader, checks the
 // linux job (runner, permissions, pinned actions, step order, the four smoke scenarios, the scan, the uploads) and exercises the pure
@@ -59,8 +59,6 @@ const smokeStep = (scenario) => {
   return steps[0];
 };
 const PACKAGES_EXIST = "!cancelled() && steps.locate.outcome == 'success'";
-const NATIVE_PACKAGES_EXIST = "!cancelled() && steps.locate.outcome == 'success' && steps.metadata.outputs.native_acceptance == 'true'";
-const NATIVE_ALWAYS = "always() && steps.metadata.outputs.native_acceptance == 'true'";
 const XVFB = "xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run ";
 
 // ---- the workflow ------------------------------------------------------------------------------------------
@@ -80,9 +78,8 @@ test('static: the linux job lives in the release workflow, pinned to ubuntu-24.0
   assert.equal(job.defaults.run.shell, 'bash');
   assert.equal(job.env.TRACE_ARCH, 'x64');
   assert.equal(job.env.TRACE_COMMIT, '${{ github.sha }}');
-  assert.deepEqual(Object.keys(job.outputs).sort(), ['artifact_name', 'native_acceptance', 'version']);
+  assert.deepEqual(Object.keys(job.outputs).sort(), ['artifact_name', 'version']);
   assert.equal(job.outputs.artifact_name, '${{ steps.metadata.outputs.artifact_name }}');
-  assert.equal(job.outputs.native_acceptance, '${{ steps.metadata.outputs.native_acceptance }}');
   const text = jobText('linux');
   assert.doesNotMatch(text, /secrets\.|GITHUB_TOKEN|GH_TOKEN/, 'the linux job uses no secret and no token');
   assert.doesNotMatch(text, /gh release|contents:\s*write|softprops|action-gh-release|download-artifact/, 'the linux job only builds, tests and uploads');
@@ -153,13 +150,13 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   const windowsArtifact = find(build.steps, 'Upload portable EXE and checksum');
   assert.ok(windowsPayload.index < windowsQa.index && windowsQa.index < windowsValidate.index && windowsValidate.index < windowsQaUpload.index && windowsQaUpload.index < windowsArtifact.index);
   assert.match(windowsValidate.step.run, /validate-packaged-functional-evidence\.cjs/);
-  assert.equal(windowsValidate.step.if, "always() && steps.metadata.outputs.native_acceptance == 'true'");
+  assert.equal(windowsValidate.step.if, 'always()');
   assert.match(windowsQa.step.run, /release\/win-unpacked\/TRACE Boardviewer\.exe/);
   assert.match(windowsQa.step.run, /resources\/app\.asar/);
   assert.match(windowsQa.step.run, /--manifest=/);
   assert.match(windowsQa.step.run, /--os=win32 --arch=x64/);
   assert.match(windowsQa.step.run, /--out=.*packaged-functional\/windows-x64\.json/);
-  assert.equal(windowsQaUpload.step.if, "always() && steps.metadata.outputs.native_acceptance == 'true'");
+  assert.equal(windowsQaUpload.step.if, 'always()');
   assert.equal(windowsQaUpload.step.with['if-no-files-found'], 'error');
 
   const macExtract = find(mac.steps, 'Extract the checksummed macOS ZIP');
@@ -167,12 +164,12 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   const macQaValidate = find(mac.steps, 'Validate macOS packaged functional QA evidence manifest');
   const macQaUpload = find(mac.steps, 'Upload macOS packaged functional QA');
   assert.ok(macExtract.index < macQa.index && macQa.index < macQaValidate.index && macQaValidate.index < macQaUpload.index);
-  assert.equal(macQaValidate.step.if, "always() && steps.metadata.outputs.native_acceptance == 'true'");
+  assert.equal(macQaValidate.step.if, 'always()');
   assert.match(macExtract.step.run, /ditto -x -k "\$TRACE_ZIP"/);
   assert.match(macQa.step.run, /TRACE_FUNCTIONAL_APP\/Contents\/MacOS\/TRACE Boardviewer/);
   assert.match(macQa.step.run, /TRACE_FUNCTIONAL_APP\/Contents\/Resources\/app\.asar/);
   assert.match(macQa.step.run, /--os=darwin --arch=arm64/);
-  assert.equal(macQaUpload.step.if, "always() && steps.metadata.outputs.native_acceptance == 'true'");
+  assert.equal(macQaUpload.step.if, 'always()');
   assert.equal(macQaUpload.step.with['if-no-files-found'], 'error');
 
   const s1 = find(linuxSteps, 'Smoke-test the .deb under the stock user-namespace restriction');
@@ -186,10 +183,10 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   assert.match(linuxQa.step.run, /deb="\$PWD\/\$TRACE_DEB"/);
   assert.match(linuxQa.step.run, /"--checksum=\$deb\.sha256"/);
   assert.match(linuxQa.step.run, /--os=linux --arch=x64/);
-  assert.equal(linuxQa.step.if, NATIVE_PACKAGES_EXIST);
-  assert.equal(linuxSummary.step.if, NATIVE_ALWAYS);
+  assert.equal(linuxQa.step.if, PACKAGES_EXIST);
+  assert.equal(linuxSummary.step.if, 'always()');
   assert.match(linuxSummary.step.run, /evidence is missing/);
-  assert.equal(linuxUpload.step.if, NATIVE_ALWAYS);
+  assert.equal(linuxUpload.step.if, 'always()');
   assert.equal(linuxUpload.step.with['if-no-files-found'], 'error');
   assert.match(fs.readFileSync(rel('scripts', 'linux-smoke.cjs'), 'utf8'), /the unpacked app, the AppImage and the \.deb carry the same app\.asar/);
 
@@ -205,7 +202,7 @@ test('static: packaged functional QA gates uploads on Windows, macOS ZIP, Linux 
   assert.match(appImageQa.step.run, /--checksum=\$image\.sha256/);
   assert.match(appImageQa.step.run, /--asar=\$asar/);
   assert.match(appImageVerify.step.run, /validate-packaged-functional-evidence\.cjs/);
-  assert.equal(appImageUpload.step.if, NATIVE_ALWAYS);
+  assert.equal(appImageUpload.step.if, 'always()');
   assert.equal(appImageUpload.step.with['if-no-files-found'], 'error');
 
   const runner = fs.readFileSync(rel('scripts', 'packaged-functional-qa.cjs'), 'utf8');
@@ -270,7 +267,7 @@ test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace 
   for (const [scenario, args] of Object.entries(expected)) {
     const step = smokeStep(scenario);
     assert.ok(step.run.includes(`${XVFB}${args}`), `${scenario} runs: ${args}`);
-    assert.equal(step.if, NATIVE_PACKAGES_EXIST, `${scenario} runs whenever native acceptance is enabled and packages exist, even after an earlier scenario failed`);
+    assert.equal(step.if, PACKAGES_EXIST, `${scenario} runs whenever the packages exist, even after an earlier scenario failed`);
     assert.ok(Number.isInteger(step['timeout-minutes']) && step['timeout-minutes'] <= 15, `${scenario} has its own timeout`);
     // Every scenario must be accepted by the script's own argument parser (the variables as the locate step sets them).
     const values = { '"$TRACE_ARCH"': 'x64', '"$TRACE_APPIMAGE"': 'release-linux/TRACE-Boardviewer-1.2.0-linux-x86_64.AppImage', '"$TRACE_UNPACKED"': 'release-linux/linux-unpacked' };
@@ -289,13 +286,13 @@ test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace 
   assert.deepEqual(s2Lines.slice(0, 2), ['set -euo pipefail', 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=1'], 'S2 asserts the restriction itself');
   const relax = stepNamed('Allow unprivileged user namespaces');
   assert.equal(relax.run, 'sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0');
-  assert.equal(relax.if, NATIVE_PACKAGES_EXIST);
+  assert.equal(relax.if, PACKAGES_EXIST);
   for (const scenario of ['S3', 'S4']) assert.doesNotMatch(smokeStep(scenario).run, /sysctl/, `${scenario} relies on the step before it`);
   assert.equal(linux().steps.filter((step) => step.run && /--expect-gate yes/.test(step.run)).length, 1, 'only S2 expects the consent dialog');
   assert.equal(stepNamed('Check the packages statically (S0)').run, 'node scripts/linux-smoke.cjs static --appimage "$TRACE_APPIMAGE" --deb "$TRACE_DEB" --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --out test-results/linux/linux-static.json');
   assert.equal(stepNamed('Check the packages statically (S0)').if, PACKAGES_EXIST);
   const summary = stepNamed('Show Linux smoke summary');
-  assert.equal(summary.if, NATIVE_ALWAYS);
+  assert.equal(summary.if, 'always()');
   assert.match(summary.run, /node scripts\/linux-smoke\.cjs summary --dir test-results\/linux >> "\$GITHUB_STEP_SUMMARY"/);
   for (const step of linux().steps.filter((entry) => entry.env)) {
     for (const [name, value] of Object.entries(step.env)) {
@@ -328,14 +325,14 @@ test('static: the packages are uploaded only after every step passed; the eviden
   assert.equal(upload.with['compression-level'], 0);
   assert.equal(upload.with['retention-days'], 14);
   const evidence = stepNamed('Upload Linux smoke evidence');
-  assert.equal(evidence.if, NATIVE_ALWAYS);
+  assert.equal(evidence.if, 'always()');
   assert.equal(evidence.with.name, 'linux-smoke-evidence-${{ steps.metadata.outputs.version }}');
   assert.equal(evidence.with.path.trim(), 'test-results/linux/*.json\ntest-results/linux/*.png');
   assert.equal(evidence.with['if-no-files-found'], 'warn');
   assert.equal(evidence.with['retention-days'], 14);
   assert.equal(evidence.with.overwrite, true);
   const cleanup = stepNamed('Stop leftover app processes');
-  assert.equal(cleanup.if, NATIVE_ALWAYS);
+  assert.equal(cleanup.if, 'always()');
   assert.ok(cleanup.run.includes('pkill -KILL -f -- "$appProcesses" || true'));
   // The pattern (an extended regular expression for pkill) must hit the app and the AppImage runtime, never the checkout or the runner.
   const declared = /^appProcesses='([^']+)'$/m.exec(cleanup.run);
@@ -354,7 +351,7 @@ test('static: the packages are uploaded only after every step passed; the eviden
 test('static: the draft release waits for the linux job, verifies the AppImage and the .deb against their SHA256 files and attaches both', () => {
   const release = workflow.jobs['draft-release'];
   assert.deepEqual(release.needs, ['build', 'portable-isolation', 'mac', 'linux'], 'a Linux failure blocks the draft release, as a macOS failure does');
-  assert.equal(release.if, "github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')", 'only a pushed v* tag drafts a release');
+  assert.equal(release.if, "${{ always() && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') && needs.build.result == 'success' && needs.portable-isolation.result == 'success' && needs.linux.result == 'success' && needs.mac.result != 'cancelled' }}", 'only a pushed v* tag drafts a release; a macOS failure leaves the Windows and Linux draft');
   const downloads = release.steps.filter((step) => step.uses && step.uses.startsWith('actions/download-artifact@'));
   const linuxDownload = downloads.find((step) => step.name === 'Download Linux build artifact');
   assert.ok(linuxDownload, 'the Linux artifact is downloaded');
@@ -366,11 +363,13 @@ test('static: the draft release waits for the linux job, verifies the AppImage a
   const lines = create.run.split('\n');
   const at = (line) => { const index = lines.indexOf(line); assert.ok(index >= 0, `script line: ${line}`); return index; };
   const linuxCheck = at("if ($env:TRACE_LINUX_VERSION -ne $env:TRACE_VERSION) { throw 'The Linux build version does not match the Windows build version.' }");
-  assert.ok(at("if ($env:TRACE_MAC_VERSION -ne $env:TRACE_VERSION) { throw 'The macOS build version does not match the Windows build version.' }") < linuxCheck);
+  assert.ok(at("if ($traceMacAttached -and $env:TRACE_MAC_VERSION -ne $env:TRACE_VERSION) { throw 'The macOS build version does not match the Windows build version.' }") < linuxCheck);
   const appImage = at('$traceAppImage = Join-Path release "TRACE-Boardviewer-$env:TRACE_VERSION-linux-x86_64.AppImage"');
   const deb = at('$traceDeb = Join-Path release "TRACE-Boardviewer-$env:TRACE_VERSION-linux-amd64.deb"');
-  const loop = at('foreach ($traceFile in @($traceExe, $traceZip, $traceAppImage, $traceDeb)) {');
-  assert.ok(linuxCheck < appImage && appImage < deb && deb < loop, 'versions first, then the names, then the checksum loop over all four assets');
+  const list = at('$traceFiles = @($traceExe, $traceAppImage, $traceDeb)');
+  const withMac = at('if ($traceMacAttached) { $traceFiles = @($traceExe, $traceZip, $traceAppImage, $traceDeb) }');
+  const loop = at('foreach ($traceFile in $traceFiles) {');
+  assert.ok(linuxCheck < appImage && appImage < deb && deb < list && list < withMac && withMac < loop, 'versions first, then the names, then the list of attached assets, then the checksum loop over them');
   assert.equal(smoke.artifactFileName('X', 'x64', 'AppImage'), 'TRACE-Boardviewer-X-linux-x86_64.AppImage', 'the names the linux job builds and uploads');
   assert.equal(smoke.artifactFileName('X', 'x64', 'deb'), 'TRACE-Boardviewer-X-linux-amd64.deb');
   const notes = create.run.slice(create.run.indexOf('@"'), create.run.indexOf('"@'));
@@ -379,11 +378,10 @@ test('static: the draft release waits for the linux job, verifies the AppImage a
   assert.match(notes, /- TRACE-Boardviewer-\$\{env:TRACE_VERSION\}-linux-x86_64\.AppImage \(\+ \.sha256\): experimental portable Linux x86-64 build/);
   assert.match(notes, /Make it executable \(chmod \+x\) and run it/);
   assert.match(notes, /TRACE asks before it starts without it: use the \.deb there\./);
-  assert.match(create.run, /\$traceLinuxValidationNote = if \(\$env:TRACE_VERSION -eq '1\.3\.1'\) \{ 'Native validation for 1\.3\.1 is scheduled after publication\.' \} else \{ 'The Linux builds are tested automatically on Ubuntu 24\.04 only\.' \}/, 'the stable 1.3.1 draft states pending native validation while later releases retain their tested status');
-  assert.ok(notes.includes('$traceLinuxValidationNote'), 'the version-specific Linux validation note appears in the release notes');
+  assert.match(notes, /\nThe Linux builds are tested automatically on Ubuntu 24\.04 only\.\n/, 'the honest limit of the Linux testing');
   assert.ok(notes.indexOf('-mac-arm64.zip') < notes.indexOf('-linux-amd64.deb') && notes.indexOf('-linux-amd64.deb') < notes.indexOf('-linux-x86_64.AppImage') && notes.indexOf('-linux-x86_64.AppImage') < notes.indexOf('User board files are not included.'));
   assert.doesNotMatch(notes, /`/, 'no backticks: the notes are a double-quoted PowerShell here-string, where a backtick escapes');
-  assert.doesNotMatch(notes, /\$(?!\{env:TRACE_VERSION\}|traceLinuxValidationNote)/, 'only the version and the version-specific validation note expand in the notes');
+  assert.doesNotMatch(notes, /\$(?!\{env:TRACE_VERSION\}|\{traceMacLine\}|\{traceNotesBlock\})/, 'the only expansions in the notes are the version, the macOS line and the stable release notes, all built above the here-string');
 });
 
 // ---- the smoke script --------------------------------------------------------------------------------------
@@ -703,12 +701,12 @@ test('simulated: ELF header, PNG size, X11 tool output and fuse wire parsing', (
   assert.deepEqual(smoke.parseXdotoolIds(''), []);
   assert.deepEqual(smoke.parseKeyValueLines('argc=1\nurl=https://x/?a=b\n'), { argc: '1', url: 'https://x/?a=b' });
 
-  const configured = { runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: true, onlyLoadAppFromAsar: true, enableEmbeddedAsarIntegrityValidation: true, enableCookieEncryption: true, grantFileProtocolExtraPrivileges: true };
+  const configured = { runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false, onlyLoadAppFromAsar: true, enableEmbeddedAsarIntegrityValidation: true, enableCookieEncryption: true, grantFileProtocolExtraPrivileges: true };
   const expected = smoke.expectedFuseWire(configured);
   assert.deepEqual(expected.unknown, []);
   assert.equal(expected.wire.RunAsNode, 'DISABLE');
-  assert.equal(expected.wire.EnableNodeCliInspectArguments, 'ENABLE');
-  const observed = smoke.describeFuseWire({ version: '1', 0: 48, 1: 49, 2: 48, 3: 49, 4: 49, 5: 49, 6: 48, 7: 49, 8: 49 });
+  assert.equal(expected.wire.EnableNodeCliInspectArguments, 'DISABLE');
+  const observed = smoke.describeFuseWire({ version: '1', 0: 48, 1: 49, 2: 48, 3: 48, 4: 49, 5: 49, 6: 48, 7: 49, 8: 49 });
   assert.equal(observed.fuse8, 'ENABLE', 'a fuse newer than @electron/fuses is kept under its index');
   assert.deepEqual(smoke.compareFuseWire(observed, expected.wire), []);
   assert.deepEqual(smoke.compareFuseWire({ ...observed, RunAsNode: 'ENABLE' }, expected.wire), ['RunAsNode is ENABLE, expected DISABLE']);

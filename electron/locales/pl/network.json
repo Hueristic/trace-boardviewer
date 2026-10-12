@@ -9,6 +9,10 @@
   "update.openFailed": "Nie udało się otworzyć strony pobierania.",
   "update.download": "Pobierz",
   "update.dismiss": "Ukryj",
+  "update.askText": "Sprawdzać nowe wersje TRACE przy starcie? Sprawdzenie łączy się tylko ze stroną wydań na GitHub. Można to zmienić w Ustawieniach.",
+  "update.askYes": "Tak, sprawdzaj przy starcie",
+  "update.askNo": "Nie, zostaw wyłączone",
+  "update.askSkip": "Pomiń",
 
   "network.title": "Sieć",
   "network.intro": "TRACE korzysta z internetu tylko do funkcji wymienionych tutaj. Każde żądanie jest zapisywane na liście aktywności poniżej i nigdy nie jest wysyłane nic o płytkach, notatkach ani dokumentach.",
@@ -46,5 +50,6 @@
   "network.bugReport": "Zgłoszenie błędu",
   "network.bugReportHint": "Zgłoszenie zostanie wysłane dopiero po wybraniu opcji Wyślij w formularzu.",
   "network.resultCancelled": "Anulowano",
-  "network.resultHttpStatus": "Nieakceptowany status HTTP: {status}"
+  "network.resultHttpStatus": "Nieakceptowany status HTTP: {status}",
+  "network.stateOnDemand": "Tylko po kliknięciu Potwierdź płatność"
 }

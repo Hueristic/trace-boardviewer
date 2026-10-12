@@ -17,8 +17,10 @@ import { utf16ToUtf8, utf8Input } from '../encoding';
 import { GenCadParseError } from '../gencad';
 import { CERTAIN, LIKELY, META_LIMIT, META_TEXT, SNIFF_BYTES, type BoardAdapter, type ContainerAdapter, type ContainerEntry, type FormatAdapter, type KeyKind, type KeyMaterial, type ParseContext, type ProgressPhase, type SniffInput, type SniffResult, type SupportStatus } from './adapter';
 import { BoardFormatError, localizedFormatError, MAX_IMPORT_BYTES, TextDecodeError, type ParseInput } from './common';
+import { importLimitFor, mebibytes, nativeByteLimitError } from './import-limits';
 import { BOARD_ADAPTERS, CONTAINER_ADAPTERS, selectCompanionSet } from './registry';
 import { baseName, extensionOf, hasUtf16Mark } from './sniff';
+import { sourceBaseName, type SourcePlatform } from './source-name';
 
 export interface Candidate<A extends FormatAdapter = FormatAdapter> {
   readonly adapter: A;
@@ -70,7 +72,7 @@ function boundedMeta(meta: unknown): Record<string, string | number | boolean> |
 }
 /** Every adapter's sniff, strongest first. A sniff that throws counts as no match (sniffs must be total; the conformance test fails on it). */
 export function rankAdapters<A extends FormatAdapter>(input: SniffInput, adapters: readonly A[]): Array<Candidate<A>> {
-  const extension = extensionOf(input.name), owns = (adapter: A) => (adapter.extensions.includes(extension) ? 1 : 0);
+  const extension = extensionOf(input.name, input.platform), owns = (adapter: A) => (adapter.extensions.includes(extension) ? 1 : 0);
   const ranked: Array<Candidate<A>> = [];
   for (const adapter of adapters) {
     let result: SniffResult;
@@ -88,20 +90,26 @@ export const ambiguousCandidates = <A extends FormatAdapter>(ranked: ReadonlyArr
   return certain.length > 1 ? certain : [];
 };
 
-const fileLabel = (name: string): string => name.split(/[\\/]/).pop() ?? name;
-function ambiguous(name: string, certain: readonly Candidate[]): BoardFormatError {
-  const formats = certain.map(candidate => candidate.adapter.name).join(', '), file = fileLabel(name);
+const fileLabel = (name: string, platform?: SourcePlatform): string => sourceBaseName(name, platform);
+function ambiguous(name: string, certain: readonly Candidate[], platform?: SourcePlatform): BoardFormatError {
+  const formats = certain.map(candidate => candidate.adapter.name).join(', '), file = fileLabel(name, platform);
   return localizedFormatError(`The content of "${file}" matches more than one format with certainty (${formats}); it is not opened, so that no format is guessed.`, 'AMBIGUOUS_FORMAT', { key: 'parse.error.ambiguousFormat', params: { file, formats } });
+}
+/** The refusal of an input above its limit: the general message, or the native Allegro one (a named LIMIT_EXCEEDED either way). */
+function oversized(limit: number): BoardFormatError {
+  return limit === MAX_IMPORT_BYTES
+    ? new BoardFormatError(`Board data exceeds the ${mebibytes(limit)} MiB import limit.`, 'LIMIT_EXCEEDED')
+    : nativeByteLimitError(limit);
 }
 function checkInput(raw: ParseInput): ParseInput {
   if (!(raw.data instanceof Uint8Array)) throw new BoardFormatError('Board data must be a byte array.');
-  if (raw.data.length > MAX_IMPORT_BYTES) throw new BoardFormatError('Board data exceeds the 64 MiB import limit.', 'LIMIT_EXCEEDED');
+  if (raw.data.length > importLimitFor(raw.data)) throw oversized(importLimitFor(raw.data));
   for (const [name, bytes] of Object.entries(raw.companions ?? {})) {
     if (!(bytes instanceof Uint8Array)) throw new BoardFormatError(`Companion file ${name} must be a byte array.`);
     if (bytes.length > MAX_IMPORT_BYTES) throw new BoardFormatError(`Companion file ${name} exceeds the 64 MiB import limit.`, 'LIMIT_EXCEEDED');
   }
   const input = utf8Input(raw);
-  if (input.data.length > MAX_IMPORT_BYTES) throw new BoardFormatError('Board data exceeds the 64 MiB import limit.', 'LIMIT_EXCEEDED');
+  if (input.data.length > importLimitFor(input.data)) throw oversized(importLimitFor(input.data));
   return input;
 }
 const isAbort = (error: unknown): boolean => typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError';
@@ -160,7 +168,7 @@ function* dispatch(raw: ParseInput, options: DispatchOptions, progress: Progress
     if (pinList) { const at = ranked.findIndex(candidate => candidate.adapter === pinList); if (at >= 0) ranked.splice(at, 1); ranked.unshift({ adapter: pinList, confidence: 89, reason: 'Explicit pin-list column mapping' }); }
   }
   const certain = ambiguousCandidates(ranked);
-  if (certain.length) throw ambiguous(input.name, certain);
+  if (certain.length) throw ambiguous(input.name, certain, input.platform);
   for (const candidate of ranked) {
     throwIfAborted(options.signal);
     const adapter = candidate.adapter;
@@ -182,8 +190,15 @@ function* dispatch(raw: ParseInput, options: DispatchOptions, progress: Progress
       return { board, adapter: adapter.id, confidence: candidate.confidence, reason: candidate.reason };
     }
   }
-  const extension = extensionOf(input.name);
-  throw new BoardFormatError(`The content of "${fileLabel(input.name)}" (${extension || 'no extension'}) matched none of the supported boardview formats.`, 'UNRECOGNIZED');
+  const extension = extensionOf(input.name, input.platform);
+  const message = `The content of "${fileLabel(input.name, input.platform)}" (${extension || 'no extension'}) matched none of the supported boardview formats.`;
+  // Every reader has declined. A reader that can say precisely why (declineReason) words this refusal; the code stays UNRECOGNIZED.
+  for (const candidate of ranked) {
+    const reason = candidate.adapter.kind === 'board' ? candidate.adapter.declineReason?.(input) : undefined;
+    if (reason) throw localizedFormatError(`${message} ${reason.message}`, 'UNRECOGNIZED', reason.issue);
+  }
+  // The user sees the localized, name-based refusal (the same route as an unsupported document); `message` stays English for logs and tests.
+  throw localizedFormatError(message, 'UNRECOGNIZED', { key: 'parse.error.unrecognized', params: { name: fileLabel(input.name, input.platform), extension: extension || '' } });
 }
 
 const ARCHIVE = 'ZIP archive';
@@ -221,7 +236,7 @@ function* openContainer(container: ContainerAdapter, input: ParseInput, boards: 
   if (pro && entries.some(entry => entry.path.toLowerCase() === 'project.json') && entries.some(entry => /^pcb\/[^/]+\.epcb$/i.test(entry.path))) {
     return yield* dispatch(input, { ...options, adapters: [pro], containers: [] }, progress, 1);
   }
-  const archive = fileLabel(input.name), stem = archive.replace(/\.[^.]*$/, '') || 'archive';
+  const archive = fileLabel(input.name, input.platform), stem = archive.replace(/\.[^.]*$/, '') || 'archive';
   const boardExtensions = new Set(boards.flatMap(adapter => adapter.extensions));
   const companionMembers = new Set(boards.flatMap(adapter => (adapter.companions?.sets ?? []).flatMap(set => [...set])));
   const candidates = entries.filter(entry => boardExtensions.has(extensionOf(entry.path)) || companionMembers.has(baseName(entry.path)));

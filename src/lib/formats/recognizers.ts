@@ -16,7 +16,8 @@
  *   samsung-cad   no longer a recognizer: the family is read by samsung-cad.ts (draft), which owns its detection.
  *   tvw           the experimental reader owns structural detection (tvw.ts); there is no fixed byte-zero magic.
  */
-import { asciiPrefix, BoardFormatError, type BoardParser } from './common';
+import type { ParseIssue } from '../types';
+import { asciiPrefix, BoardFormatError, localizedFormatError, type BoardParser } from './common';
 
 export const RECOGNIZER_IDS = ['allegro-brd', 'gerber', 'mentor-neutral'] as const;
 export type RecognizerId = (typeof RECOGNIZER_IDS)[number];
@@ -94,15 +95,21 @@ const EXPLANATIONS: Record<RecognizerId, (detail?: string) => string> = {
 };
 export const explainUnsupported = (detection: Detection): string => EXPLANATIONS[detection.id](detection.detail);
 
+/** The catalog text of an Allegro refusal, shown in the active language. The other families keep their English text. */
+const issueOf = (detection: Detection): ParseIssue | undefined => detection.id === 'allegro-brd' && detection.detail ? { key: 'parse.error.allegroBrdNative', params: { version: detection.detail } } : undefined;
+function refusalOf(detection: Detection): BoardFormatError {
+  const message = explainUnsupported(detection), issue = issueOf(detection);
+  return issue ? localizedFormatError(message, 'UNSUPPORTED_VARIANT', issue, detection.id) : new BoardFormatError(message, 'UNSUPPORTED_VARIANT', detection.id);
+}
 /** Throws UNSUPPORTED_VARIANT for recognized-but-unsupported families, otherwise null. */
 export const recognizeUnsupported: BoardParser = input => {
   const detection = detectUnsupported(input.data);
-  if (detection) throw new BoardFormatError(explainUnsupported(detection), 'UNSUPPORTED_VARIANT', detection.id);
+  if (detection) throw refusalOf(detection);
   return null;
 };
 /** The parse of one family's adapter (adapters/<id>/): refuses the bytes when the recognizers name exactly that family, otherwise declines. */
 export const refuseFamily = (id: RecognizerId): BoardParser => input => {
   const detection = detectUnsupported(input.data);
-  if (detection?.id === id) throw new BoardFormatError(explainUnsupported(detection), 'UNSUPPORTED_VARIANT', detection.id);
+  if (detection?.id === id) throw refusalOf(detection);
   return null;
 };

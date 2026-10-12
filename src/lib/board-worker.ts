@@ -1,4 +1,5 @@
 import { GenCadParseError } from './gencad';
+import type { SourcePlatform } from './formats/source-name';
 import { parseBoardDetailed } from './formats';
 import { BoardFormatError } from './formats/common';
 import { createModelHost } from './model-host';
@@ -7,7 +8,7 @@ import { MODEL_PROTOCOL } from './model-protocol';
 import { withParseProgress } from './parse-progress';
 import type { FormatFailure, ImportOptions } from './types';
 
-interface ImportMessage { name: string; data: Uint8Array; companions?: Record<string, Uint8Array>; options?: ImportOptions }
+interface ImportMessage { name: string; data: Uint8Array; companions?: Record<string, Uint8Array>; options?: ImportOptions; platform?: SourcePlatform }
 /** A progress message is posted when the parser advanced by at least this fraction (at most about a hundred per file). */
 const PROGRESS_STEP = 0.01;
 type ReportStage = 'detect' | 'unpack' | 'parse' | 'done';
@@ -16,13 +17,14 @@ const reportStageOf = (phase: string): ReportStage | null => phase === 'detect' 
 // One worker per import. The original bytes arrive here (transferred, never decoded by the transport) and the dispatcher
 // recognizes the format; meanwhile `{ progress: { fraction } }` messages report how far a parser that knows it got (the UI's
 // watchdog reads them as signs of life). A failure travels structured: a GenCAD issue (localized when shown), a recognized-format
-// failure with the parser's English text and code (key dialogs key off it), or an unexpected error; the UI then ends the worker.
+// failure with the parser's English text and code (key dialogs key off it) and, when it has one, its catalog issue (shown in the
+// active language), or an unexpected error; the UI then ends the worker.
 // After a successful parse the worker stays alive as the board's model worker (model-protocol.ts): every later message is a
 // model request about this board, answered by the model host, until the UI terminates the worker.
 let host: ModelHost | null = null;
 self.onmessage = (event: MessageEvent<ImportMessage>) => {
   if (host) { host.receive(event.data); return; }
-  const { name, data, companions, options } = event.data;
+  const { name, data, companions, options, platform } = event.data;
   try {
     if (typeof name !== 'string' || !(data instanceof Uint8Array)) throw new Error('Invalid import message.');
     let posted = 0;
@@ -31,7 +33,7 @@ self.onmessage = (event: MessageEvent<ImportMessage>) => {
       if (fraction - posted < PROGRESS_STEP && fraction < 1) return;
       posted = fraction;
       self.postMessage({ progress: { fraction } });
-    }, () => parseBoardDetailed({ name, data, companions, options }, { onProgress: (_fraction, phase) => {
+    }, () => parseBoardDetailed({ name, data, companions, options, platform }, { onProgress: (_fraction, phase) => {
       const stage = reportStageOf(phase);
       if (stage && stage !== reportStage) {
         reportStage = stage;
@@ -45,7 +47,7 @@ self.onmessage = (event: MessageEvent<ImportMessage>) => {
   } catch (error) {
     if (error instanceof GenCadParseError) self.postMessage({ issue: error.issue });
     else if (error instanceof BoardFormatError) {
-      const formatError: FormatFailure = { message: error.message, code: error.code, ...(error.format ? { format: error.format } : {}), ...(error.keyKind ? { keyKind: error.keyKind } : {}) };
+      const formatError: FormatFailure = { message: error.message, code: error.code, ...(error.format ? { format: error.format } : {}), ...(error.keyKind ? { keyKind: error.keyKind } : {}), ...(error.issue ? { issue: error.issue } : {}) };
       self.postMessage({ formatError });
     } else self.postMessage({ error: error instanceof Error ? error.message : String(error) });
   }

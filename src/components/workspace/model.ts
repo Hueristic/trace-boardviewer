@@ -41,6 +41,17 @@ export function autoCollapsePanels(narrowWindow: boolean, tab: WorkspaceTab, spl
   return narrowWindow && (split || tab !== 'board');
 }
 
+/**
+ * O-45 (W-dev-ui-01): the document viewer beside the document list (272 px) takes the inline PDF sidebar (232 px) on top of that.
+ * Above 760 px main width the viewer kept that chrome, so 1306-1440 px windows left the PDF 267-396 px wide. Below this pane width
+ * the viewer takes its compact chrome; 1440 px (pane 628 px) keeps the full chrome.
+ */
+export const DOCUMENT_PANE_COMPACT_BELOW = 600;
+/** True when a measured document pane needs the compact viewer chrome. 0 means not measured yet, which keeps the shell's own decision. */
+export function documentPaneCompact(paneWidth: number): boolean {
+  return paneWidth > 0 && paneWidth < DOCUMENT_PANE_COMPACT_BELOW;
+}
+
 /** Effective visibility of the two side panels: the explicit preference when there is one, otherwise the opposite of `collapsed`. */
 export function resolvePanels(preference: PanelPreference, collapsed: boolean): { left: boolean; right: boolean } {
   return { left: preference.left ?? !collapsed, right: preference.right ?? !collapsed };

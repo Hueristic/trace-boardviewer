@@ -47,6 +47,8 @@ export interface TextItem {
   source?: 'ocr';
   /** Recognition confidence 0-100 (recognized words only). */
   confidence?: number;
+  /** The word as the OCR read it, kept only when `str` was normalized (a reference designator upper-cased, MAC-TEST-20261011-01). */
+  ocrRaw?: string;
 }
 export interface PageSize { width: number; height: number; rotation: number }
 export interface OutlineEntry { title: string; page: number; depth: number }

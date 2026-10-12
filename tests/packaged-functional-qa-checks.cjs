@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const os = require('node:os');
 const path = require('node:path');
+const { feedReleaseVersion } = require('../scripts/packaged-functional/update-version.cjs');
 const fs = require('node:fs/promises');
 const fsSync = require('node:fs');
 const crypto = require('node:crypto');
@@ -112,6 +113,45 @@ test('scenario modules run against the live app before the final normal-quit ass
   assert.match(source, /withOpenDialog: async \(paths, action\)/);
   assert.match(source, /withSaveDialog: async \(destination, action\)/);
   assert.match(source, /const target = runningTarget; await closeNormally\(\); await launch\(options, runningProfile, target\)/);
+});
+
+test('packaged pin scenarios select Board and activate the exact current visible component result', () => {
+  const source = fsSync.readFileSync(path.resolve(__dirname, '../scripts/packaged-functional-qa.cjs'), 'utf8');
+  const prepareStart = source.indexOf('async function prepareBoardSearch(');
+  const selectStart = source.indexOf('async function selectBoardComponentResult(');
+  const helperEnd = source.indexOf('\nasync function waitBoard(', selectStart);
+  assert.ok(prepareStart >= 0 && selectStart > prepareStart && helperEnd > selectStart, 'search helpers are defined before the board wait helper');
+  const prepare = source.slice(prepareStart, selectStart);
+  const select = source.slice(selectStart, helperEnd);
+  assert.match(prepare, /#wsp-tab-board/);
+  assert.match(prepare, /aria-selected.*true/);
+  assert.ok(prepare.indexOf('clearBoardSearch(page, timeout)') < prepare.indexOf('input.fill(query)'), 'stale component rows are cleared before the new query');
+  assert.match(select, /search-row\]\[data-source="board-components"/);
+  assert.match(select, /\.component-ref/);
+  assert.match(select, /hasText: exactReference/);
+  assert.match(select, /row\.waitFor\(\{ state: 'visible'/);
+  assert.match(select, /input\?\.value === expected/);
+  assert.match(select, /ref\?\.textContent\?\.trim\(\) === expected/);
+  assert.match(select, /await row\.click\(\)/);
+  assert.match(select, /\[data-testid=hero-ref\]/);
+  assert.doesNotMatch(select, /\.press\(/, 'the helper does not use a timing-sensitive Enter activation');
+
+  const ascStart = source.indexOf("await step('declared ASC outline, pins and nails companions open through either member'");
+  const ocrStart = source.indexOf("await step('attachments and bundled image-only PDF OCR work'");
+  const noteStart = source.indexOf("await step('typed pin note, measurement, attachments and settings survive normal quit and restart'");
+  const afterNote = source.indexOf("await step('only the deliberate verification request was blocked before network access'");
+  assert.ok(ascStart >= 0 && ocrStart > ascStart && noteStart > ocrStart && afterNote > noteStart, 'all targeted scenarios are present');
+  const asc = source.slice(ascStart, ocrStart);
+  const ocr = source.slice(ocrStart, noteStart);
+  const pinNote = source.slice(noteStart, afterNote);
+  assert.equal((asc.match(/selectBoardComponentResult\(page, 'U1'\)/g) || []).length, 2, 'both ASC selections use exact-row activation');
+  assert.equal((pinNote.match(/selectBoardComponentResult\(page, 'PU301'\)/g) || []).length, 2, 'first and restarted pin-note selections use exact-row activation');
+  for (const scenario of [asc, pinNote]) {
+    assert.match(scenario, /\[data-testid=pin-row\]/, 'pin-row assertions remain in place');
+    assert.doesNotMatch(scenario, /page\.press\('\[data-testid=search-input\]', 'Enter'\)/, 'pin scenarios do not use blind Enter');
+  }
+  assert.ok(ocr.indexOf('prepareBoardSearch(page, \'PU301\'') < ocr.indexOf('pdfSearchResult.waitFor'), 'OCR search first activates Board and waits for the document result');
+  assert.ok(ocr.indexOf('page.click(\'#wsp-tab-documents\')') < ocr.indexOf("screenshot('ocr-recognized')"), 'OCR capture returns to the Documents tab');
 });
 
 test('pre-main inspector contract installs persistent request and error observers before app code', async () => {
@@ -325,8 +365,11 @@ test('evidence validator requires startup coverage, exact launch identity, norma
       fixtureHashesUnchanged: true, steps: [...SCENARIO_MANIFEST.coreSteps, ...SCENARIO_MANIFEST.modules.map((id) => ({ name: `${id} synthetic assertion`, status: 'pass' }))].map((entry) => typeof entry === 'string' ? ({ name: entry, status: 'pass' }) : entry),
       scenarioManifest: SCENARIO_MANIFEST, scenarioModules: [...SCENARIO_MANIFEST.modules],
       moduleResults: SCENARIO_MANIFEST.modules.map((id, index) => ({ id, stepStart: SCENARIO_MANIFEST.coreSteps.length + index, stepEnd: SCENARIO_MANIFEST.coreSteps.length + index + 1, steps: 1, completed: true })) });
-    const supportDenial = { session: 'trace-egress', url: 'https://trace-support.trace-boardviewer.workers.dev/receipt?claim=synthetic',
+    const supportDenial = { session: 'trace-egress', url: 'https://trace-support.trace-boardviewer.workers.dev/receipt?claim=0123456789abcdef0123456789abcdef',
       method: 'GET', cancelledBeforeNetwork: true, source: 'Electron webRequest pre-main observer' };
+    const updateCheck = { session: 'trace-egress', url: 'https://api.github.com/repos/trace-boardviewer/trace-boardviewer/releases/latest',
+      method: 'GET', cancelledBeforeNetwork: true, source: 'Electron webRequest pre-main observer' };
+    const releasePage = `https://github.com/trace-boardviewer/trace-boardviewer/releases/tag/v${feedReleaseVersion()}`;
     const reportAction = { launch: 2, actionID: 'bug-report-send-a', reportId: '3b241e0b-b013-4a53-8f1d-000000000001',
       bytes: 64, sha256: 'b'.repeat(64), acknowledgement: 'received' };
     const reportB = { launch: 2, actionID: 'bug-report-send-b', reportId: '3b241e0b-b013-4a53-8f1d-000000000002',
@@ -346,10 +389,10 @@ test('evidence validator requires startup coverage, exact launch identity, norma
       launch.reportObserverCaptureValid = true;
       launch.startupObservation.reportObserver = { version: 2, allowedCount: 0, deniedCount: 0, gateArms: 0, gateFailures: 0, responseArms: 0, responseFailures: 0 };
     }
-    report.launches[0].externalIntents = ['https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00','https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00'];
-    report.launches[0].startupObservation.finalExternalIntents = 2;
-    report.launches[0].networkAttempts = [supportDenial];
-    report.launches[0].startupObservation.finalNetworkCount = 1;
+    report.launches[0].externalIntents = ['https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00','https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00', releasePage];
+    report.launches[0].startupObservation.finalExternalIntents = 3;
+    report.launches[0].networkAttempts = [supportDenial, updateCheck];
+    report.launches[0].startupObservation.finalNetworkCount = 2;
     report.launches[0].reportObserver = observer(0, 0);
     report.launches[0].reportObserverCaptureValid = true;
     const attemptA = { ...reportAttempt, actionID: reportAction.actionID, bytes: reportAction.bytes, sha256: reportAction.sha256 };
@@ -412,7 +455,7 @@ test('evidence validator requires startup coverage, exact launch identity, norma
     }
     {
       const candidate = structuredClone(report);
-      candidate.launches[0].startupObservation.finalNetworkCount = 2;
+      candidate.launches[0].startupObservation.finalNetworkCount = 3;
       expectRejected(candidate, /launches lack complete/);
       const globalNetwork = structuredClone(report);
       globalNetwork.networkAttempts.push({ url: 'https://example.invalid', cancelledBeforeNetwork: true });
@@ -657,6 +700,27 @@ test('closeNormally redacts a report-phase app.close canary while retaining its 
   assert.ok(launchRecord.cleanup.problems.some((problem) => /application close failed; details withheld/.test(problem)));
   assert.equal(JSON.stringify(result.evidence).includes(canary), false, 'the actual closeNormally evidence path never stores the error text');
   assert.equal(JSON.stringify(launchRecord.cleanup).includes(canary), false);
+});
+
+test('a quit that outlasts the 10 s close gate is stopped by the harness, keeps its closeMs and does not abort the run', async () => {
+  const { EventEmitter } = require('node:events');
+  const child = new EventEmitter();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => { child.signalCode = 'SIGKILL'; child.exitCode = 1; child.emit('exit', 1); return true; };
+  const observer = { version: 2, allowedCount: 0, deniedCount: 0, gateArms: 0, gateFailures: 0, responseArms: 0, responseFailures: 0,
+    attempts: [], responses: [], cancelOracles: [] };
+  const snapshot = { network: [], errors: [], external: [], reportObserver: observer, installedBeforeReady: true, ready: true, events: ['ready'], sessions: 1, windows: 0 };
+  const testApp = { process: () => child, evaluate: async () => snapshot, close: () => new Promise(() => {}) };
+  const launchRecord = { launch: 914, startup: { installedBeforeReady: true, inspectorPort: 0 }, identity: null,
+    networkAttempts: [], pageErrorStart: 0, consoleErrorStart: 0, cspErrorStart: 0 };
+  const result = await __testCloseNormally({ app: testApp, launchRecord, privacyActive: false });
+  const exit = result.evidence.processExits[0];
+  assert.equal(result.error, null, 'a stopped quit returns to step(), which records the FAIL and lets the run continue');
+  assert.equal(exit.forced, true, 'the exit is marked as stopped by the harness, so it is not a normal quit');
+  assert.equal(exit.exitCode, 1);
+  assert.ok(exit.closeMs >= 10000 && exit.closeMs < 15000, `closeMs is the measured gate time (got ${exit.closeMs})`);
+  assert.ok(launchRecord.cleanup.problems.some((problem) => /close gate/.test(problem)), 'the gate overrun is kept in the launch evidence');
 });
 
 test('packaged startup reports Playwright launch rejection before waiting for an inspector timeout', async () => {

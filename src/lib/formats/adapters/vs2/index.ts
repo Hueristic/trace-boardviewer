@@ -1,5 +1,5 @@
 import { defineBoardAdapter, NO_MATCH, sniffed } from '../../adapter';
-import { BoardFormatError } from '../../common';
+import { localizedFormatError } from '../../common';
 import { hasNul, latin1 } from '../../sniff';
 
 export default defineBoardAdapter({
@@ -17,6 +17,6 @@ export default defineBoardAdapter({
   },
   parse(input) {
     if (hasNul(input.data, 1024) || !/^\$VS2(?:[ \t]|\r?\n|$)/.test(latin1(input.data.subarray(0, 1024)))) return null;
-    throw new BoardFormatError('CASTw VS2 assembly listing detected. Its per-design top/bottom plane mapping and complete electrical pin model are not validated. A verified layer stack and full pin/net export are required.', 'UNSUPPORTED_VARIANT', 'vs2');
+    throw localizedFormatError('CASTw VS2 assembly listing detected. Its per-design top/bottom plane mapping and complete electrical pin model are not validated. A verified layer stack and full pin/net export are required.', 'UNSUPPORTED_VARIANT', { key: 'parse.error.vs2Unvalidated' }, 'vs2');
   },
 });

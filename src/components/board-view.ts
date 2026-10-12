@@ -51,6 +51,15 @@ export function screenMatrix(pane: BoardPane, dpr: number): Matrix2D {
   return [dpr, 0, 0, dpr, pane.rect.x * dpr, pane.rect.y * dpr];
 }
 
+/**
+ * The board canvas bitmap in device pixels. Rounded down: the base background covers width × dpr and height × dpr device pixels, and a
+ * bitmap row or column it covers only partly is blended again on every redraw, so its colour depends on how often the board was drawn
+ * (U-29 pan/restart: the last row of a restored board differed from the long-lived frame by a fraction of a pixel's colour).
+ */
+export function bitmapSize(width: number, height: number, dpr: number): { width: number; height: number } {
+  return { width: Math.floor(width * dpr), height: Math.floor(height * dpr) };
+}
+
 export function applyMatrix(matrix: Matrix2D, point: Point2): Point2 {
   const [a, b, c, d, e, f] = matrix;
   return { x: a * point.x + c * point.y + e, y: b * point.x + d * point.y + f };

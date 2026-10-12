@@ -58,6 +58,13 @@ describe('Settings > Network markup', () => {
     expect(section('de', { settings: { updateCheck: false } })).toMatch(/data-state="off">Aus<\/span>/);
   });
 
+  it.each(LANGUAGES)('%s: the support receipt row says it runs only when Verify is pressed, never On or Off, whatever the settings say', (lang) => {
+    const support = { id: 'support-verification', hosts: ['api.trace.example'], optIn: 'supportVerification', enabled: false };
+    const html = section(lang, { report: report({ features: [support] }), settings: { updateCheck: true } });
+    expect(textOf(html, /<span class="network-state" data-state="on-demand">([^<]*)<\/span>/)).toBe(catalog(lang)[NETWORK_KEYS.stateOnDemand]);
+    expect(html).not.toMatch(/data-state="(on|off)"/);
+  });
+
   it('a feature the interface has no words for is listed by its id, with its hosts and no hint; many hosts are joined', () => {
     const html = section('en', { report: report({ features: [{ id: 'readings-library', hosts: ['a.example.org', 'b.example.org'], optIn: 'readingsLibrary', enabled: false }, { id: 'constructor', hosts: ['c.example.org'], optIn: null, enabled: true }] }) });
     expect(html).toContain('<strong>readings-library</strong>');

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { BoardFormatError } from './common';
 import { expectBoundedWork, expectScaling } from '../../test-support/timing';
 import { detectUnsupported, ipc2581, explainUnsupported, RECOGNIZER_IDS, recognizeUnsupported, UNVERIFIED_FAMILIES, type RecognizerId } from './recognizers';
+import { unsupportedAllegro } from './adapters/allegro-brd/fixtures';
 
 // --- Original synthetic samples ------------------------------------------------------------------------------------------------
 const enc = new TextEncoder();
@@ -213,6 +214,15 @@ describe('recognizeUnsupported', () => {
     expect(detect('<!-- a -->\n<project/>\n<!-- b -->\n<IPC-2581 revision="B">')).toBeNull();
     expect(detect('<!DOCTYPE a><!DOCTYPE b>\n<IPC-2581 revision="B">')).toBeNull();
     expect(detect('<IPC-25810 revision="B">')).toBeNull();
+  });
+
+  it('gives only the Allegro refusal its catalog issue; the other families keep their English text', () => {
+    let allegroError: BoardFormatError | undefined, gerberError: BoardFormatError | undefined;
+    try { recognizeUnsupported({ name: 'legacy.brd', data: unsupportedAllegro(0x00120a0a, 'allv15-7') }); } catch (error) { allegroError = error as BoardFormatError; }
+    try { recognizeUnsupported({ name: 'layer.gbr', data: enc.encode(GERBER) }); } catch (error) { gerberError = error as BoardFormatError; }
+    expect(allegroError?.issue).toEqual({ key: 'parse.error.allegroBrdNative', params: { version: '15.7 (unsupported layout 0x00120a00)' } });
+    expect(gerberError).toBeInstanceOf(BoardFormatError);
+    expect(gerberError?.issue).toBeUndefined();
   });
 
   it('does not decode binary files as text families', () => {

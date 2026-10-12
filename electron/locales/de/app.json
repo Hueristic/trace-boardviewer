@@ -8,14 +8,19 @@
   "header.settings": "Einstellungen",
   "layout.workshop": "Werkstatt",
   "layout.focus": "Fokus",
-
   "window.minimize": "Fenster minimieren",
   "window.restore": "Fenster wiederherstellen",
   "window.maximize": "Fenster maximieren",
   "window.close": "Anwendung schließen",
-
   "status.fileInfo": "Dateiinformationen",
   "status.shortcuts": "Tastenkürzel",
+  "status.saved": "Gespeichert",
+  "status.saving": "Wird gespeichert…",
+  "status.unsaved": "Nicht gespeicherte Änderungen",
+  "status.failed": "Speichern fehlgeschlagen: {message}",
+  "status.notSaved": "Nicht gespeichert (Browser-Modus)",
+  "status.region": "Statusleiste",
+  "status.zoom": "Zoomstufe",
 
   "welcome.eyebrow": "DIE VERBINDUNGEN HINTER DER PLATINE",
   "welcome.title1": "Durchblick.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Geöffnete Platinen erscheinen hier.",
   "welcome.footerLocal": "Lokaler Arbeitsbereich · offline nutzbar",
   "welcome.shortcuts": "Tastenkürzel",
-
   "toast.close": "Benachrichtigung schließen",
   "toast.settingsSaveFailed": "Die Einstellungen konnten nicht gespeichert werden.",
   "toast.settingsReadFailed": "Die Einstellungen konnten nicht gelesen werden.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Die Anwendung konnte nicht gestartet werden.",
   "toast.importCancelled": "Das Öffnen der Datei wurde abgebrochen.",
   "toast.importStopped": "Das Öffnen der Datei wurde nach {seconds} Sekunden ohne Fortschritt gestoppt. Die Datei ist möglicherweise beschädigt oder ungewöhnlich komplex.",
-
+  "toast.companionOnlineOnly": "Die Begleitdatei ist nur online verfügbar. Öffne sie oder füge sie von Hand hinzu.",
+  "toast.companionOnlineOnlyNames": "Betroffene Begleitdateien: {names}.",
+  "toast.noSandboxRevokeFailed": "Die Einstellung konnte nicht geändert werden.",
   "loading.processing": "Platine wird verarbeitet…",
   "loading.reading": "Datei wird gelesen…",
   "loading.hint": "Einen Moment, gleich setzt sich das Bild zusammen.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Diese Datei dauert ungewöhnlich lange. Sie können weiter warten oder abbrechen.",
   "loading.cancel": "Abbrechen",
   "drop.title": "Platine hier ablegen",
-  "fileInput.aria": "Boardview-Datei"
+  "fileInput.aria": "Boardview-Datei",
+  "toast.componentMissing": "Das Bauteil ist auf diesem Board nicht vorhanden.",
+  "toast.documentsAfterBoard": "Mit dem Board gezogene Dokumente werden nach dem Öffnen angehängt. Ziehen Sie sie danach erneut hinein.",
+  "toast.attachedOne": "Angehängt: „{name}“.",
+  "toast.attachedMany": "{count} Dokumente angehängt.",
+
+  "config.locked": "Die Einstellungen können nicht gelesen werden, weil ein anderes Programm die Datei sperrt; sie werden nicht überschrieben.",
+  "config.readOnly": "Die Einstellungsdatei ist schreibgeschützt: Änderungen gelten nur für diese Sitzung, die Datei wird nicht ersetzt.",
+  "config.unreadable": "Die Einstellungsdatei ist beschädigt oder stammt von einer anderen Version: Das Programm startete mit den Standardeinstellungen; die alte Datei bleibt vor dem ersten Speichern erhalten."
 }

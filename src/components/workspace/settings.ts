@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { createFormatters, createTranslator, detectLanguage, renderMessage, resolveLanguage } from '../../lib/i18n';
-import type { Message } from '../../lib/i18n';
+import { createFormatters, createTranslator, renderMessage, resolveLanguage } from '../../lib/i18n';
+import type { Language, Message } from '../../lib/i18n';
 import type { AppSettings } from '../../lib/types';
 
 const SETTINGS_KEY = 'trace-settings';
-export const defaults: AppSettings = { language: 'hu', theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: true };
+export const defaults: AppSettings = { language: 'hu', theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: false, updateCheckAsked: false };
 
 /** Each field is checked on its own: one damaged value falls back to its default without resetting the others, and a profile saved before a field existed gets that field's default. */
 export function savedSettings(value: unknown, fresh = false): AppSettings {
@@ -18,11 +18,20 @@ export function savedSettings(value: unknown, fresh = false): AppSettings {
     showLabels: typeof stored.showLabels === 'boolean' ? stored.showLabels : defaults.showLabels,
     showConnections: typeof stored.showConnections === 'boolean' ? stored.showConnections : defaults.showConnections,
     updateCheck: typeof stored.updateCheck === 'boolean' ? stored.updateCheck : defaults.updateCheck,
+    updateCheckAsked: typeof stored.updateCheckAsked === 'boolean' ? stored.updateCheckAsked : defaults.updateCheckAsked,
   };
 }
-/** Settings known synchronously at startup. In the desktop app the native process supplies them a moment later. */
-function initialSettings(desktop: boolean): { settings: AppSettings; corrupt: boolean } {
-  if (desktop) return { settings: { ...defaults, language: detectLanguage(navigator.languages) }, corrupt: false };
+/**
+ * The language the first frame is painted in (TB-041): the saved language when there is one, which the preload read before the first paint;
+ * otherwise the system's language (a fresh profile, or a settings file that could not be read).
+ */
+export function startupLanguage(saved: unknown, system: readonly (string | null | undefined)[]): Language {
+  return resolveLanguage(saved, { fresh: true, system });
+}
+
+/** Settings known synchronously at startup. In the desktop app the native process supplies the rest a moment later. */
+function initialSettings(desktop: boolean, savedLanguage?: string | null): { settings: AppSettings; corrupt: boolean } {
+  if (desktop) return { settings: { ...defaults, language: startupLanguage(savedLanguage, navigator.languages) }, corrupt: false };
   let raw: string | null;
   try { raw = localStorage.getItem(SETTINGS_KEY); }
   catch { return { settings: savedSettings({}, true), corrupt: true }; }
@@ -44,7 +53,7 @@ const failureText = (error: unknown): Message | null => {
 /** UI settings (language, theme, layout, motion, labels). They belong to the shell, not to a board workspace; the native store keeps them. */
 export function useSettings(notify: (message: Message, error?: boolean) => void) {
   const desktop = window.traceDesktop;
-  const [initial] = useState(() => initialSettings(!!desktop));
+  const [initial] = useState(() => initialSettings(!!desktop, desktop?.initialLanguage));
   const [settings, setSettings] = useState(initial.settings);
   const [ready, setReady] = useState(!desktop);
   const [systemDark, setSystemDark] = useState(() => matchMedia('(prefers-color-scheme: dark)').matches);
@@ -74,6 +83,15 @@ export function useSettings(notify: (message: Message, error?: boolean) => void)
     document.documentElement.dataset.motion = settings.motion ? 'on' : 'off';
     document.documentElement.lang = language;
   }, [theme, settings.motion, language]);
+  // The main process adopted the saved settings after a lock on the file ended (electron/main.cjs rereadLockedConfig): read them again. Changes
+  // made while the file was locked were refused, so the saved ones win.
+  useEffect(() => {
+    const bridge = desktop;
+    if (!bridge?.onSettingsChanged) return undefined;
+    return bridge.onSettingsChanged(() => {
+      void bridge.getSettings().then(saved => { const next = savedSettings(saved); settingsRef.current = next; changed.current = false; setSettings(next); }).catch(() => {});
+    });
+  }, [desktop]);
   useEffect(() => {
     let active = true;
     if (desktop) {

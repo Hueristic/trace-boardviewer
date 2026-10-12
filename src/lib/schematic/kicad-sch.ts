@@ -14,6 +14,7 @@ import {
   type SchematicErrorCode, type SchematicInput, type SchematicParser,
 } from './model';
 import { childList, childLists, listHead, parseNumber, readSexpr, sexprError, type SexprList, type SexprNode } from './sexpr';
+import type { SourcePlatform } from '../formats/source-name';
 
 /** Oldest and newest `(version)` this reader accepts: KiCad 6.0.0 (20211123) to KiCad 9.0.x (20250114). */
 export const KICAD_SCH_MIN_VERSION = 20211123;
@@ -253,7 +254,7 @@ class FileParser {
   private readonly unknown = new Map<string, { count: number; at?: Pt; severity: SchSeverity; note: string }>();
   private readonly libs = new Map<string, LibSymbol>();
 
-  constructor(private readonly lim: SchematicLimits, private readonly key: string, private readonly fileName: string, private readonly budget: Budget) {
+  constructor(private readonly lim: SchematicLimits, private readonly key: string, private readonly fileName: string, private readonly budget: Budget, private readonly platform?: SourcePlatform) {
     this.diags = new DiagSink(key);
   }
 
@@ -654,7 +655,7 @@ class FileParser {
       const page = str(childList(r.entry, 'page')?.items[1]);
       if (page !== undefined) pages.push({ project: r.project, path: r.path, page });
     }
-    const stem = fileStem(file);
+    const stem = fileStem(file, this.platform);
     return { ref: { id, name: name || stem, file, defId: null, at: { x: at.x, y: at.y }, size: { x: w, y: h }, pins }, pages };
   }
 
@@ -744,7 +745,7 @@ class FileParser {
     }
 
     const def: SchSheetDef = {
-      id: this.key, name: fileStem(this.fileName), file: this.fileName, title: titleBlock.title ?? '', titleBlock,
+      id: this.key, name: fileStem(this.fileName, this.platform), file: this.fileName, title: titleBlock.title ?? '', titleBlock,
       symbols: [], wires: [], buses: [], busEntries: [], junctions: [], noConnects: [], labels: [], sheetRefs: [], graphics: [],
       bounds: { minX: 0, minY: 0, maxX: 0, maxY: 0 },
     };
@@ -836,9 +837,9 @@ class FileParser {
   }
 }
 
-const baseName = (file: string): string => file.replace(/\\/g, '/').split('/').filter((p) => p !== '' && p !== '.').pop() ?? '';
-function fileStem(file: string): string {
-  const base = baseName(file);
+const baseName = (file: string, platform?: SourcePlatform): string => segmentsOf(file, platform).pop() ?? '';
+function fileStem(file: string, platform?: SourcePlatform): string {
+  const base = baseName(file, platform);
   return base.replace(/\.kicad_sch$/i, '') || base;
 }
 
@@ -863,8 +864,10 @@ export function sniffKicadSch(data: Uint8Array): boolean {
 // Hierarchy
 // ---------------------------------------------------------------------------------------------------------------
 
-function normalizeRef(file: string): { base: string; norm: string; hasDir: boolean } {
-  const parts = file.replace(/\\/g, '/').split('/').filter((p) => p !== '' && p !== '.');
+/** The segments of a file name: a backslash separates them where the name's platform does (win32, or unknown: both), and is a character of the name elsewhere. */
+const segmentsOf = (file: string, platform?: SourcePlatform): string[] => (platform === undefined || platform === 'win32' ? file.replace(/\\/g, '/') : file).split('/').filter((p) => p !== '' && p !== '.');
+function normalizeRef(file: string, platform?: SourcePlatform): { base: string; norm: string; hasDir: boolean } {
+  const parts = segmentsOf(file, platform);
   return { base: (parts[parts.length - 1] ?? '').toLowerCase(), norm: parts.join('/').toLowerCase(), hasDir: parts.length > 1 };
 }
 
@@ -878,10 +881,10 @@ export function parseKicadSchWithLimits(input: SchematicInput, overrides: Partia
 
   const load = (bytes: Uint8Array, key: string, fileName: string): ParsedFile => {
     if (bytes.length > MAX_FILE_BYTES) throw fail(`Schematic file "${fileName}" is ${bytes.length} bytes; the limit is ${MAX_FILE_BYTES} bytes.`, 'LIMIT_EXCEEDED');
-    return new FileParser(lim, key, fileName, budget).parse(decoder.decode(bytes));
+    return new FileParser(lim, key, fileName, budget, input.platform).parse(decoder.decode(bytes));
   };
 
-  const rootKey = baseName(input.name).toLowerCase() || 'schematic.kicad_sch';
+  const rootKey = baseName(input.name, input.platform).toLowerCase() || 'schematic.kicad_sch';
   const root = load(input.data, rootKey, input.name);
   const parsed = new Map<string, ParsedFile>([[rootKey, root]]);
   const failed = new Map<string, { code: SchematicErrorCode; message: string }>();
@@ -891,7 +894,7 @@ export function parseKicadSchWithLimits(input: SchematicInput, overrides: Partia
   const queue = [root];
   for (let q = 0; q < queue.length; q++) {
     for (const ref of queue[q]!.def.sheetRefs) {
-      const { base, norm } = normalizeRef(ref.file);
+      const { base, norm } = normalizeRef(ref.file, input.platform);
       let set = refPaths.get(base);
       if (!set) refPaths.set(base, (set = new Set()));
       set.add(norm);
@@ -922,7 +925,7 @@ export function parseKicadSchWithLimits(input: SchematicInput, overrides: Partia
     if (frame.next >= pf.def.sheetRefs.length) { state.set(frame.key, 2); stack.pop(); continue; }
     const index = frame.next++;
     const ref = pf.def.sheetRefs[index]!;
-    const { base, norm, hasDir } = normalizeRef(ref.file);
+    const { base, norm, hasDir } = normalizeRef(ref.file, input.platform);
     let child: string | null = null;
     if (!base || !refPaths.has(base)) pf.diags.add('warning', 'SHEET_FILE_MISSING', `Sheet "${ref.name}" refers to "${ref.file}", which is not a usable file name.`, ref.at);
     else if ((refPaths.get(base)?.size ?? 0) > 1) {

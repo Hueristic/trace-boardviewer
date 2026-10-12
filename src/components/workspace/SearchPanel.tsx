@@ -8,25 +8,11 @@ import { symbolKey } from '../../lib/schematic/model';
 import type { BoardComponent, ViewSide } from '../../lib/types';
 import { flattenResults, GROUP_LABEL, resultIdentity, rowKey } from './search-model';
 import { indexOfState } from './model';
+import { searchShortcutLabel } from './shortcuts';
 import type { FlatItem } from './search-model';
 import { useUi } from './ui-context';
+import { modifierLabels } from './shortcuts';
 import { Highlight, naturalOrder, PartIcon, kindKey, sideBadgeKey, sideLabelKey, VirtualList } from './ui';
-
-// i18n: pending
-const T = {
-  placeholder: 'Reference, net, value or document text',
-  searching: 'Searching…',
-  results: 'Search results',
-  noMatch: 'Nothing matches this search.',
-  caseDiffers: 'case differs',
-  more: (shown: number, total: number) => `showing ${shown} of ${total}`,
-  pins: (n: number) => `${n} pin${n === 1 ? '' : 's'}`,
-  members: (n: number) => `${n} pin${n === 1 ? '' : 's'}`,
-  page: (n: number | string) => `p. ${n}`,
-  global: 'global', local: 'local sheet', hierarchical: 'hierarchical',
-  auto: 'auto-named',
-  noteMark: 'Has a note',
-};
 
 const ROW_HEIGHT = 46, HEADER_HEIGHT = 30;
 const heightOf = (item: FlatItem) => item.kind === 'header' ? HEADER_HEIGHT : ROW_HEIGHT;
@@ -113,12 +99,13 @@ export function useSearchController(api: WorkspaceApi, inputRef: RefObject<HTMLI
 
 export function SearchField({ ctl, inputRef }: { ctl: SearchController; inputRef: RefObject<HTMLInputElement | null> }) {
   const { t } = useUi();
+  const { mod } = modifierLabels();
   return <label className="search-field wsp-search-field">
     <Search size={16} />
     <input ref={inputRef} role="combobox" aria-autocomplete="list" aria-expanded={ctl.rows.length > 0} aria-controls="wsp-results" aria-activedescendant={ctl.rows.length ? `wsp-row-${Math.min(ctl.active, ctl.rows.length - 1)}` : undefined}
-      data-testid="search-input" placeholder={T.placeholder} aria-label={t('search.aria')} autoComplete="off" spellCheck={false} {...ctl.inputProps} />
-    <span className="key-hint">⌃ F</span>
-    {ctl.pending && <LoaderCircle size={14} className="spin" aria-label={T.searching} />}
+      data-testid="search-input" placeholder={t('search.placeholder')} aria-label={t('search.aria')} autoComplete="off" spellCheck={false} {...ctl.inputProps} />
+    <span className="key-hint">{searchShortcutLabel()}</span>
+    {ctl.pending && <LoaderCircle size={14} className="spin" aria-label={t('search.searching')} />}
     {ctl.draft && <button type="button" aria-label={t('search.clear')} data-testid="search-clear" onClick={() => { ctl.clear(); inputRef.current?.focus(); }}><X size={14} /></button>}
   </label>;
 }
@@ -130,24 +117,24 @@ function ResultRow({ row, index, active, selected, query, annotated, onActivate 
     case 'board-components':
       icon = <PartIcon component={row} />;
       title = <Highlight text={row.ref} query={query} />;
-      sub = <>{row.value || t(kindKey(row))}{row.match.caseInsensitive && <em className="wsp-chip"> {T.caseDiffers}</em>}</>;
+      sub = <>{row.value || t(kindKey(row))}{row.match.caseInsensitive && <em className="wsp-chip"> {t('workspace.caseDiffers')}</em>}</>;
       side = <span className="side-badge">{t(sideBadgeKey(row.side))}</span>;
       break;
     case 'board-nets':
-      icon = <Route size={16} />; title = <Highlight text={row.name} query={query} />; sub = T.pins(row.pinCount);
+      icon = <Route size={16} />; title = <Highlight text={row.name} query={query} />; sub = t('unit.pins', { count: row.pinCount });
       break;
     case 'schematic-symbols':
       icon = <CircuitBoard size={16} />; title = <Highlight text={row.ref} query={query} />;
-      sub = <>{row.value || row.libId}</>; side = <span className="wsp-where">{row.sheetLabel || row.sheetName}{row.page ? ` · ${T.page(row.page)}` : ''}</span>;
+      sub = <>{row.value || row.libId}</>; side = <span className="wsp-where">{row.sheetLabel || row.sheetName}{row.page ? ` · ${t('workspace.pageNumber', { page: String(row.page) })}` : ''}</span>;
       break;
     case 'schematic-nets':
       icon = <Route size={16} />; title = <Highlight text={row.name} query={query} />;
-      sub = <>{row.scope === 'global' ? T.global : row.scope === 'local' ? T.local : T.hierarchical}{row.auto ? ` · ${T.auto}` : ''} · {T.members(row.memberCount)}</>;
-      side = <span className="wsp-where">{row.sheetLabel ?? ''}{row.page ? ` · ${T.page(row.page)}` : ''}</span>;
+      sub = <>{row.scope === 'global' ? t('workspace.scopeGlobal') : row.scope === 'local' ? t('workspace.scopeLocal') : t('workspace.scopeHierarchical')}{row.auto ? ` · ${t('workspace.autoNamed')}` : ''} · {t('unit.pins', { count: row.memberCount })}</>;
+      side = <span className="wsp-where">{row.sheetLabel ?? ''}{row.page ? ` · ${t('workspace.pageNumber', { page: String(row.page) })}` : ''}</span>;
       break;
     case 'documents':
       icon = <FileText size={16} />; title = <span className="wsp-doc-title">{row.documentName}</span>;
-      sub = <Highlight text={row.context} query={query} />; side = <span className="wsp-where">{T.page(row.page)}</span>;
+      sub = <Highlight text={row.context} query={query} />; side = <span className="wsp-where">{t('workspace.pageNumber', { page: String(row.page) })}</span>;
       break;
   }
   const netLike = row.source === 'board-nets' || row.source === 'schematic-nets';
@@ -155,11 +142,12 @@ function ResultRow({ row, index, active, selected, query, annotated, onActivate 
     className={'wsp-result' + (active ? ' active' : '') + (selected ? ' selected' : '') + (netLike ? ' net' : '')} onClick={() => onActivate(row)}>
     <span className="component-icon">{icon}</span>
     <span className="component-row-text"><span className="component-ref mono">{title}</span><span className="component-value">{sub}</span></span>
-    {annotated && <StickyNote size={12} className="note-dot" aria-label={T.noteMark} />}{side}
+    {annotated && <StickyNote size={12} className="note-dot" aria-label={t('workspace.hasNote')} />}{side}
   </button>;
 }
 
 export function SearchResults({ api, ctl, className = '' }: { api: WorkspaceApi; ctl: SearchController; className?: string }) {
+  const { t } = useUi();
   const { state } = api;
   const annotated = useMemo(() => annotatedComponentIds(state.board, state.notes), [state.board, state.notes]);
   const sch = state.probe.schematic;
@@ -173,13 +161,13 @@ export function SearchResults({ api, ctl, className = '' }: { api: WorkspaceApi;
     }
   };
   if (!ctl.items.length) {
-    return <div className={'no-results ' + className} role="status" data-testid="search-empty"><Search size={24} /><p>{ctl.pending ? T.searching : T.noMatch}</p></div>;
+    return <div className={'no-results ' + className} role="status" data-testid="search-empty"><Search size={24} /><p>{ctl.pending ? t('search.searching') : t('search.noMatch')}</p></div>;
   }
   const activeItem = ctl.items.findIndex(item => item.kind === 'row' && item.index === ctl.active);
-  return <VirtualList items={ctl.items} itemHeight={heightOf} resetKey={ctl.identity} scrollToIndex={activeItem} role="listbox" id="wsp-results" label={T.results} className={'wsp-result-list ' + className}
+  return <VirtualList items={ctl.items} itemHeight={heightOf} resetKey={ctl.identity} scrollToIndex={activeItem} role="listbox" id="wsp-results" label={t('search.results')} className={'wsp-result-list ' + className}
     itemKey={(item, i) => item.kind === 'header' ? 'h:' + item.source : rowKey(item.row) + ':' + i}
     render={item => item.kind === 'header'
-      ? <div className="wsp-group-header" role="presentation" data-source={item.source}><span>{GROUP_LABEL[item.source]}</span><span className="mono">{item.truncated ? T.more(item.shown, item.total) : item.total}</span></div>
+      ? <div className="wsp-group-header" role="presentation" data-source={item.source}><span>{t(GROUP_LABEL[item.source])}</span><span className="mono">{item.truncated ? t('workspace.searchMore', { shown: String(item.shown), total: String(item.total) }) : item.total}</span></div>
       : <ResultRow row={item.row} index={item.index} active={item.index === ctl.active} selected={isSelected(item.row)} query={ctl.query} annotated={item.row.source === 'board-components' && annotated.has(item.row.componentId)} onActivate={ctl.activate} />} />;
 }
 
@@ -188,11 +176,12 @@ const ComponentRow = memo(function ComponentRow({ component, selected, annotated
   return <button type="button" className={'component-row' + (selected ? ' selected' : '') + (compact ? ' compact' : '')} onClick={() => onLocate(component.id)} aria-pressed={selected} data-testid="component-row"
     title={t('list.rowTitle', { ref: component.ref, value: component.value || t(kindKey(component)), side: t(sideLabelKey(component.side)) })}>
     <span className="component-icon"><PartIcon component={component} /></span><span className="component-row-text"><span className="component-ref mono">{component.ref}</span><span className="component-value">{component.value || t(kindKey(component))}</span></span>
-    {annotated && <StickyNote size={12} className="note-dot" aria-label={T.noteMark} />}<span className="side-badge">{t(sideBadgeKey(component.side))}</span>
+    {annotated && <StickyNote size={12} className="note-dot" aria-label={t('workspace.hasNote')} />}<span className="side-badge">{t(sideBadgeKey(component.side))}</span>
   </button>;
 });
 
 export function ComponentList({ api, side, allSides, resetKey }: { api: WorkspaceApi; side: ViewSide; allSides: boolean; resetKey: string }) {
+  const { t } = useUi();
   const { state, actions } = api;
   // The index sorts once per board and side (natural reference order); a side switch no longer re-sorts the whole board.
   const index = indexOfState(state);
@@ -201,7 +190,7 @@ export function ComponentList({ api, side, allSides, resetKey }: { api: Workspac
   const actionsRef = useRef(actions); actionsRef.current = actions;
   const locate = useCallback((id: string) => actionsRef.current.selectComponent(id, { center: true, origin: 'search' }), []);
   const selectedIndex = components.findIndex(component => component.id === state.selection.componentId);
-  return <VirtualList items={components} itemHeight={46} resetKey={resetKey} scrollToIndex={selectedIndex} className="component-list" label="Components"
+  return <VirtualList items={components} itemHeight={46} resetKey={resetKey} scrollToIndex={selectedIndex} className="component-list" label={t('panel.components')}
     itemKey={component => component.id} render={component => <ComponentRow component={component} selected={component.id === state.selection.componentId} annotated={annotated.has(component.id)} onLocate={locate} />} />;
 }
 
@@ -214,7 +203,7 @@ export function SearchPanel({ api, side, allSides, onAllSides, onRecents, inputR
   const board = api.state.board;
   const count = searching ? ctl.rows.length : indexOfState(api.state)?.componentsInOrder(allSides ? undefined : side).length ?? 0;
   return <aside className="search-panel" aria-label={t('panel.components')}>
-    <div className="pane-title"><span>{searching ? T.results : t('panel.components')}</span><span className="mono" data-testid="search-count">{fmt.count(count)}</span></div>
+    <div className="pane-title"><span>{searching ? t('search.results') : t('panel.components')}</span><span className="mono" data-testid="search-count">{fmt.count(count)}</span></div>
     <SearchField ctl={ctl} inputRef={inputRef} />
     <div className="search-options">
       <label>{!searching && <><input type="checkbox" checked={allSides} onChange={e => onAllSides(e.target.checked)} />{t('side.bothLabel')}</>}</label>

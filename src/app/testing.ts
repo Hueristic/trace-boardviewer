@@ -145,10 +145,13 @@ export interface FakeDesktop extends TraceDesktop {
   activeReads: number;
   maxActiveReads: number;
   emitOpen(payload: FilePayload): void;
+  /** An external open the main process could not read (its message), like the 'trace:open-failed' channel. */
+  emitOpenFailed(message: string): void;
 }
 
 export function createFakeDesktop(): FakeDesktop {
   const openListeners = new Set<(payload: FilePayload) => void>();
+  const openFailedListeners = new Set<(message: string) => void>();
   const fake = {
     log: [] as string[], boards: new Map<string, FilePayload>(), docs: new Map<string, DocumentPayload>(), workspaces: new Map<string, WorkspaceManifest>(), notes: new Map<string, BoardNote[]>(),
     recents: [] as RecentFile[], initial: null as FilePayload | null, dialog: null as FilePayload | null, picks: [] as DocumentPayload[][], pickOptions: [] as FakeDesktop['pickOptions'],
@@ -176,6 +179,7 @@ export function createFakeDesktop(): FakeDesktop {
     get updateResult() { return fake.updateResult; }, set updateResult(value) { fake.updateResult = value; },
     get updateAvailable() { return fake.updateAvailable; }, set updateAvailable(value) { fake.updateAvailable = value; },
     emitOpen: payload => { for (const listener of [...openListeners]) listener(payload); },
+    emitOpenFailed: message => { for (const listener of [...openFailedListeners]) listener(message); },
     openBoard: async () => { await step('openBoard'); return fake.dialog; },
     readBoard: async path => {
       await step('readBoard', path);
@@ -195,6 +199,7 @@ export function createFakeDesktop(): FakeDesktop {
     onMaximized: () => () => {},
     droppedFilePath: file => (file as File & { path?: string }).path ?? '',
     onOpenBoard: listener => { openListeners.add(listener); return () => { openListeners.delete(listener); }; },
+    onOpenFailed: listener => { openFailedListeners.add(listener); return () => { openFailedListeners.delete(listener); }; },
     onFlushRequest: () => () => {},
     loadWorkspace: async key => { await step('loadWorkspace', key); return structuredClone(fake.workspaces.get(key) ?? null); },
     saveWorkspace: async (key, manifest) => { await step('saveWorkspace', key); fake.workspaces.set(key, structuredClone(manifest)); },
@@ -221,6 +226,7 @@ export function createFakeDesktop(): FakeDesktop {
     // Like the main process: only the fixed ids are accepted; the log gets "openSupportLink:<id>" for accepted ones.
     openSupportLink: async id => { if (!isSupportLinkId(id)) throw new Error('Unknown support link.'); await step('openSupportLink', id); },
     // Like the main process: no argument is read. `updateResult` is the answer of the next checks; openUpdatePage rejects, as the main process does, until a check reported a newer release.
+    checkForStartupUpdates: async () => { await step('checkForStartupUpdates'); fake.updateAvailable = fake.updateResult.status === 'available'; return fake.updateResult; },
     checkForUpdates: async () => { await step('checkForUpdates'); fake.updateAvailable = fake.updateResult.status === 'available'; return fake.updateResult; },
     openUpdatePage: async () => { if (!fake.updateAvailable) throw new Error('No update available.'); await step('openUpdatePage'); },
   } as FakeDesktop;
@@ -248,6 +254,8 @@ export interface FakeBoardWorkers {
   terminated: number;
   /** Boards (or parser replies) by file name. */
   replies: Record<string, unknown>;
+  /** Every import message the board workers were posted, in order (name, options and the platform the renderer sent). */
+  posted: Array<Record<string, unknown>>;
   /** Enum-only success context returned with the fake parser result. */
   reportContexts: Record<string, { stage?: string; formatId?: string }>;
   /** Holds the reply of a file name until the promise settles. */
@@ -270,7 +278,7 @@ export interface FakeBoardWorkers {
 }
 export function createBoardWorkers(): FakeBoardWorkers {
   const fake: FakeBoardWorkers = {
-    created: 0, terminated: 0, replies: {}, reportContexts: {}, gates: {}, options: [], model: false, progress: {}, modelRequests: [], modelGate: null, crash: [],
+    created: 0, terminated: 0, replies: {}, posted: [], reportContexts: {}, gates: {}, options: [], model: false, progress: {}, modelRequests: [], modelGate: null, crash: [],
     factory: (onMessage, onError) => {
       fake.created++;
       let dead = false;
@@ -281,6 +289,7 @@ export function createBoardWorkers(): FakeBoardWorkers {
           if (host) { fake.modelRequests.push(message as { type: string; id: number }); host.receive(structuredClone(message)); return; }
           const { name, options } = message as { name: string; options: unknown };
           fake.options.push(options);
+          fake.posted.push(message as Record<string, unknown>);
           void (async () => {
             await fake.gates[name];
             for (const item of fake.progress[name] ?? []) {
@@ -337,7 +346,7 @@ export function createSchematicWorkers(): FakeSchematicWorkers {
             if (dead) return;
             let reply: SchematicWorkerResponse;
             try {
-              const design = fake.designs[request.name] ?? loadSchematicDesign({ name: request.name, data: request.data, companions: request.companions });
+              const design = fake.designs[request.name] ?? loadSchematicDesign({ name: request.name, data: request.data, companions: request.companions, platform: request.platform });
               reply = { requestId: request.requestId, design };
             } catch (error) {
               reply = { requestId: request.requestId, error: error instanceof SchematicError ? { code: error.code, message: error.message } : { code: 'UNKNOWN', message: String(error) } };

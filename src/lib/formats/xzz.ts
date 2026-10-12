@@ -10,7 +10,7 @@
  * into closed loops: the largest is the outline, the others are disclosed as cutouts, open chains are disclosed and not drawn.
  */
 import type { Board, ParseIssue, Point } from '../types';
-import { BoardFormatError, buildBoard, MAX_IMPORT_BYTES, note, stitchOutlines, vendorDisconnected, type FormatErrorCode, type ParseInput, type RawPart, type RawPin } from './common';
+import { BoardFormatError, buildBoard, localizedFormatError, MAX_IMPORT_BYTES, note, stitchOutlines, vendorDisconnected, type FormatErrorCode, type ParseInput, type RawPart, type RawPin } from './common';
 import { createDes, xzzKeyParityValid } from './crypto';
 
 const FORMAT = 'XZZ PCB';
@@ -65,10 +65,13 @@ export function parseXzz(input: ParseInput): Board | null {
   const xorKey = data.length > 0x10 ? data[0x10] : 0;
   const clear = matches(data, 0, MAGIC), obfuscated = !clear && xorKey !== 0 && matches(data, 0, MAGIC, xorKey);
   if (!clear && !obfuscated) return null;
-  if (data.length > MAX_IMPORT_BYTES) throw new BoardFormatError(`${FORMAT}: file exceeds the 64 MiB import limit.`, 'LIMIT_EXCEEDED', 'XZZPCB');
+  if (data.length > MAX_IMPORT_BYTES) throw localizedFormatError(`${FORMAT}: file exceeds the 64 MiB import limit.`, 'LIMIT_EXCEEDED', { key: 'parse.error.xzzByteLimit' }, 'XZZPCB');
   // keyKind travels only with key errors: the UI opens its key dialog on these two codes and nothing else.
-  function fail(message: string, code: FormatErrorCode = 'INVALID_FORMAT'): never {
-    throw new BoardFormatError(`${FORMAT}: ${message}`, code, 'XZZPCB', code === 'KEY_REQUIRED' || code === 'INVALID_KEY' ? 'xzz' : undefined);
+  // An issue names the catalog text of a refusal shown to the user; the English message stays the developer text.
+  function fail(message: string, code: FormatErrorCode = 'INVALID_FORMAT', issue?: ParseIssue): never {
+    const error = new BoardFormatError(`${FORMAT}: ${message}`, code, 'XZZPCB', code === 'KEY_REQUIRED' || code === 'INVALID_KEY' ? 'xzz' : undefined);
+    if (issue) error.issue = issue;
+    throw error;
   }
   let buf = data;
   if (obfuscated) {
@@ -112,9 +115,9 @@ export function parseXzz(input: ParseInput): Board | null {
   let des: ((block: Uint8Array) => Uint8Array) | undefined;
   const decrypt = (block: Uint8Array) => {
     if (!des) {
-      const key = input.options?.xzzKey?.trim() || fail('component records are DES encrypted and require the 16-hex-digit XZZ key.', 'KEY_REQUIRED');
-      if (!/^(?:0x)?[0-9a-f]{16}$/i.test(key)) fail('the XZZ key must contain exactly 16 hexadecimal digits.', 'INVALID_KEY');
-      if (!xzzKeyParityValid(key)) fail('the XZZ key does not match the key parity pattern (a digit is mistyped).', 'INVALID_KEY');
+      const key = input.options?.xzzKey?.trim() || fail('component records are DES encrypted and require the 16-hex-digit XZZ key.', 'KEY_REQUIRED', { key: 'parse.error.xzzKeyRequired' });
+      if (!/^(?:0x)?[0-9a-f]{16}$/i.test(key)) fail('the XZZ key must contain exactly 16 hexadecimal digits.', 'INVALID_KEY', { key: 'parse.error.xzzKeyFormat' });
+      if (!xzzKeyParityValid(key)) fail('the XZZ key does not match the key parity pattern (a digit is mistyped).', 'INVALID_KEY', { key: 'parse.error.xzzKeyParity' });
       des = createDes(key);
     }
     return des(block);
@@ -137,9 +140,9 @@ export function parseXzz(input: ParseInput): Board | null {
     if (!header) {
       // DES-ECB ciphertext comes in whole 8-byte blocks and decrypts to at least the minimal record, so a block of any other
       // length is a damaged plaintext record: report that instead of asking for a key that cannot help.
-      if (raw.length % 8 || raw.length < MIN_CIPHER_BYTES) fail(`component record of ${raw.length} bytes is corrupt: it is neither a readable component record nor DES ciphertext (whole 8-byte blocks, at least ${MIN_CIPHER_BYTES} bytes).`);
+      if (raw.length % 8 || raw.length < MIN_CIPHER_BYTES) fail(`component record of ${raw.length} bytes is corrupt: it is neither a readable component record nor DES ciphertext (whole 8-byte blocks, at least ${MIN_CIPHER_BYTES} bytes).`, 'INVALID_FORMAT', { key: 'parse.error.xzzRecordCorrupt', params: { bytes: raw.length, minimum: MIN_CIPHER_BYTES } });
       block = decrypt(raw);
-      header = partHeader(block) ?? fail('the key did not decrypt a valid component record; check the XZZ key.', 'INVALID_KEY');
+      header = partHeader(block) ?? fail('the key did not decrypt a valid component record; check the XZZ key.', 'INVALID_KEY', { key: 'parse.error.xzzKeyDecrypt' });
     }
     const local = new DataView(block.buffer, block.byteOffset, block.byteLength);
     const read = (offset: number) => local.getUint32(offset, true);

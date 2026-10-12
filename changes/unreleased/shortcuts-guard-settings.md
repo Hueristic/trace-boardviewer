@@ -1,0 +1,2 @@
+- Typing in a text field no longer switches tabs. Alt+1, Alt+2 and Alt+3 are ignored while the cursor is in a text field, so a note typed in a PDF keeps its text (on a Mac, Option+digit types its symbol there). The tab shortcuts still work everywhere else.
+- Ctrl+, (Windows and Linux) and Cmd+, (macOS) open Settings from the keyboard, also before a board is open. The shortcut is ignored while typing and is listed in the keyboard help. New texts are in all eight languages.

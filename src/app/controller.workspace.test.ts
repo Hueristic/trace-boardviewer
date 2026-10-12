@@ -47,18 +47,27 @@ describe('document restore (locate statuses)', () => {
     expect(moved.record).toMatchObject({ path: '/boards/docs/moved.png', relativePath: 'docs/moved.png' });
     expect(moved.record.missing).toBeUndefined();
     expect(changed.status).toBe('changed');
-    expect(changed.message).toMatch(/different content/);
+    expect(changed.message).toMatchObject({ key: 'workspace.changed.file' });
     expect(changed.pdf).toBeUndefined();
     expect(changed.record.key).toBe(hexKey(13));
     expect(missing).toMatchObject({ status: 'missing' });
-    expect(missing.message).toMatch(/Relink/);
+    expect(missing.message).toMatchObject({ key: 'workspace.unreadable.missing' });
     expect(bad).toMatchObject({ status: 'unreadable' });
-    expect(bad.message).toContain('Access denied.');
+    expect(bad.message).toMatchObject({ key: 'workspace.unreadable.located', params: { detail: 'Access denied.' } });
     expect(h.pdf.sessions.map(s => s.id)).toEqual(['d-ok']);
     expect(h.state().manifest?.documents.find(d => d.id === 'd-missing')?.missing).toBe(true);
     // The hint is persisted (a save follows the locate step).
     await h.controller.flush();
     expect(h.desktop.workspaces.get(hexKey(1))?.documents.find(d => d.id === 'd-missing')?.missing).toBe(true);
+  });
+
+  it('a document another program holds open is unreadable with that reason alone, not a relink hint (O-07)', async () => {
+    const h = createHarness();
+    seedWorkspace(h, 1, '/boards/a.cad', [{ id: 'd-held', path: '/boards/docs/held.pdf', kind: 'pdf', key: 21 }]);
+    h.desktop.docs.set('/boards/docs/held.pdf', documentPayload('/boards/docs/held.pdf', 'pdf', 21));
+    h.desktop.failures.readDocument = () => new Error("Error invoking remote method 'trace:read-document': Error: [DOCUMENT_IN_USE] The file is in use by another program. Close it there and try again.");
+    await openNative(h, 'a.cad', 1);
+    expect(doc(h, 'd-held')).toMatchObject({ status: 'unreadable', message: { text: 'The file is in use by another program. Close it there and try again.' } });
   });
 
   it('records the page count of a PDF once its session knows it', async () => {
@@ -127,6 +136,17 @@ describe('document restore (locate statuses)', () => {
 describe('attaching, relinking and editing documents', () => {
   const pdfPayload = (path: string, key = 21) => documentPayload(path, 'pdf', key);
 
+  it('a companion that exists online only is said so after the pick, and nothing is downloaded for it (W16-B4)', async () => {
+    const h = createHarness();
+    await openNative(h, 'a.cad', 1);
+    const picked = { ...documentPayload('/boards/docs/photo.png', 'image', 22), skipped: [{ name: 'cloud.kicad_sch', reason: 'online-only' }] };
+    h.desktop.picks.push([picked]);
+    await h.controller.actions.attachDocuments(['image']);
+    const messages = h.state().notices.map(notice => notice.message);
+    expect(messages).toContainEqual({ key: 'toast.companionOnlineOnly' });
+    expect(messages).toContainEqual({ key: 'toast.companionOnlineOnlyNames', params: { names: 'cloud.kicad_sch' } });
+  });
+
   it('attaches picked documents; the same bytes attach once; PDF bytes belong to the session', async () => {
     const h = createHarness();
     await openNative(h, 'a.cad', 1);
@@ -139,7 +159,7 @@ describe('attaching, relinking and editing documents', () => {
     expect(h.pdf.sessions).toHaveLength(1);
     expect(h.pdf.sessions[0].options.data).toEqual(enc('bytes of a.pdf'));
     expect(h.state().documents[1].bytes).toEqual(enc('bytes of photo.png'));
-    expect(h.messages().slice(-2)).toEqual(['Attached 2 documents.', '1 of the files is already attached to this workspace.'.replace('1 of the files is', '"a-copy.pdf" is')]);
+    expect(h.messages().slice(-2)).toEqual(['toast.attachedMany', '1 of the files is already attached to this workspace.'.replace('1 of the files is', '"a-copy.pdf" is')]);
     // Again: nothing is added, no second session.
     h.desktop.picks.push([pdfPayload('/boards/docs/a.pdf')]);
     await h.controller.actions.attachDocuments();
@@ -280,13 +300,24 @@ describe('attaching, relinking and editing documents', () => {
     const log = h.desktop.log;
     expect(log.indexOf(`saveWorkspace:${hexKey(1)}`)).toBeGreaterThan(-1);
     expect(log.indexOf(`saveWorkspace:${hexKey(1)}`)).toBeLessThan(log.indexOf('exportWorkspace'));
-    h.desktop.exportResult = null;
-    expect(await h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: true, includeNotes: false })).toBeNull();
+    h.desktop.exportResult = null; // the save dialog was dismissed
+    expect(await h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: true, includeNotes: false })).toBe('cancelled');
     h.desktop.failures.saveWorkspace = () => new Error('[STORE_CLOSING] closing');
     h.controller.actions.setActiveTab('board');
     const exports = h.desktop.exportRequests.length;
-    expect(await h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: false, includeNotes: false })).toBeNull();
+    expect(await h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: false, includeNotes: false })).toBe('failed');
     expect(h.desktop.exportRequests).toHaveLength(exports);
+  });
+
+  it('a dismissed save dialog is a cancel; a failed export and a browser session are failures', async () => {
+    const h = createHarness();
+    seedWorkspace(h, 1, '/boards/a.cad', [PDF]);
+    await openNative(h, 'a.cad', 1);
+    h.desktop.exportWorkspace = async () => { throw new Error('EBUSY: resource busy or locked'); };
+    expect(await h.controller.actions.exportWorkspace({ documentIds: [], includeBoard: true, includeNotes: false })).toBe('failed');
+    expect(h.state().notices.at(-1)).toMatchObject({ kind: 'error' });
+    const browser = createHarness({ browser: true });
+    expect(await browser.controller.actions.exportWorkspace({ documentIds: [], includeBoard: true, includeNotes: false })).toBe('failed');
   });
 });
 
@@ -390,6 +421,24 @@ describe('selection and cross-probe', () => {
     expect(h.state().selection.net).toBe('OUT');
     selectComponent('missing-id');
     expect(h.state().selection.net).toBe('OUT');
+  });
+
+  it('an unknown component id selects nothing and says so (U-24, toast.componentMissing); without a board nothing is shown', async () => {
+    const h = await withSchematic();
+    h.controller.actions.selectComponent('r1', { center: true });
+    const { selection, probe } = h.state();
+    const listener = vi.fn();
+    h.controller.subscribe(listener);
+    h.controller.actions.selectComponent('missing-id', { center: true, origin: 'search' });
+    h.controller.actions.selectComponent('missing-id');
+    expect(h.state().selection).toBe(selection);
+    expect(h.state().probe).toBe(probe);
+    expect(h.state().notices.slice(-2).map(notice => notice.message)).toEqual([{ key: 'toast.componentMissing' }, { key: 'toast.componentMissing' }]);
+    expect(listener).toHaveBeenCalled();
+    const empty = createHarness();
+    const emptyBefore = empty.state();
+    expect(() => empty.controller.actions.selectComponent('r1')).not.toThrow();
+    expect(empty.state()).toBe(emptyBefore);
   });
 
   it('keeps `missing` mappings visible but links nothing: a part without schematic counterpart and partial names', async () => {
@@ -539,17 +588,35 @@ describe('selection and cross-probe', () => {
     const link = h.state().link;
     h.controller.actions.setCamera('board', { zoom: 2 });
     expect(h.state().link).toBe(link);
-    h.controller.actions.setAlias('refs', 'R2', 'R9');
+    expect(h.controller.actions.setAlias('refs', 'R2', 'R9')).toBeNull();
     expect(h.state().manifest?.aliases?.refs).toEqual({ R2: 'R9' });
     expect(h.state().link).not.toBe(link);
     expect(h.state().link?.refs.rows.find(row => row.ref === 'R9')?.status).toBe('alias');
     expect(h.state().probe.schematicMapping).toMatchObject({ status: 'unique' });
     expect(h.state().probe.schematic?.selection.symbolKey).toBe(symbolKey('', 'R2'));
-    h.controller.actions.setAlias('refs', 'R9', 'R9');
+    expect(h.controller.actions.setAlias('refs', 'R9', 'R9')).toBe('same'); // an alias must map to a different name
     expect(h.state().notices.at(-1)).toMatchObject({ kind: 'error' });
-    h.controller.actions.removeAlias('refs', 'R2');
+    expect(h.state().manifest?.aliases?.refs).toEqual({ R2: 'R9' });
+    expect(h.controller.actions.removeAlias('refs', 'R2')).toBe(true);
     expect(h.state().manifest?.aliases).toBeUndefined();
     expect(h.state().probe.schematicMapping?.status).toBe('missing');
+  });
+
+  it('a removal that cannot run (no workspace open) reports it and changes nothing', () => {
+    const h = createHarness();
+    expect(h.controller.actions.removeAlias('refs', 'R2')).toBe(false);
+    expect(h.controller.actions.setAlias('refs', 'R2', 'R9')).toBe('other');
+    expect(h.state().manifest).toBeNull();
+  });
+
+  it('a rejected alias names the rule it broke as a catalog key, so the notice follows the UI language', async () => {
+    const h = createHarness();
+    seedWorkspace(h, 1, '/boards/a.cad', [PDF]);
+    await openNative(h, 'a.cad', 1);
+    expect(h.controller.actions.setAlias('refs', '  ', 'R9')).toBe('name');
+    expect(h.controller.actions.setAlias('refs', 'R2', 'x'.repeat(257))).toBe('target');
+    expect(h.state().notices.at(-1)).toMatchObject({ kind: 'error', message: { key: 'linkDialog.toastTargetInvalid' } });
+    expect(h.state().manifest?.aliases).toBeUndefined();
   });
 });
 
@@ -710,6 +777,21 @@ describe('unified search', () => {
     expect(h.state().search).toEqual({ query: '', result: null, pending: false });
   });
 
+  it('the result set is the same on every tab and in the split view (U-23): the side panel only decides where results are shown', async () => {
+    const h = await withSchematic();
+    h.controller.actions.setSearchQuery('R1');
+    const result = h.state().search.result;
+    expect(result?.groups[0].rows.map(row => row.ref)).toContain('R1');
+    for (const tab of ['schematic', 'documents', 'board'] as const) {
+      h.controller.actions.setActiveTab(tab);
+      expect(h.state().search.result).toEqual(result);
+    }
+    h.controller.actions.setSplit({ enabled: true, right: { kind: 'schematic', id: 'doc-sch' } });
+    expect(h.state().search.result).toEqual(result);
+    h.controller.actions.setSplit({ enabled: false });
+    expect(h.state().search.result).toEqual(result);
+  });
+
   it('latest query wins: a slow document search of an older query never replaces the newer result', async () => {
     const h = createHarness();
     seedWorkspace(h, 1, '/boards/a.cad', [PDF]);
@@ -773,5 +855,30 @@ describe('unified search', () => {
     h.controller.actions.setSearchQuery('R1');
     h.controller.actions.activateSearchRow(h.state().search.result!.groups[2].rows[0]);
     expect(h.state().activeTab).toBe('board');
+  });
+
+  it('a board component or net row brings the Board tab forward when the search started on another tab (S-08)', async () => {
+    const h = await withSchematic();
+    const { setActiveTab, setSearchQuery, activateSearchRow } = h.controller.actions;
+    setActiveTab('documents');
+    setSearchQuery('R1');
+    activateSearchRow(h.state().search.result!.groups[0].rows[0]);
+    expect(h.state().activeTab).toBe('board');
+    expect(h.state().selection.componentId).not.toBeNull();
+    setActiveTab('documents');
+    setSearchQuery('GND');
+    activateSearchRow(h.state().search.result!.groups[1].rows[0]);
+    expect(h.state().activeTab).toBe('board');
+    expect(h.state().selection.net).toBe('GND');
+  });
+
+  it('in the split view the board is already shown, so a board row keeps the active tab (S-08)', async () => {
+    const h = await withSchematic();
+    h.controller.actions.setSplit({ enabled: true, right: { kind: 'schematic', id: 'doc-sch' } });
+    h.controller.actions.setActiveTab('documents');
+    h.controller.actions.setSearchQuery('R1');
+    h.controller.actions.activateSearchRow(h.state().search.result!.groups[0].rows[0]);
+    expect(h.state().activeTab).toBe('documents');
+    expect(h.state().selection.componentId).not.toBeNull();
   });
 });

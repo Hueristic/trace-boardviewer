@@ -15,11 +15,20 @@ const fflate = require('fflate');
 const identity = require('../electron/identity.cjs');
 const workspace = require('../electron/workspace.cjs');
 const documents = require('../electron/documents.cjs');
+const i18n = require('../electron/i18n.cjs');
 const { createByteBudget } = require('../electron/store.cjs');
 const { isInsideTemp, makeTempDir } = require('./canonical-temp.cjs');
 
 const sha256 = (value) => createHash('sha256').update(value).digest('hex');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// The reasons of skipped companions are catalog keys (documents.cjs translates them with the `t` option); the tests read the English text.
+const english = require('../electron/i18n.cjs').createTranslator('en');
+// The document readers take the translator as an option (without one the messages are catalogue keys). These checks read the English text.
+const documentsEn = {
+  readDocument: (filename, options = {}) => documents.readDocument(filename, { t: english, ...options }),
+  locateDocuments: (filename, requests, options = {}) => documents.locateDocuments(filename, requests, { t: english, ...options }),
+  exportBundle: (options) => documents.exportBundle({ t: english, ...options }),
+};
 const settle = async (ready, limit = 200) => { for (let attempt = 0; attempt < limit && !ready(); attempt++) await sleep(5); };
 const KEY = 'a'.repeat(64);
 const NOW = '2026-03-04T05:06:07.000Z';
@@ -134,6 +143,14 @@ test('identity.cjs: board key (B32) and platform aware path identity (M01)', asy
     assert.equal(await identity.probeCaseInsensitive('/Vol/Board.cad', stats(new Map([['/Vol/Board.cad', same]]))), false);
     assert.equal(await identity.probeCaseInsensitive('/Vol/Board.cad', stats(new Map([['/Vol/Board.cad', same], ['/Vol/bOARD.CAD', { dev: 1, ino: 78 }]]))), false, 'a different file under the other spelling means case-sensitive');
     assert.equal(await identity.probeCaseInsensitive('/Vol/Board.cad', stats(new Map())), null, 'the file itself is unreadable: undecided');
+    // On POSIX a backslash is a character of a file name, so only the slash separates the directories of a POSIX path (the platform
+    // argument; on Windows both separators do). The default is the host platform, so existing callers keep their behaviour.
+    assert.equal(await identity.probeCaseInsensitive('/Vol/a\\Board.cad', stats(new Map([['/Vol/a\\Board.cad', same], ['/Vol/A\\bOARD.CAD', same]])), 'linux'), true, 'the probe on a POSIX name with a backslash');
+    // Archive entry names: Windows tools write a backslash into a zip, so both separators count on every platform.
+    assert.equal(identity.entryName('dir\\Pins.ASC'), 'pins.asc');
+    assert.equal(identity.entryName('dir/Pins.ASC'), 'pins.asc');
+    // A letter whose upper case is longer (ß becomes SS) has no same-length swap: the probe cannot look the other spelling up, so it is undecided.
+    assert.equal(await identity.probeCaseInsensitive('/Vol/ßoard.cad', stats(new Map([['/Vol/ßoard.cad', same]])), 'linux'), null, 'a swap that changes the length is undecided');
     assert.equal(await identity.probeCaseInsensitive('/Vol/123', stats(new Map([['/Vol/123', same]]))), null, 'no letters to swap: undecided');
     const root = await sandbox(t0, 'probe');
     await fs.writeFile(path.join(root, 'Probe.txt'), 'x');
@@ -393,11 +410,11 @@ test('documents.cjs: content sniffing derives the XML root safely (B34)', async 
       assert.equal(documents.sniffContent(bytes(text)), null, label);
       const file = path.join(root, 'unsafe.sch');
       await fs.writeFile(file, text);
-      await assert.rejects(documents.readDocument(file), { code: 'DOCUMENT_UNSAFE_XML' }, label);
+      await assert.rejects(documentsEn.readDocument(file), { code: 'DOCUMENT_UNSAFE_XML' }, label);
     }
     const svg = path.join(root, 'unsafe.svg');
     await fs.writeFile(svg, '<!DOCTYPE svg [ <!ENTITY e "x"> ]><svg/>');
-    await assert.rejects(documents.readDocument(svg), { code: 'DOCUMENT_UNSAFE_XML' });
+    await assert.rejects(documentsEn.readDocument(svg), { code: 'DOCUMENT_UNSAFE_XML' });
   });
 
   await t0.test('binary signatures, schematic text formats and the PDF header window', () => {
@@ -415,6 +432,42 @@ test('documents.cjs: content sniffing derives the XML root safely (B34)', async 
     assert.equal(documents.sniffContent(Buffer.from('plain text')), null);
     assert.equal(documents.sniffContent(Buffer.alloc(0)), null);
   });
+});
+
+test('documents.cjs: byte-order-marked UTF-16 schematics attach in both byte orders (O-27); UTF-16 SVG stays refused', async (t0) => {
+  // Synthetic text, encoded here in both byte orders: no external file is read.
+  const utf16 = (text, bigEndian) => {
+    const units = Buffer.from(text, 'utf16le');
+    if (bigEndian) for (let at = 0; at + 1 < units.length; at += 2) { const high = units[at]; units[at] = units[at + 1]; units[at + 1] = high; }
+    return Buffer.concat([Buffer.from(bigEndian ? [0xfe, 0xff] : [0xff, 0xfe]), units]);
+  };
+  const root = await sandbox(t0, 'utf16');
+  const cases = [
+    ['KiCad schematic', KICAD_SCH, '.kicad_sch', 'kicad_sch'],
+    ['legacy schematic', LEGACY_SCH, '.sch', 'eeschema'],
+    ['legacy library', LEGACY_LIB, '.lib', 'eeschema-lib'],
+    ['EAGLE schematic', EAGLE, '.sch', 'eagle'],
+  ];
+  for (const bigEndian of [false, true]) {
+    const order = bigEndian ? 'BE' : 'LE';
+    for (const [label, text, extension, format] of cases) {
+      const data = utf16(text, bigEndian);
+      assert.equal(documents.sniffContent(data), format, `${label} ${order}`);
+      const file = path.join(root, `synthetic-${format}-${order}${extension}`);
+      await fs.writeFile(file, data);
+      const document = await documents.readDocument(file);
+      assert.deepEqual([document.kind, document.format, document.size, document.key], ['schematic', format, data.length, sha256(data)], `${label} ${order} attaches`);
+    }
+    // The content must still match the extension: a KiCad schematic is no legacy library.
+    const misnamed = path.join(root, `misnamed-${order}.lib`);
+    await fs.writeFile(misnamed, utf16(KICAD_SCH, bigEndian));
+    await assert.rejects(documents.readDocument(misnamed), { code: 'DOCUMENT_CONTENT_MISMATCH' }, `KiCad under .lib ${order}`);
+    // UTF-16 SVG stays refused: the image viewer reads ASCII-compatible markup only (sniffImage in src/lib/images.ts).
+    assert.equal(documents.sniffContent(utf16(SVG, bigEndian)), null, `UTF-16 SVG ${order}`);
+    const svg = path.join(root, `synthetic-${order}.svg`);
+    await fs.writeFile(svg, utf16(SVG, bigEndian));
+    await assert.rejects(documents.readDocument(svg), { code: 'DOCUMENT_CONTENT_MISMATCH' }, `UTF-16 SVG ${order} refused`);
+  }
 });
 
 test('documents.cjs: readDocument reads bounded, exact and verified (B33)', async (t0) => {
@@ -441,7 +494,7 @@ test('documents.cjs: readDocument reads bounded, exact and verified (B33)', asyn
       ['j.sch', KICAD_SCH, 'schematic', 'kicad_sch'], ['k.lib', LEGACY_LIB, 'schematic', 'eeschema-lib'],
     ]) {
       const filename = await write(name, content);
-      const document = await documents.readDocument(filename);
+      const document = await documentsEn.readDocument(filename);
       assert.deepEqual([document.name, document.kind, document.format, document.size], [name, kind, format, Buffer.from(content).length], name);
       assert.equal(document.path, await fs.realpath(filename));
       assert.equal(document.key, sha256(content));
@@ -454,52 +507,69 @@ test('documents.cjs: readDocument reads bounded, exact and verified (B33)', asyn
   });
 
   await t0.test('the extension must agree with the content, and the kind filter restricts what is accepted', async () => {
-    await assert.rejects(documents.readDocument(await write('fake.png', PDF)), { code: 'DOCUMENT_CONTENT_MISMATCH', message: /PDF/ });
-    await assert.rejects(documents.readDocument(await write('fake.pdf', 'plain text')), { code: 'DOCUMENT_CONTENT_MISMATCH', message: /unrecognized/ });
-    await assert.rejects(documents.readDocument(await write('fake.svg', EAGLE)), { code: 'DOCUMENT_CONTENT_MISMATCH' });
-    await assert.rejects(documents.readDocument(await write('notes.txt', 'x')), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
-    await assert.rejects(documents.readDocument(await write('noext', PDF)), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
-    await assert.rejects(documents.readDocument(await write('board.cad', PDF)), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' }, 'a boardview is not a document');
-    await assert.rejects(documents.readDocument(path.join(root, 'a.pdf'), { kinds: ['image'] }), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
-    assert.equal((await documents.readDocument(path.join(root, 'a.pdf'), { kinds: ['pdf', 'image'] })).kind, 'pdf');
-    assert.equal((await documents.readDocument(path.join(root, 'a.pdf'), { kinds: 'pdf' })).kind, 'pdf');
-    for (const kinds of [[], ['spreadsheet'], 5, ['pdf', 'nope']]) await assert.rejects(documents.readDocument(path.join(root, 'a.pdf'), { kinds }), { code: 'DOCUMENT_INVALID_KIND' }, JSON.stringify(kinds));
-    await assert.rejects(documents.readDocument(await write('eagle.svg', EAGLE), { kinds: ['schematic'] }), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
+    await assert.rejects(documentsEn.readDocument(await write('fake.png', PDF)), { code: 'DOCUMENT_CONTENT_MISMATCH', message: /PDF/ });
+    await assert.rejects(documentsEn.readDocument(await write('fake.pdf', 'plain text')), { code: 'DOCUMENT_CONTENT_MISMATCH', message: /unrecognized/ });
+    await assert.rejects(documentsEn.readDocument(await write('fake.svg', EAGLE)), { code: 'DOCUMENT_CONTENT_MISMATCH' });
+    await assert.rejects(documentsEn.readDocument(await write('notes.txt', 'x')), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
+    await assert.rejects(documentsEn.readDocument(await write('noext', PDF)), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
+    await assert.rejects(documentsEn.readDocument(await write('board.cad', PDF)), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' }, 'a boardview is not a document');
+    await assert.rejects(documentsEn.readDocument(path.join(root, 'a.pdf'), { kinds: ['image'] }), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
+    assert.equal((await documentsEn.readDocument(path.join(root, 'a.pdf'), { kinds: ['pdf', 'image'] })).kind, 'pdf');
+    assert.equal((await documentsEn.readDocument(path.join(root, 'a.pdf'), { kinds: 'pdf' })).kind, 'pdf');
+    for (const kinds of [[], ['spreadsheet'], 5, ['pdf', 'nope']]) await assert.rejects(documentsEn.readDocument(path.join(root, 'a.pdf'), { kinds }), { code: 'DOCUMENT_INVALID_KIND' }, JSON.stringify(kinds));
+    await assert.rejects(documentsEn.readDocument(await write('eagle.svg', EAGLE), { kinds: ['schematic'] }), { code: 'DOCUMENT_UNSUPPORTED_EXTENSION' });
   });
 
   await t0.test('invalid paths, missing and empty files, directories and size limits fail with stable codes', async () => {
     for (const bad of ['relative.pdf', '../a.pdf', '', 5, undefined, '\\\\server\\share\\a.pdf', '//server/share/a.pdf', `${root}${path.sep}a.pdf\0`]) {
-      await assert.rejects(documents.readDocument(bad), { code: 'DOCUMENT_INVALID_PATH' }, String(bad));
+      await assert.rejects(documentsEn.readDocument(bad), { code: 'DOCUMENT_INVALID_PATH' }, String(bad));
     }
-    await assert.rejects(documents.readDocument(path.join(root, 'absent.pdf')), { code: 'DOCUMENT_NOT_FOUND' });
-    await assert.rejects(documents.readDocument(await write('empty.pdf', '')), { code: 'DOCUMENT_EMPTY' });
+    await assert.rejects(documentsEn.readDocument(path.join(root, 'absent.pdf')), { code: 'DOCUMENT_NOT_FOUND' });
+    await assert.rejects(documentsEn.readDocument(await write('empty.pdf', '')), { code: 'DOCUMENT_EMPTY' });
     await fs.mkdir(path.join(root, 'folder.pdf'));
-    await assert.rejects(documents.readDocument(path.join(root, 'folder.pdf')), { code: 'DOCUMENT_NOT_A_FILE' });
-    await assert.rejects(documents.readDocument(path.join(root, 'a.pdf'), { maxBytes: PDF.length - 1 }), { code: 'DOCUMENT_TOO_LARGE' });
-    assert.equal((await documents.readDocument(path.join(root, 'a.pdf'), { maxBytes: PDF.length })).size, PDF.length, 'exactly the limit is allowed');
-    for (const maxBytes of [0, -1, 1.5, '5']) await assert.rejects(documents.readDocument(path.join(root, 'a.pdf'), { maxBytes }), { code: 'DOCUMENT_INVALID_OPTIONS' });
+    await assert.rejects(documentsEn.readDocument(path.join(root, 'folder.pdf')), { code: 'DOCUMENT_NOT_A_FILE' });
+    await assert.rejects(documentsEn.readDocument(path.join(root, 'a.pdf'), { maxBytes: PDF.length - 1 }), { code: 'DOCUMENT_TOO_LARGE' });
+    assert.equal((await documentsEn.readDocument(path.join(root, 'a.pdf'), { maxBytes: PDF.length })).size, PDF.length, 'exactly the limit is allowed');
+    for (const maxBytes of [0, -1, 1.5, '5']) await assert.rejects(documentsEn.readDocument(path.join(root, 'a.pdf'), { maxBytes }), { code: 'DOCUMENT_INVALID_OPTIONS' });
+  });
+
+  await t0.test('O-07 / O-30: a document another program holds (EBUSY) and a network location have their own texts; a permission refusal keeps its own', async () => {
+    const tr = (key) => i18n.translate('en', key);
+    const filename = await write('held.pdf', PDF);
+    // The open is refused the way Windows refuses a held file: EBUSY (sharing violation) or EPERM (access denied).
+    const refusing = (code) => new Proxy(fs, { get(source, property) {
+      if (property !== 'open') return source[property];
+      return async () => { throw Object.assign(new Error(`${code}: simulated`), { code }); };
+    } });
+    await assert.rejects(documents.readDocument(filename, { fs: refusing('EBUSY'), t: tr }), { code: 'DOCUMENT_IN_USE', message: tr('native.error.fileInUse') });
+    await assert.rejects(documents.readDocument(filename, { fs: refusing('EPERM'), t: tr }), { code: 'DOCUMENT_NOT_READABLE' });
+    assert.equal((await documents.readDocument(filename, { t: tr })).size, PDF.length, 'the same document reads once it is free');
+    for (const network of ['\\\\server\\share\\a.pdf', '//server/share/a.pdf']) {
+      await assert.rejects(documents.readDocument(network, { t: tr }), { code: 'DOCUMENT_INVALID_PATH', message: tr('native.error.networkPathUnsupported') }, network);
+    }
+    await assert.rejects(documents.readDocument('\\\\?\\C:\\a.pdf', { t: tr }), { code: 'DOCUMENT_INVALID_PATH', message: tr('native.error.invalidPath') }, 'a device prefix is not a network location');
   });
 
   await t0.test('B33: a file that shrank after stat() is DOCUMENT_CHANGED, never a truncated payload; growth is caught too', async () => {
     const filename = await write('shrunk.sch', `${LEGACY_SCH}${'#'.repeat(60)}\n`); // 93-byte class fixture
     const real = (await fs.stat(filename)).size;
     // stat() ran when the file was longer: fewer bytes than announced came back.
-    await assert.rejects(documents.readDocument(filename, { fs: lyingFs(filename, real + 59) }), { code: 'DOCUMENT_CHANGED' });
-    await assert.rejects(documents.readDocument(filename, { fs: lyingFs(filename, real + 1) }), { code: 'DOCUMENT_CHANGED' });
+    await assert.rejects(documentsEn.readDocument(filename, { fs: lyingFs(filename, real + 59) }), { code: 'DOCUMENT_CHANGED' });
+    await assert.rejects(documentsEn.readDocument(filename, { fs: lyingFs(filename, real + 1) }), { code: 'DOCUMENT_CHANGED' });
     // stat() ran when the file was shorter: more bytes than announced exist.
-    await assert.rejects(documents.readDocument(filename, { fs: lyingFs(filename, real - 1) }), { code: 'DOCUMENT_CHANGED' });
-    await assert.rejects(documents.readDocument(filename, { fs: lyingFs(filename, 34) }), { code: 'DOCUMENT_CHANGED' });
-    assert.equal((await documents.readDocument(filename, { fs: lyingFs(filename, real) })).size, real, 'an honest stat() reads normally');
+    await assert.rejects(documentsEn.readDocument(filename, { fs: lyingFs(filename, real - 1) }), { code: 'DOCUMENT_CHANGED' });
+    await assert.rejects(documentsEn.readDocument(filename, { fs: lyingFs(filename, 34) }), { code: 'DOCUMENT_CHANGED' });
+    assert.equal((await documentsEn.readDocument(filename, { fs: lyingFs(filename, real) })).size, real, 'an honest stat() reads normally');
   });
 
   await t0.test('the read budget is acquired for the file size and returned afterwards, also on failure', async () => {
     const budget = createByteBudget(1024 * 1024);
     const seen = [];
     const spy = { acquire: async (bytes, check) => { seen.push([bytes, budget.inFlight]); return budget.acquire(bytes, check); } };
-    await documents.readDocument(path.join(root, 'a.pdf'), { budget: spy });
+    await documentsEn.readDocument(path.join(root, 'a.pdf'), { budget: spy });
     assert.deepEqual(seen, [[PDF.length, 0]]);
     assert.equal(budget.inFlight, 0);
-    await assert.rejects(documents.readDocument(path.join(root, 'fake.png'), { budget: spy }), { code: 'DOCUMENT_CONTENT_MISMATCH' });
+    await assert.rejects(documentsEn.readDocument(path.join(root, 'fake.png'), { budget: spy }), { code: 'DOCUMENT_CONTENT_MISMATCH' });
     assert.equal(budget.inFlight, 0, 'released although the content check failed');
   });
 });
@@ -544,7 +614,7 @@ test('documents.cjs: readSelection bounds the count, the bytes and the schematic
     await write('readme.txt', 'ignored', project);
     await write('drawing.pdf', PDF, project);
     await fs.mkdir(path.join(project, 'folder.sch'));
-    const [payload] = await documents.readSelection([main]);
+    const [payload] = await documents.readSelection([main], { t: english });
     assert.equal(payload.kind, 'schematic');
     assert.deepEqual(Object.keys(payload.companions).sort(), ['legacy.sch', 'parts.lib', 'sub.kicad_sch'], 'lowercase basenames; the selected file is not its own companion');
     assert.ok(Buffer.from(payload.companions['sub.kicad_sch']).toString().includes('sub'));
@@ -560,7 +630,7 @@ test('documents.cjs: readSelection bounds the count, the bytes and the schematic
     await fs.mkdir(crowded);
     const main = await write('a-main.kicad_sch', KICAD_SCH, crowded);
     for (let index = 0; index < 40; index++) await write(`s${String(index).padStart(2, '0')}.sch`, LEGACY_SCH, crowded);
-    const [payload] = await documents.readSelection([main]);
+    const [payload] = await documents.readSelection([main], { t: english });
     assert.equal(Object.keys(payload.companions).length, 32, 'at most 32 companion files');
     assert.ok(payload.skipped.some((item) => item.reason === 'file limit reached'));
     assert.ok(payload.skipped.length <= 65, 'the skipped list is bounded');
@@ -592,7 +662,318 @@ test('documents.cjs: readSelection bounds the count, the bytes and the schematic
 });
 
 // ---------------------------------------------------------------------------------------------
+// documents.cjs: schematic companion names (gatherCompanions) follow the policy whatever the order of the listing. The listing is
+// fake, and each file's bytes name the file they came from, so a wrong attribution shows in the output. Simulated case-sensitive
+// (darwin) names; nothing is written to disk.
+test('documents.cjs: schematic companion names follow the policy whatever the listing order', async (t0) => {
+  const folder = path.resolve('synthetic-schematic-folder');
+  const listingFs = (entries) => ({
+    realpath: async (value) => value,
+    readdir: async () => entries.map((entry) => ({ name: entry.name, isDirectory: () => Boolean(entry.dir) })),
+    open: async (value) => {
+      const data = Buffer.from(`${path.basename(value)} bytes`);
+      return {
+        stat: async () => ({ isFile: () => true, size: data.length }),
+        read: async (buffer, offset, length, position) => {
+          const count = Math.max(0, Math.min(length, data.length - position));
+          data.copy(buffer, offset, position, position + count);
+          return { bytesRead: count, buffer };
+        },
+        close: async () => {},
+      };
+    },
+  });
+  const gather = (entries, primary = 'main.kicad_sch') => documents.gatherCompanions(path.join(folder, primary), {
+    fs: listingFs(entries), extensions: ['.lib', '.sch', '.kicad_sch'], platform: 'darwin', t: english,
+  });
+  const contentsOf = (result) => Object.fromEntries(Object.entries(result.files).map(([key, value]) => [key, Buffer.from(value).toString('utf8')]));
+  const skippedOf = (result) => result.skipped.map((item) => `${item.name}:${item.reason}`).sort();
+  const orders = (entries) => [entries, [...entries].reverse(), [...entries.slice(1), entries[0]], [...entries.slice(2), ...entries.slice(0, 2)]];
+
+  await t0.test('an exact lower-case name wins over its case variants, in every listing order', async () => {
+    for (const listing of orders([{ name: 'X.LIB' }, { name: 'x.lib' }, { name: 'x.Lib' }])) {
+      const result = await gather(listing);
+      assert.deepEqual(contentsOf(result), { 'x.lib': 'x.lib bytes' });
+      assert.deepEqual(skippedOf(result), ['X.LIB:duplicate name', 'x.Lib:duplicate name']);
+    }
+  });
+
+  await t0.test('a unique case variant is still accepted as the companion, under the lower-case name', async () => {
+    for (const listing of orders([{ name: 'Y.Lib' }, { name: 'other.txt' }])) {
+      const result = await gather(listing);
+      assert.deepEqual(contentsOf(result), { 'y.lib': 'Y.Lib bytes' });
+      assert.deepEqual(skippedOf(result), []);
+    }
+  });
+
+  await t0.test('several case variants with no exact name: none is chosen, and no bytes are attributed to the name', async () => {
+    for (const listing of orders([{ name: 'Z.LIB' }, { name: 'z.Lib' }])) {
+      const result = await gather(listing);
+      assert.deepEqual(contentsOf(result), {});
+      assert.equal('z.lib' in result.files, false);
+      assert.deepEqual(skippedOf(result), ['Z.LIB:duplicate name', 'z.Lib:duplicate name']);
+    }
+  });
+
+  await t0.test('an exact name that is a directory still wins: its case variant is not a companion', async () => {
+    for (const listing of orders([{ name: 'x.lib', dir: true }, { name: 'X.LIB' }])) {
+      const result = await gather(listing);
+      assert.deepEqual(contentsOf(result), {});
+      assert.deepEqual(skippedOf(result), ['X.LIB:duplicate name', 'x.lib:not a file']);
+    }
+  });
+
+  await t0.test('the selected file is never its own companion and is never reported, even with case variants of its name', async () => {
+    const primaryOnly = await gather([{ name: 'Main.kicad_sch' }, { name: 'MAIN.KICAD_SCH' }], 'Main.kicad_sch');
+    assert.deepEqual(contentsOf(primaryOnly), {});
+    assert.deepEqual(skippedOf(primaryOnly), ['MAIN.KICAD_SCH:duplicate name']);
+    const exactPrimary = await gather([{ name: 'main.kicad_sch' }, { name: 'MAIN.KICAD_SCH' }], 'main.kicad_sch');
+    assert.deepEqual(contentsOf(exactPrimary), {});
+    assert.deepEqual(skippedOf(exactPrimary), ['MAIN.KICAD_SCH:duplicate name']);
+  });
+
+  await t0.test('skipped entries carry the file name only, never the folder or a path', async () => {
+    const result = await documents.gatherCompanions(path.join(path.resolve('Private Client Folder QZX7'), 'main.kicad_sch'), {
+      fs: listingFs([{ name: 'Z.LIB' }, { name: 'z.Lib' }]), extensions: ['.lib'], platform: 'darwin',
+    });
+    assert.ok(result.skipped.length === 2);
+    for (const item of result.skipped) assert.deepEqual(Object.keys(item).sort(), ['name', 'reason']);
+    // readSelection forwards only the companion names and the skipped entries; the folder never leaves documents.cjs.
+    assert.doesNotMatch(JSON.stringify({ companions: Object.keys(result.files), skipped: result.skipped }), /Private Client Folder|QZX7|synthetic-schematic/);
+  });
+
+  await t0.test('the selected file is skipped by name when realpath returns the disk spelling of the typed name', async () => {
+    const diskSpelling = { ...listingFs([{ name: 'Main.kicad_sch' }]), realpath: async () => path.join(folder, 'Main.kicad_sch') };
+    const result = await documents.gatherCompanions(path.join(folder, 'main.kicad_sch'), {
+      fs: diskSpelling, extensions: ['.kicad_sch'], platform: 'darwin',
+    });
+    assert.deepEqual(contentsOf(result), {});
+    assert.deepEqual(skippedOf(result), []);
+  });
+
+  // Cap: the skipped reasons are bounded, but the choice is not. Many rejected variants sort before the companions below, so the companions
+  // must still be chosen and read, and the reasons must stay the same whatever the listing order.
+  const variantsOf = (name, count) => {
+    const dot = name.lastIndexOf('.');
+    const stem = name.slice(0, dot);
+    const variants = [];
+    for (let mask = 0; variants.length < count; mask++) {
+      // The first letter is always upper case, so no spelling here is the lower-case name, and each mask spells a different name.
+      const spelled = [...stem].map((letter, index) => (index === 0 || ((mask >> (index - 1)) & 1) ? letter.toUpperCase() : letter)).join('');
+      variants.push({ name: spelled + name.slice(dot) });
+    }
+    return variants;
+  };
+
+  await t0.test('an exact lower-case companion is kept even when many case variants sort before it', async () => {
+    const result = await gather([...variantsOf('abcdefghijkl.lib', 70), { name: 'abcdefghijkl.lib' }]);
+    assert.deepEqual(contentsOf(result), { 'abcdefghijkl.lib': 'abcdefghijkl.lib bytes' });
+    assert.equal(result.skipped.length, 65, 'the first 64 rejected variants are reported, then one overflow marker');
+    assert.deepEqual(result.skipped[64], { name: '…', reason: 'more files were skipped' });
+  });
+
+  await t0.test('a unique companion sorted after many rejected variants is still read, in every listing order', async () => {
+    for (const listing of orders([...variantsOf('abcdefghijkl.lib', 70), { name: 'mno.sch' }])) {
+      const result = await gather(listing);
+      assert.deepEqual(contentsOf(result), { 'mno.sch': 'mno.sch bytes' });
+    }
+  });
+
+  await t0.test('the chosen companions and the diagnostics are the same in every listing order, with many rejected variants', async () => {
+    const listing = [...variantsOf('abcdefghijkl.lib', 70), { name: 'abcdefghijkl.lib' }, { name: 'mno.sch' }, { name: 'Zed.sch' }];
+    const first = await gather(listing);
+    assert.deepEqual(contentsOf(first), { 'abcdefghijkl.lib': 'abcdefghijkl.lib bytes', 'mno.sch': 'mno.sch bytes', 'zed.sch': 'Zed.sch bytes' });
+    for (const order of orders(listing)) {
+      const result = await gather(order);
+      assert.deepEqual(contentsOf(result), contentsOf(first));
+      assert.deepEqual(result.skipped, first.skipped, 'the diagnostics keep the same order');
+    }
+  });
+
+  await t0.test('the diagnostics stay bounded: 300 rejected variants give 64 reasons and one overflow marker', async () => {
+    const result = await gather(variantsOf('abcdefghijkl.lib', 300));
+    assert.equal(result.skipped.length, 65);
+    assert.deepEqual(result.skipped.slice(0, 64).map((item) => item.reason), Array(64).fill('duplicate name'));
+    assert.deepEqual(result.skipped[64], { name: '…', reason: 'more files were skipped' });
+    assert.deepEqual(contentsOf(result), {});
+  });
+
+  await t0.test('contract control: no overflow marker when the rejected variants fit within the diagnostic bound', async () => {
+    const result = await gather([...variantsOf('abcdefghijkl.lib', 10), { name: 'abcdefghijkl.lib' }]);
+    assert.deepEqual(contentsOf(result), { 'abcdefghijkl.lib': 'abcdefghijkl.lib bytes' });
+    assert.equal(result.skipped.length, 10);
+    assert.equal(result.skipped.some((item) => item.name === '…'), false);
+  });
+
+  await t0.test('contract control: a directory that case-varies a file name is a variant, as in the board rule, so the file is a duplicate name', async () => {
+    for (const listing of orders([{ name: 'X.LIB', dir: true }, { name: 'x.Lib' }])) {
+      const result = await gather(listing);
+      assert.deepEqual(contentsOf(result), {});
+      assert.deepEqual(skippedOf(result), ['X.LIB:duplicate name', 'x.Lib:duplicate name']);
+    }
+  });
+
+  // The companion limit that readSelection uses (32). The selected file is listed under its disk spelling, while the path it was opened
+  // with stays lower case. On win32 (case-folded paths) it matches the selected file only by its alias, not by name.
+  const companionsOf = (count) => Array.from({ length: count }, (_, index) => ({ name: `A${String(index).padStart(2, '0')}.lib` }));
+  const limited = (entries, platform) => documents.gatherCompanions(path.join(folder, 'main.kicad_sch'), {
+    fs: listingFs(entries), extensions: ['.lib', '.sch', '.kicad_sch'], platform, maxFiles: 32, t: english,
+  });
+
+  await t0.test('contract control: exactly 32 companions at the limit are all kept, with no skipped entry', async () => {
+    const result = await limited(companionsOf(32), 'win32');
+    assert.equal(Object.keys(result.files).length, 32);
+    assert.deepEqual(skippedOf(result), []);
+  });
+
+  await t0.test('after the companion limit, the selected file found by its case-folded alias is skipped silently (win32)', async () => {
+    const result = await limited([...companionsOf(32), { name: 'Main.kicad_sch' }], 'win32');
+    assert.equal(Object.keys(result.files).length, 32);
+    assert.deepEqual(skippedOf(result), [], 'the selected file is not a companion, so it is not a limit warning');
+  });
+
+  await t0.test('contract control: a real 33rd companion after the limit is reported as file limit reached', async () => {
+    const result = await limited(companionsOf(33), 'win32');
+    assert.equal(Object.keys(result.files).length, 32);
+    assert.deepEqual(skippedOf(result), ['A32.lib:file limit reached']);
+  });
+
+  await t0.test('after the companion limit, the alias of the selected file is silent while a real 33rd companion is still reported (win32)', async () => {
+    const result = await limited([...companionsOf(33), { name: 'Main.kicad_sch' }], 'win32');
+    assert.equal(Object.keys(result.files).length, 32);
+    assert.deepEqual(skippedOf(result), ['A32.lib:file limit reached']);
+  });
+
+  await t0.test('contract control: the selected file by its exact lower-case name is silent after the limit (darwin)', async () => {
+    const result = await limited([...companionsOf(32), { name: 'main.kicad_sch' }], 'darwin');
+    assert.equal(Object.keys(result.files).length, 32);
+    assert.deepEqual(skippedOf(result), []);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// documents.cjs: companions on a case-sensitive volume (simulated linux listing; nothing is written to disk)
+// ---------------------------------------------------------------------------------------------
+
+test('documents.cjs: companions on a case-sensitive volume keep both spellings of a name apart (O-36, simulated linux)', async (t0) => {
+  const folder = path.resolve('synthetic-schematic-folder');
+  const listingFs = (entries) => ({
+    realpath: async (value) => value,
+    readdir: async () => entries.map((entry) => ({ name: entry.name, isDirectory: () => false })),
+    open: async (value) => {
+      const data = Buffer.from(`${path.basename(value)} bytes`);
+      return {
+        stat: async () => ({ isFile: () => true, size: data.length }),
+        read: async (buffer, offset, length, position) => {
+          const count = Math.max(0, Math.min(length, data.length - position));
+          data.copy(buffer, offset, position, position + count);
+          return { bytesRead: count, buffer };
+        },
+        close: async () => {},
+      };
+    },
+  });
+  const gather = (entries, primary) => documents.gatherCompanions(path.join(folder, primary), {
+    fs: listingFs(entries), extensions: ['.schdoc'], platform: 'linux', t: english,
+  });
+  const contentsOf = (result) => Object.fromEntries(Object.entries(result.files).map(([key, value]) => [key, Buffer.from(value).toString('utf8')]));
+  const skippedOf = (result) => result.skipped.map((item) => `${item.name}:${item.reason}`).sort();
+
+  await t0.test('the exact lower-case sibling is the companion of an upper-case primary, and it is not reported as a duplicate', async () => {
+    const result = await gather([{ name: 'Page1.SchDoc' }, { name: 'page1.schdoc' }], 'Page1.SchDoc');
+    assert.deepEqual(contentsOf(result), { 'page1.schdoc': 'page1.schdoc bytes' });
+    assert.deepEqual(skippedOf(result), []);
+  });
+
+  await t0.test('the other way round: the upper-case spelling beside a lower-case primary is a duplicate name, reported and not attributed', async () => {
+    const result = await gather([{ name: 'Page1.SchDoc' }, { name: 'page1.schdoc' }], 'page1.schdoc');
+    assert.deepEqual(contentsOf(result), {});
+    assert.deepEqual(skippedOf(result), ['Page1.SchDoc:duplicate name']);
+  });
+});
+
+test('documents.cjs: a companion is the selected file when both name one inode, on folding and normalising volumes (U-18, U-19; simulated)', async (t0) => {
+  const folder = path.resolve('synthetic-schematic-folder');
+  // A simulated volume: names it treats as one name share one inode. `fold` ignores case (APFS by default, NTFS); `normalize` ignores
+  // Unicode normalisation (APFS by default). A case-sensitive Linux volume ignores neither, so its two spellings are two files.
+  const volume = (entries, { fold = false, normalize = false } = {}) => {
+    const keyOf = (name) => {
+      const normal = normalize ? name.normalize('NFC') : name;
+      return fold ? normal.toLowerCase() : normal;
+    };
+    const inodes = new Map();
+    const inodeOf = (filename) => {
+      const key = keyOf(path.basename(filename));
+      if (!inodes.has(key)) inodes.set(key, inodes.size + 1);
+      return inodes.get(key);
+    };
+    return {
+      realpath: async (value) => value,
+      readdir: async () => entries.map((entry) => ({ name: entry.name, isDirectory: () => false })),
+      stat: async (value) => ({ dev: 7, ino: inodeOf(value), isFile: () => true, size: 0 }),
+      open: async (value) => {
+        const data = Buffer.from(`${path.basename(value)} bytes`);
+        return {
+          stat: async () => ({ isFile: () => true, size: data.length }),
+          read: async (buffer, offset, length, position) => {
+            const count = Math.max(0, Math.min(length, data.length - position));
+            data.copy(buffer, offset, position, position + count);
+            return { bytesRead: count, buffer };
+          },
+          close: async () => {},
+        };
+      },
+    };
+  };
+  const gather = (fs, primary, platform) => documents.gatherCompanions(path.join(folder, primary), { fs, extensions: ['.kicad_sch', '.lib'], platform });
+  const contentsOf = (result) => Object.fromEntries(Object.entries(result.files).map(([key, value]) => [key, Buffer.from(value).toString('utf8')]));
+  const skippedOf = (result) => result.skipped.map((item) => `${item.name}:${item.reason}`).sort();
+  const NFC = 'é';
+  const NFD = 'é';
+
+  await t0.test('APFS folds case: a primary typed in lower case is not its own companion when the listing spells it in capitals', async () => {
+    const result = await gather(volume([{ name: 'Main.kicad_sch' }], { fold: true }), 'main.kicad_sch', 'darwin');
+    assert.deepEqual(contentsOf(result), {});
+    assert.deepEqual(skippedOf(result), []);
+  });
+
+  await t0.test('APFS normalises Unicode: a primary typed in NFC is not its own companion when the listing spells it in NFD', async () => {
+    const result = await gather(volume([{ name: `${NFD}.kicad_sch` }], { normalize: true }), `${NFC}.kicad_sch`, 'darwin');
+    assert.deepEqual(contentsOf(result), {});
+    assert.deepEqual(skippedOf(result), []);
+  });
+
+  await t0.test('contract control: on a case-sensitive volume a lower-case sibling is a distinct file, so it is the companion', async () => {
+    const result = await gather(volume([{ name: 'Main.kicad_sch' }, { name: 'main.kicad_sch' }]), 'Main.kicad_sch', 'linux');
+    assert.deepEqual(contentsOf(result), { 'main.kicad_sch': 'main.kicad_sch bytes' });
+    assert.deepEqual(skippedOf(result), []);
+  });
+
+  await t0.test('characterisation (U-19, current policy: names compare as stored): on a normalisation-sensitive volume the NFD sibling is a distinct companion under its stored spelling', async () => {
+    const result = await gather(volume([{ name: `${NFC}.kicad_sch` }, { name: `${NFD}.kicad_sch` }]), `${NFC}.kicad_sch`, 'linux');
+    assert.deepEqual(Object.keys(result.files), [`${NFD}.kicad_sch`]);
+    assert.deepEqual(skippedOf(result), []);
+  });
+});
+
+test('documents.cjs: a stored relative path keeps a backslash inside a POSIX name, and Windows paths still split on both separators (O-37)', () => {
+  // The stored form is '/'-separated. On POSIX a backslash is an ordinary character of a name; on Windows it is a separator too.
+  assert.deepEqual(documents.relativeSegments('sub/a\\b.kicad_sch', 'linux'), ['sub', 'a\\b.kicad_sch']);
+  assert.deepEqual(documents.relativeSegments('a\\b.kicad_sch', 'darwin'), ['a\\b.kicad_sch']);
+  assert.deepEqual(documents.relativeSegments('\\abs.kicad_sch', 'linux'), ['\\abs.kicad_sch'], 'a leading backslash is a name character on POSIX');
+  assert.deepEqual(documents.relativeSegments('sub\\a.kicad_sch', 'win32'), ['sub', 'a.kicad_sch']);
+  assert.deepEqual(documents.relativeSegments('sub/a.kicad_sch', 'win32'), ['sub', 'a.kicad_sch']);
+  // Traversal, absolute and drive-relative paths are refused on every platform.
+  assert.equal(documents.relativeSegments('sub/../a.kicad_sch', 'linux'), null);
+  assert.equal(documents.relativeSegments('/etc/a.kicad_sch', 'linux'), null);
+  assert.equal(documents.relativeSegments('sub\\..\\a.kicad_sch', 'win32'), null);
+  assert.equal(documents.relativeSegments('\\\\server\\share\\a.kicad_sch', 'win32'), null);
+  assert.equal(documents.relativeSegments('C:a.kicad_sch', 'win32'), null);
+});
+
+// ---------------------------------------------------------------------------------------------
 // documents.cjs: locating remembered documents
+// ---------------------------------------------------------------------------------------------
 // ---------------------------------------------------------------------------------------------
 test('documents.cjs: locateDocuments finds remembered documents by path, then by relative path, and verifies SHA-256', async (t0) => {
   const root = await sandbox(t0, 'locate');
@@ -602,7 +983,7 @@ test('documents.cjs: locateDocuments finds remembered documents by path, then by
   await fs.writeFile(boardFile, 'board bytes');
   const write = async (relative, content) => { const filename = path.join(boardDir, ...relative.split('/')); await fs.mkdir(path.dirname(filename), { recursive: true }); await fs.writeFile(filename, content); return filename; };
   const request = (id, patch = {}) => ({ id, kind: 'pdf', path: path.join(boardDir, 'docs', 'ref.pdf'), key: sha256(PDF), ...patch });
-  const locate = (requests, options) => documents.locateDocuments(boardFile, requests, options);
+  const locate = (requests, options) => documentsEn.locateDocuments(boardFile, requests, options);
   const refPdf = await write('docs/ref.pdf', PDF);
 
   await t0.test('ok: the file is at its absolute path with the remembered bytes (relative path is reported for portability)', async () => {
@@ -623,11 +1004,11 @@ test('documents.cjs: locateDocuments finds remembered documents by path, then by
   await t0.test('moved also works when the whole project folder was relocated: the board is opened from its new place', async () => {
     const copy = path.join(root, 'relocated');
     await fs.cp(boardDir, copy, { recursive: true });
-    const [result] = await documents.locateDocuments(path.join(copy, 'Board.cad'), [request('three', { relativePath: 'docs/ref.pdf' })]);
+    const [result] = await documentsEn.locateDocuments(path.join(copy, 'Board.cad'), [request('three', { relativePath: 'docs/ref.pdf' })]);
     assert.equal(result.status, 'ok', 'the old absolute path still exists and still holds the bytes');
     await fs.rm(boardDir, { recursive: true });
     await fs.cp(copy, boardDir, { recursive: true });
-    const [moved] = await documents.locateDocuments(path.join(copy, 'Board.cad'), [request('four', { relativePath: 'docs/ref.pdf', path: path.join(root, 'gone', 'ref.pdf') })]);
+    const [moved] = await documentsEn.locateDocuments(path.join(copy, 'Board.cad'), [request('four', { relativePath: 'docs/ref.pdf', path: path.join(root, 'gone', 'ref.pdf') })]);
     assert.equal(moved.status, 'moved');
     assert.equal(moved.path, await fs.realpath(path.join(copy, 'docs', 'ref.pdf')));
   });
@@ -653,7 +1034,7 @@ test('documents.cjs: locateDocuments finds remembered documents by path, then by
     assert.equal(directory.status, 'unreadable');
     const [wrongKind] = await locate([request('ten', { kind: 'image' })]);
     assert.equal(wrongKind.status, 'unreadable', 'a PDF is not an image document');
-    assert.match(wrongKind.message, /image/);
+    assert.match(wrongKind.message, /does not belong to this kind of document/);
     const huge = await write('docs/huge.pdf', '');
     await fs.truncate(huge, 64 * 1024 * 1024 + 1);
     const [oversized] = await locate([request('eleven', { path: huge })]);
@@ -688,13 +1069,13 @@ test('documents.cjs: locateDocuments finds remembered documents by path, then by
 
   await t0.test('the board path is validated; results keep the request order', async () => {
     for (const bad of ['relative/Board.cad', '', 5, undefined, '\\\\server\\share\\Board.cad', path.join(boardDir, 'Board.unsupported'), `${boardFile}\0`]) {
-      await assert.rejects(documents.locateDocuments(bad, [request('x')]), (error) => /^DOCUMENT_INVALID_PATH$/.test(error.code), String(bad));
+      await assert.rejects(documentsEn.locateDocuments(bad, [request('x')]), (error) => /^DOCUMENT_INVALID_PATH$/.test(error.code), String(bad));
     }
     const results = await locate([request('b', { path: path.join(boardDir, 'nowhere.pdf') }), request('a'), request('c', { key: sha256('other') })]);
     assert.deepEqual(results.map((result) => [result.id, result.status]), [['b', 'missing'], ['a', 'ok'], ['c', 'changed']]);
     assert.deepEqual(await locate([]), []);
     // The board directory may be gone: absolute candidates still work.
-    const [onlyAbsolute] = await documents.locateDocuments(path.join(root, 'vanished', 'Board.cad'), [request('abs', { relativePath: 'docs/ref.pdf' })]);
+    const [onlyAbsolute] = await documentsEn.locateDocuments(path.join(root, 'vanished', 'Board.cad'), [request('abs', { relativePath: 'docs/ref.pdf' })]);
     assert.equal(onlyAbsolute.status, 'ok');
     assert.equal('relativePath' in onlyAbsolute, false);
   });
@@ -780,6 +1161,83 @@ test('documents.cjs: locateDocuments finds remembered documents by path, then by
 // ---------------------------------------------------------------------------------------------
 // documents.cjs: workspace export bundle
 // ---------------------------------------------------------------------------------------------
+// The simulated volumes of the locate tests: a folder whose names are compared by the rules of the volume. Unicode normalisation and letter
+// case are the two rules that differ between volumes; realpath answers with the spelling stored on the volume, as a volume does.
+function simulatedVolume(files, { directories = [], normalises = false, folds = false } = {}) {
+  const fold = (value) => { const text = normalises ? value.normalize('NFC') : value; return folds ? text.toLowerCase() : text; };
+  const notFound = () => Object.assign(new Error('no such file'), { code: 'ENOENT' });
+  const stored = new Map(Object.entries(files).map(([filename, bytes]) => [fold(path.normalize(filename)), { filename: path.normalize(filename), bytes: Buffer.from(bytes) }]));
+  const folders = new Map(directories.map((dir) => [fold(path.normalize(dir)), path.normalize(dir)]));
+  const entry = (filename) => {
+    const hit = stored.get(fold(path.normalize(filename)));
+    if (!hit) throw notFound();
+    return hit;
+  };
+  return {
+    async realpath(filename) {
+      const folder = folders.get(fold(path.normalize(filename)));
+      return folder !== undefined ? folder : entry(filename).filename;
+    },
+    async open(filename) {
+      const hit = entry(filename);
+      return {
+        async stat() { return { isFile: () => true, size: hit.bytes.length }; },
+        async read(buffer, offset, length, position) {
+          const bytesRead = Math.max(0, Math.min(length, hit.bytes.length - position));
+          hit.bytes.copy(buffer, offset, position, position + bytesRead);
+          return { bytesRead };
+        },
+        async close() {},
+      };
+    },
+  };
+}
+
+test('documents.cjs: locateDocuments on simulated volumes: a Unicode spelling and the letter case follow the volume (TB-080, TB-324)', async () => {
+  const vol = path.resolve('locate-volume');
+  const nfc = 'Résumé.pdf', nfd = 'Résumé.pdf';
+  const board = path.join(vol, 'Board.cad');
+  const stored = { [path.join(vol, 'docs', nfc)]: PDF, [path.join(vol, 'docs', 'guide.pdf')]: PDF };
+  const directories = [vol, path.join(vol, 'docs')];
+  const normalising = simulatedVolume(stored, { directories, normalises: true, folds: true });
+  const strict = simulatedVolume(stored, { directories });
+  const request = (id, patch = {}) => ({ id, kind: 'pdf', path: path.join(vol, 'gone', 'x.pdf'), key: sha256(PDF), ...patch });
+  const locate = (requests, volume) => documentsEn.locateDocuments(board, requests, { fs: volume });
+
+  // The stored name is NFC; the request spells it NFD. A normalising volume holds one file under both spellings; a strict one holds none.
+  const [spelled] = await locate([request('nfd', { path: path.join(vol, 'docs', nfd) })], normalising);
+  assert.equal(spelled.status, 'ok', 'a normalising volume finds the NFD spelling');
+  assert.equal(spelled.path, path.join(vol, 'docs', nfc), 'the spelling stored on the volume is reported');
+  assert.equal(spelled.relativePath, `docs/${nfc}`);
+  assert.deepEqual(await locate([request('nfd', { path: path.join(vol, 'docs', nfd) })], strict), [{ id: 'nfd', status: 'missing' }]);
+  const [moved] = await locate([request('rel', { relativePath: `docs/${nfd}` })], normalising);
+  assert.equal(moved.status, 'moved', 'the relative path is looked up by the same rule');
+  assert.equal(moved.path, path.join(vol, 'docs', nfc));
+  assert.deepEqual(await locate([request('rel', { relativePath: `docs/${nfd}` })], strict), [{ id: 'rel', status: 'missing' }]);
+
+  // The request spells the stored file in capitals.
+  const [cased] = await locate([request('case', { path: path.join(vol, 'docs', 'GUIDE.PDF') })], normalising);
+  assert.equal(cased.status, 'ok', 'a case-folding volume finds the file in other letter case');
+  assert.equal(cased.path, path.join(vol, 'docs', 'guide.pdf'));
+  assert.deepEqual(await locate([request('case', { path: path.join(vol, 'docs', 'GUIDE.PDF') })], strict), [{ id: 'case', status: 'missing' }]);
+});
+
+// MAC-TEST-20261011-03: a backslash is a separator on win32 only. A POSIX document named a\b.pdf is stored with its relative path and found
+// again beside the board after the board moved. The win32 reading of the same stored path is the two folders a and b.pdf, as before.
+test('documents.cjs: a backslash is part of a POSIX relative path and a separator on win32 (MAC-TEST-20261011-03)', async () => {
+  assert.deepEqual(documents.relativeSegments('a\\b.pdf', 'darwin'), ['a\\b.pdf']);
+  assert.deepEqual(documents.relativeSegments('a\\b.pdf', 'linux'), ['a\\b.pdf']);
+  assert.deepEqual(documents.relativeSegments('a\\b.pdf', 'win32'), ['a', 'b.pdf']);
+  // The locate joins the stored path with the host's path module, so the moved-document check runs on a POSIX host only.
+  if (path.sep !== '/') return;
+  const vol = path.resolve('backslash-volume');
+  const stored = path.join(vol, 'a\\b.pdf');
+  const volume = simulatedVolume({ [stored]: PDF }, { directories: [vol] });
+  const [moved] = await documentsEn.locateDocuments(path.join(vol, 'Board.cad'), [{ id: 'mac', kind: 'pdf', path: path.join(vol, 'gone', 'x.pdf'), relativePath: 'a\\b.pdf', key: sha256(PDF) }], { fs: volume, platform: 'darwin' });
+  assert.equal(moved.status, 'moved');
+  assert.equal(moved.path, stored);
+});
+
 test('documents.cjs: exportBundle writes ONLY the requested files, with safe names and relative paths, atomically', async (t0) => {
   const root = await sandbox(t0, 'export');
   const project = path.join(root, 'project');
@@ -817,7 +1275,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
   await t0.test('only the selected documents, the board when asked, the notes when given; paths in the bundled manifest are relative', async () => {
     const out = target();
     const notes = [{ id: 'n1', componentId: 'U1', text: 'check 3V3', updatedAt: NOW }];
-    const result = await documents.exportBundle({ manifest, notes, documentIds: ['d-pdf', 'd-sch'], includeBoard: true, boardFiles, target: out });
+    const result = await documentsEn.exportBundle({ manifest, notes, documentIds: ['d-pdf', 'd-sch'], includeBoard: true, boardFiles, target: out });
     const entries = await unzip(out);
     assert.deepEqual(Object.keys(entries).sort(), ['board/Board.cad', 'documents/datasheet.pdf', 'documents/power.kicad_sch', 'notes.json', 'workspace.json']);
     assert.deepEqual(result, { path: out, files: 5, bytes: (await fs.stat(out)).size });
@@ -845,7 +1303,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     const checked = workspace.validateManifest(fitted, KEY);
     assert.equal(checked.cameras['d-pdf'].fit, 'width');
     const out = target();
-    await documents.exportBundle({ manifest: checked, documentIds: ['d-pdf', 'd-png'], includeBoard: false, target: out });
+    await documentsEn.exportBundle({ manifest: checked, documentIds: ['d-pdf', 'd-png'], includeBoard: false, target: out });
     const bundled = JSON.parse(text((await unzip(out))['workspace.json']));
     assert.deepEqual(bundled.cameras, { board: { zoom: 2 }, 'd-pdf': { page: 3, zoom: 0.585, rotation: 0, x: 1, y: 2, fit: 'width' }, 'd-png': { zoom: 1.5, fit: 'none' } });
     assert.deepEqual(workspace.validateManifest(bundled, KEY).cameras, bundled.cameras);
@@ -853,14 +1311,14 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
 
   await t0.test('without the board and notes the bundle holds just the manifest and the documents', async () => {
     const out = target();
-    await documents.exportBundle({ manifest, documentIds: ['d-png'], includeBoard: false, target: out });
+    await documentsEn.exportBundle({ manifest, documentIds: ['d-png'], includeBoard: false, target: out });
     const entries = await unzip(out);
     assert.deepEqual(Object.keys(entries).sort(), ['documents/photo.png', 'workspace.json']);
     const bundled = JSON.parse(text(entries['workspace.json']));
     assert.equal(bundled.board.path, 'Board.cad', 'the board is not bundled: only its name remains');
-    await documents.exportBundle({ manifest, documentIds: [], includeBoard: false, target: out });
+    await documentsEn.exportBundle({ manifest, documentIds: [], includeBoard: false, target: out });
     assert.deepEqual(Object.keys(await unzip(out)), ['workspace.json'], 'an empty selection bundles nothing else');
-    await documents.exportBundle({ manifest, notes: [], documentIds: [], includeBoard: false, target: out });
+    await documentsEn.exportBundle({ manifest, notes: [], documentIds: [], includeBoard: false, target: out });
     assert.deepEqual(Object.keys(await unzip(out)).sort(), ['notes.json', 'workspace.json']);
   });
 
@@ -871,7 +1329,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
       { name: 'pins.asc', path: path.join(project, 'pins.asc'), data: new Uint8Array(Buffer.from('P')) },
       { name: 'nails.asc', path: path.join(project, 'nails.asc'), data: new Uint8Array(Buffer.from('N')) },
     ];
-    await documents.exportBundle({ manifest, documentIds: [], includeBoard: true, boardFiles: trio, target: out });
+    await documentsEn.exportBundle({ manifest, documentIds: [], includeBoard: true, boardFiles: trio, target: out });
     const entries = await unzip(out);
     assert.deepEqual(Object.keys(entries).sort(), ['board/format.asc', 'board/nails.asc', 'board/pins.asc', 'workspace.json']);
     assert.equal(JSON.parse(text(entries['workspace.json'])).board.path, 'board/format.asc', 'the primary file leads');
@@ -898,7 +1356,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     }
     return { records, written };
   };
-  const bundleOf = (records, out) => documents.exportBundle({ manifest: { ...manifest, documents: records, split: { enabled: false, ratio: 0.5, right: null } }, documentIds: records.map((item) => item.id), includeBoard: false, target: out });
+  const bundleOf = (records, out) => documentsEn.exportBundle({ manifest: { ...manifest, documents: records, split: { enabled: false, ratio: 0.5, right: null } }, documentIds: records.map((item) => item.id), includeBoard: false, target: out });
 
   for (const [index, [volume, write]] of Object.entries(volumes).entries()) {
     await t0.test(`entry names are zip-slip safe whatever the original file names are (${volume}; I05: case twins live in separate directories)`, async () => {
@@ -960,7 +1418,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     await fs.writeFile(path.join(other, 'datasheet.pdf'), files.unselected.content);
     const twin = { ...record('d-twin', files.unselected), name: 'datasheet.pdf', path: path.join(other, 'datasheet.pdf'), relativePath: 'docs2/datasheet.pdf' };
     const out = target();
-    await documents.exportBundle({ manifest: { ...manifest, documents: [...manifest.documents, twin] }, documentIds: ['d-pdf', 'd-twin'], includeBoard: false, target: out });
+    await documentsEn.exportBundle({ manifest: { ...manifest, documents: [...manifest.documents, twin] }, documentIds: ['d-pdf', 'd-twin'], includeBoard: false, target: out });
     const entries = await unzip(out);
     assert.deepEqual(Object.keys(entries).sort(), ['documents/datasheet (2).pdf', 'documents/datasheet.pdf', 'workspace.json']);
     assert.ok(Buffer.from(entries['documents/datasheet (2).pdf']).equals(files.unselected.content));
@@ -969,20 +1427,20 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
   await t0.test('a document that was moved is found through its relative path; a changed or missing one aborts the export before anything is written', async () => {
     const relocated = { ...manifest, documents: [record('d-moved', files.pdf, { path: path.join(root, 'old-place', 'datasheet.pdf') })] };
     const out = target();
-    await documents.exportBundle({ manifest: relocated, documentIds: ['d-moved'], includeBoard: false, target: out });
+    await documentsEn.exportBundle({ manifest: relocated, documentIds: ['d-moved'], includeBoard: false, target: out });
     assert.ok(Buffer.from((await unzip(out))['documents/datasheet.pdf']).equals(files.pdf.content));
     const changed = { ...manifest, documents: [record('d-changed', files.pdf, { key: sha256('other bytes') })] };
     const missing = { ...manifest, documents: [record('d-missing', files.pdf, { path: path.join(root, 'void', 'x.pdf'), relativePath: 'docs/void.pdf' })] };
     for (const [bad, id, status] of [[changed, 'd-changed', 'changed'], [missing, 'd-missing', 'missing']]) {
       const refused = target();
-      await assert.rejects(documents.exportBundle({ manifest: bad, documentIds: [id], includeBoard: false, target: refused }), { code: 'EXPORT_DOCUMENT_UNAVAILABLE', message: new RegExp(status) });
+      await assert.rejects(documentsEn.exportBundle({ manifest: bad, documentIds: [id], includeBoard: false, target: refused }), { code: 'EXPORT_DOCUMENT_UNAVAILABLE', message: new RegExp(status) });
       await assert.rejects(fs.stat(refused), { code: 'ENOENT' });
     }
     assert.deepEqual(await leftovers(root), []);
   });
 
   await t0.test('the request is validated: unknown, duplicate and malformed ids, missing board files, limits', async () => {
-    const run = (patch) => documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: target(), ...patch });
+    const run = (patch) => documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: target(), ...patch });
     await assert.rejects(run({ documentIds: ['nope'] }), { code: 'EXPORT_UNKNOWN_DOCUMENT' });
     await assert.rejects(run({ documentIds: ['d-pdf', 'd-pdf'] }), { code: 'EXPORT_INVALID_REQUEST' });
     await assert.rejects(run({ documentIds: 'd-pdf' }), { code: 'EXPORT_INVALID_REQUEST' });
@@ -998,7 +1456,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     for (const source of [boardFile, path.join(project, 'docs', files.pdf.name), path.join(project, 'docs', files.png.name)]) {
       const original = await fs.readFile(source);
       await assert.rejects(
-        documents.exportBundle({ manifest, documentIds: ['d-pdf', 'd-png'], includeBoard: true, boardFiles, target: source }),
+        documentsEn.exportBundle({ manifest, documentIds: ['d-pdf', 'd-png'], includeBoard: true, boardFiles, target: source }),
         { code: 'EXPORT_OVERWRITES_SOURCE' }, path.basename(source),
       );
       assert.ok((await fs.readFile(source)).equals(original));
@@ -1006,9 +1464,9 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     let canLink = true;
     const link = path.join(root, 'alias.zip');
     try { await fs.symlink(path.join(project, 'docs', files.pdf.name), link, 'file'); } catch { canLink = false; }
-    if (canLink) await assert.rejects(documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: link }), { code: 'EXPORT_OVERWRITES_SOURCE' }, 'a link to a source is the source');
+    if (canLink) await assert.rejects(documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: link }), { code: 'EXPORT_OVERWRITES_SOURCE' }, 'a link to a source is the source');
     const hard = path.join(root, 'hard.zip');
-    try { await fs.link(path.join(project, 'docs', files.pdf.name), hard); await assert.rejects(documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: hard }), { code: 'EXPORT_OVERWRITES_SOURCE' }, 'a hard link to a source is the source'); } catch (error) { if (error.code === 'ERR_ASSERTION') throw error; }
+    try { await fs.link(path.join(project, 'docs', files.pdf.name), hard); await assert.rejects(documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: hard }), { code: 'EXPORT_OVERWRITES_SOURCE' }, 'a hard link to a source is the source'); } catch (error) { if (error.code === 'ERR_ASSERTION') throw error; }
     assert.deepEqual(await originals(), before);
   });
 
@@ -1020,12 +1478,12 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
       if (property === 'rename') return async () => { renames++; throw Object.assign(new Error('disk full'), { code: 'ENOSPC' }); };
       return source[property];
     } });
-    await assert.rejects(documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: out, fs: failing }), { code: 'EXPORT_WRITE_FAILED' });
+    await assert.rejects(documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: out, fs: failing }), { code: 'EXPORT_WRITE_FAILED' });
     assert.equal(renames, 1);
     assert.equal(await fs.readFile(out, 'utf8'), 'previous export', 'atomic: the old file is untouched');
     assert.deepEqual(await leftovers(root), []);
-    await assert.rejects(documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: path.join(root, 'no-such-dir', 'x.zip') }), { code: 'EXPORT_WRITE_FAILED' });
-    await documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: out });
+    await assert.rejects(documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: path.join(root, 'no-such-dir', 'x.zip') }), { code: 'EXPORT_WRITE_FAILED' });
+    await documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: out });
     assert.ok((await unzip(out))['workspace.json'], 'a later export replaces it');
   });
 
@@ -1055,7 +1513,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     const request = { manifest, documentIds: ['d-png'], includeBoard: false };
     // Control: normal writes produce a standard archive with only the ticked PNG and the manifest.
     const control = target();
-    const normal = await documents.exportBundle({ ...request, target: control });
+    const normal = await documentsEn.exportBundle({ ...request, target: control });
     const controlEntries = await unzip(control);
     assert.deepEqual(Object.keys(controlEntries).sort(), ['documents/photo.png', 'workspace.json']);
     assert.equal(normal.bytes, (await fs.stat(control)).size);
@@ -1064,7 +1522,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
     // The same export through a handle that accepts at most 7 bytes per write().
     const shorted = facadeFs(shortWrites(7));
     const out = target();
-    const result = await documents.exportBundle({ ...request, target: out, fs: shorted.fs });
+    const result = await documentsEn.exportBundle({ ...request, target: out, fs: shorted.fs });
     const size = (await fs.stat(out)).size;
     assert.equal(result.bytes, size, 'the reported bytes are the bytes on disk');
     assert.equal(size, normal.bytes, 'the archive is complete');
@@ -1091,7 +1549,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
       const out = target();
       await fs.writeFile(out, 'previous export');
       const broken = facadeFs(behave);
-      await assert.rejects(documents.exportBundle({ manifest, documentIds: ['d-png'], includeBoard: false, target: out, fs: broken.fs }), { code: 'EXPORT_WRITE_FAILED' }, label);
+      await assert.rejects(documentsEn.exportBundle({ manifest, documentIds: ['d-png'], includeBoard: false, target: out, fs: broken.fs }), { code: 'EXPORT_WRITE_FAILED' }, label);
       assert.equal(broken.events.includes('rename'), false, `${label}: nothing was renamed into place`);
       assert.equal(broken.events.includes('close'), true, `${label}: the handle was closed`);
       assert.equal(await fs.readFile(out, 'utf8'), 'previous export', `${label}: the existing target is untouched`);
@@ -1121,7 +1579,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
         return handle;
       };
     } });
-    await assert.rejects(documents.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: out, fs: racing }), { code: 'EXPORT_DOCUMENT_UNAVAILABLE', message: /changed while/ });
+    await assert.rejects(documentsEn.exportBundle({ manifest, documentIds: ['d-pdf'], includeBoard: false, target: out, fs: racing }), { code: 'EXPORT_DOCUMENT_UNAVAILABLE', message: /changed while/ });
     await assert.rejects(fs.stat(out), { code: 'ENOENT' });
     await fs.writeFile(path.join(project, 'docs', files.pdf.name), files.pdf.content);
     assert.deepEqual(await leftovers(root), []);
@@ -1129,7 +1587,7 @@ test('documents.cjs: exportBundle writes ONLY the requested files, with safe nam
 
   await t0.test('fflate loads from CommonJS in the main-process modules and the zip is a standard archive', async () => {
     const out = target();
-    await documents.exportBundle({ manifest, documentIds: ['d-pdf', 'd-png', 'd-sch'], includeBoard: true, boardFiles, target: out });
+    await documentsEn.exportBundle({ manifest, documentIds: ['d-pdf', 'd-png', 'd-sch'], includeBoard: true, boardFiles, target: out });
     const raw = await fs.readFile(out);
     assert.equal(raw.readUInt32LE(0), 0x04034b50, 'local file header signature');
     assert.equal(raw.readUInt32LE(raw.length - 22), 0x06054b50, 'end of central directory');
@@ -1176,4 +1634,85 @@ test('SchDoc selection gathers schematic and project companions with lowercase n
   assert.equal(payload.kind, 'schematic');
   assert.equal(payload.format, 'altium-sch');
   assert.deepEqual(Object.keys(payload.companions).sort(), ['child.schdoc', 'design.prjpcb']);
+});
+
+test('documents.cjs: a schematic companion that is a Windows reparse point (not a link) is never opened and is recorded as skipped (W16-B4)', async (t0) => {
+  const root = await sandbox(t0, 'companion-reparse');
+  const main = path.join(root, 'board.kicad_sch');
+  await fs.writeFile(main, KICAD_SCH);
+  await fs.writeFile(path.join(root, 'plain.kicad_sch'), KICAD_SCH.replace('synthetic', 'plain'));
+  await fs.writeFile(path.join(root, 'side.kicad_sch'), KICAD_SCH.replace('synthetic', 'side'));
+  // The listing's type says link for the reparse point, while lstat reports a plain file (as Node reports a cloud placeholder).
+  const opened = [];
+  const fakeFs = new Proxy(fs, { get(source, property) {
+    if (property === 'readdir') return async (directory, options) => (await source.readdir(directory, options)).map(entry => (entry.name === 'side.kicad_sch'
+      ? { name: entry.name, isSymbolicLink: () => true, isDirectory: () => false, isFile: () => false }
+      : entry));
+    if (property === 'open') return async (filename, ...rest) => { opened.push(path.basename(String(filename))); return source.open(filename, ...rest); };
+    return source[property];
+  } });
+  const [payload] = await documents.readSelection([main], { fs: fakeFs });
+  assert.deepEqual(Object.keys(payload.companions).sort(), ['plain.kicad_sch'], 'the plain companion is still bundled');
+  assert.equal(opened.includes('side.kicad_sch'), false, 'the reparse point is never opened');
+  assert.deepEqual(payload.skipped, [{ name: 'side.kicad_sch', reason: 'reparse point' }]);
+});
+
+test('documents.cjs: a schematic companion that exists online only is recorded as online-only and never opened (W16-B4)', async (t0) => {
+  const root = await sandbox(t0, 'companion-online');
+  const main = path.join(root, 'board.kicad_sch');
+  await fs.writeFile(main, KICAD_SCH);
+  await fs.writeFile(path.join(root, 'cloud.kicad_sch'), Buffer.alloc(8192, 9));
+  // The listing says link and the metadata says a file of two clusters with no allocated blocks: a cloud placeholder.
+  const opened = [];
+  const fakeFs = new Proxy(fs, { get(source, property) {
+    if (property === 'readdir') return async (directory, options) => (await source.readdir(directory, options)).map(entry => (entry.name === 'cloud.kicad_sch'
+      ? { name: entry.name, isSymbolicLink: () => true, isDirectory: () => false, isFile: () => false }
+      : entry));
+    if (property === 'lstat') return async (target, ...rest) => (path.basename(String(target)) === 'cloud.kicad_sch'
+      ? { isSymbolicLink: () => false, isDirectory: () => false, isFile: () => true, size: 8192, blocks: 0 }
+      : source.lstat(target, ...rest));
+    if (property === 'open') return async (filename, ...rest) => { opened.push(path.basename(String(filename))); return source.open(filename, ...rest); };
+    return source[property];
+  } });
+  const [payload] = await documents.readSelection([main], { fs: fakeFs });
+  assert.equal(opened.includes('cloud.kicad_sch'), false, 'the placeholder is not downloaded by the search');
+  assert.equal(payload.companions?.['cloud.kicad_sch'], undefined, 'and is not bundled');
+  assert.deepEqual(payload.skipped, [{ name: 'cloud.kicad_sch', reason: 'online-only' }]);
+});
+
+test('documents.cjs: a destination held by another program says so only when the final rename fails (EPERM or EBUSY); other export failures keep their text (O-07)', async (t0) => {
+  const root = await sandbox(t0, 'export-held');
+  const source = path.join(root, 'export-src.pdf');
+  await fs.writeFile(source, PDF);
+  const target = path.join(root, 'bundle.zip');
+  await fs.writeFile(target, 'held before');
+  const tr = (key) => i18n.translate('en', key);
+  const manifest = {
+    version: 1,
+    board: { key: KEY, name: 'Board.cad', path: path.join(root, 'Board.cad'), format: 'gencad' },
+    documents: [{ id: 'd1', kind: 'pdf', name: 'export-src.pdf', path: source, relativePath: 'export-src.pdf', key: sha256(PDF), size: PDF.length, bookmarks: [], annotations: [], addedAt: NOW }],
+    split: { enabled: false, ratio: 0.5, right: null },
+    cameras: {},
+  };
+  // Fails the named operation with the given code: the rename over the destination, or the creation of the temporary file.
+  const failing = (code, when) => new Proxy(fs, { get(source, property) {
+    if (property !== 'open' && property !== 'rename') return source[property];
+    return async (...args) => {
+      if (when(property, args)) throw Object.assign(new Error(`${code}: simulated`), { code });
+      return source[property](...args);
+    };
+  } });
+  const renameOver = (code) => failing(code, (operation, args) => operation === 'rename' && args[1] === target);
+  const temporaryOpen = failing('EPERM', (operation, args) => operation === 'open' && String(args[0]).endsWith('.tmp'));
+  const exportWith = (fsUnderTest) => documents.exportBundle({ manifest, notes: null, documentIds: ['d1'], includeBoard: false, t: tr, fs: fsUnderTest, target, renameRetryDelaysMs: [0, 0, 0] });
+  const generic = 'The export file could not be written. Check the destination and free space.';
+
+  await assert.rejects(exportWith(renameOver('EPERM')), { code: 'EXPORT_WRITE_FAILED', message: tr('native.error.fileInUse') }, 'EPERM on the final rename: a held destination');
+  await assert.rejects(exportWith(renameOver('EBUSY')), { code: 'EXPORT_WRITE_FAILED', message: tr('native.error.fileInUse') }, 'EBUSY on the final rename');
+  await assert.rejects(exportWith(renameOver('EACCES')), { code: 'EXPORT_WRITE_FAILED', message: generic }, 'EACCES keeps the generic text');
+  await assert.rejects(exportWith(temporaryOpen), { code: 'EXPORT_WRITE_FAILED', message: generic }, 'EPERM while creating the temporary file is not a held destination');
+  assert.equal(await fs.readFile(target, 'utf8'), 'held before', 'the destination is left as it was');
+  assert.deepEqual((await fs.readdir(root)).filter((name) => name.endsWith('.tmp')), [], 'no temporary file is left behind');
+  // The same export succeeds once nothing holds the destination.
+  assert.equal((await exportWith(fs)).path, target);
 });

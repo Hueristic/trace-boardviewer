@@ -11,9 +11,6 @@ import { useUi } from './ui-context';
 import { noteOf } from './model';
 import { modifierLabels } from './shortcuts';
 
-// i18n: pending
-const T = { netOnly: 'Selected net', clear: 'Clear selection', pinSelected: (n: string) => `Pin ${n} selected` };
-
 export interface InspectorProps {
   api: WorkspaceApi;
   floating: boolean;
@@ -80,7 +77,7 @@ export function Inspector({ api, floating, activeDocumentId, onLocate, onEditNot
       <NotesSection api={api} componentRef={selected.ref} componentId={selected.id} pinId={selectedPin?.id ?? null} pinNumber={selectedPin?.number ?? null} onEdit={onEditNote} />
       <BookmarksSection api={api} documentId={activeDocumentId} onOpen={onOpenPage} />
     </div> : selectedNet ? <div className="inspector-content" key={'net:' + selectedNet}>
-      <div className="section-heading">{T.netOnly}</div>{netSection}
+      <div className="section-heading">{t('workspace.selectedNet')}</div>{netSection}
       <SchematicNetSection api={api} onShow={onShowNet} onLink={onLink} />
       <BookmarksSection api={api} documentId={activeDocumentId} onOpen={onOpenPage} />
     </div> : <div className="inspector-empty"><Focus size={32} /><h3>{t('inspector.emptyTitle')}</h3><p>{t('inspector.emptyText')}</p><span className="empty-shortcut"><Keyboard size={13} />{mod} + F</span>

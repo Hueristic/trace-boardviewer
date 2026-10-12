@@ -305,14 +305,29 @@ function cli(extra = {}) {
 }
 
 test('parseArgs: both flag spellings, required flags, unknown flags, --out must not be inside --dir', () => {
-  assert.deepEqual(pm.parseArgs(['--dir', 'a', '--out', 'b.json']), { dir: 'a', out: 'b.json', help: false });
-  assert.deepEqual(pm.parseArgs(['--dir=a', '--out=b.json']), { dir: 'a', out: 'b.json', help: false });
+  assert.deepEqual(pm.parseArgs(['--dir', 'a', '--out', 'b.json']), { dir: 'a', out: 'b.json', flavour: 'release', help: false });
+  assert.deepEqual(pm.parseArgs(['--dir=a', '--out=b.json']), { dir: 'a', out: 'b.json', flavour: 'release', help: false });
   assert.equal(pm.parseArgs(['--help']).help, true);
   for (const bad of [[], ['--dir', 'a'], ['--out', 'b'], ['--dir'], ['--dir', 'a', '--out', 'b', '--nope'], ['--dir', 'a', '--out', 'a/m.json'], ['--dir', 'a', '--out', 'a']]) {
     assert.throws(() => pm.parseArgs(bad), pm.UsageError, JSON.stringify(bad));
   }
   assert.doesNotThrow(() => pm.parseArgs(['--dir', 'release/win-unpacked', '--out', 'payload-manifest.json']));
   assert.doesNotThrow(() => pm.parseArgs(['--dir', 'release/win-unpacked', '--out', 'release/win-unpacked-manifest.json']), 'a sibling with a similar prefix is outside');
+});
+
+test('the main executable follows the build flavour: "TRACE Boardviewer.exe" for release, "TRACE Boardviewer QA.exe" with --flavour qa', () => {
+  assert.equal(pm.MAIN_EXE_PATH, 'TRACE Boardviewer.exe');
+  assert.equal(pm.mainExePathFor('release'), 'TRACE Boardviewer.exe');
+  assert.equal(pm.mainExePathFor('qa'), 'TRACE Boardviewer QA.exe');
+  assert.throws(() => pm.mainExePathFor('beta'), /unknown flavour/);
+  assert.equal(pm.parseArgs(['--dir', 'a', '--out', 'b.json', '--flavour', 'qa']).flavour, 'qa');
+  assert.throws(() => pm.parseArgs(['--dir', 'a', '--out', 'b.json', '--flavour', 'beta']), pm.UsageError);
+  const qaFiles = [file('TRACE Boardviewer QA.exe', 3), file('resources/app.asar', 4)];
+  const qa = pm.finalizeManifest(qaFiles, pm.mainExePathFor('qa'));
+  assert.equal(qa.exeSha256, qaFiles[0].sha256, 'the QA executable is the one hashed as the main executable');
+  assert.deepEqual(pm.validateManifest(qa, pm.mainExePathFor('qa')), []);
+  assert.notDeepEqual(pm.validateManifest(qa), [], 'a QA manifest is not valid as a release manifest');
+  assert.equal(pm.finalizeManifest(qaFiles).exeSha256, null, 'the release name is not found in a QA tree');
 });
 
 test('main: writes the manifest (spec fields, trailing newline) and exits 0; a second run writes the identical bytes', async () => {

@@ -8,10 +8,29 @@ interface PadPath {
   closePath(): void;
 }
 
+/**
+ * Level of detail: a pad whose display half-size is below this many screen pixels is drawn as an axis-aligned square point with the same
+ * area as the pad it replaces, so the tone of a dense pad array stays the same. Below one and a half pixels a curve and its rotation are
+ * invisible; from this size up, a pad is drawn exactly as before (so a close zoom is unchanged).
+ */
+export const PAD_POINT_PX = 1.5;
+
+/** A square point centred on (x, y), as an open subpath (a fill closes it): four segments instead of a curve. */
+function appendPadPoint(path: PadPath, x: number, y: number, half: number): void {
+  path.moveTo(x - half, y - half);
+  path.lineTo(x + half, y - half);
+  path.lineTo(x + half, y + half);
+  path.lineTo(x - half, y + half);
+}
+
+/** Half-side of the square with the area of a circle of this radius. */
+const pointHalfOfCircle = (radius: number) => radius * Math.sqrt(Math.PI) / 2;
+
 /** Same display markers as the individual pad renderer, without per-pad context transforms. */
 export function appendPadPath(path: PadPath, pin: BoardPin, scale: number, markerPixels: number): void {
   const radius = Math.max(pin.radius, markerPixels / scale);
   if (pin.shape === 'round' || !(pin.width || pin.height)) {
+    if (radius * scale < PAD_POINT_PX) { appendPadPoint(path, pin.x, pin.y, pointHalfOfCircle(radius)); return; }
     // A separate subpath prevents a fill from joining neighbouring circles.
     path.moveTo(pin.x + radius, pin.y);
     path.arc(pin.x, pin.y, radius, 0, Math.PI * 2);
@@ -21,6 +40,7 @@ export function appendPadPath(path: PadPath, pin: BoardPin, scale: number, marke
   }
   const halfWidth = Math.max(pin.width ?? radius * 2, 1.5 / scale) / 2;
   const halfHeight = Math.max(pin.height ?? radius * 2, 1.5 / scale) / 2;
+  if (Math.max(halfWidth, halfHeight) * scale < PAD_POINT_PX) { appendPadPoint(path, pin.x, pin.y, Math.sqrt(halfWidth * halfHeight)); return; }
   const angle = (pin.rotation ?? 0) * Math.PI / 180;
   const c = Math.cos(angle), s = Math.sin(angle);
   const corners = [

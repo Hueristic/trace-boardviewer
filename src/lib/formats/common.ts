@@ -1,8 +1,15 @@
+import importLimits from '../../../shared/import-limits.json';
 import { boundText } from '../bounded-text';
 import type { Board, BoardComponent, BoardPin, BoardSide, Bounds, Point, ParseIssue } from '../types';
 import { markBuildStage } from './stage';
+import { sourceBaseName, type SourcePlatform } from './source-name';
 
-export const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
+/** The general import byte limit (shared with the desktop main process through shared/import-limits.json). */
+export const MAX_IMPORT_BYTES: number = importLimits.maxImportBytes;
+/** The byte limit of one native Allegro BRD database, the only format measured above the general limit (docs/ALLEGRO-BRD.md). */
+export const MAX_NATIVE_ALLEGRO_IMPORT_BYTES: number = importLimits.maxNativeAllegroImportBytes;
+/** The record budget of one native Allegro database: declared objects, keyed records plus strings (docs/ALLEGRO-BRD.md). */
+export const MAX_NATIVE_ALLEGRO_RECORDS: number = importLimits.maxNativeAllegroRecords;
 /** Canonical-mm magnitude cap shared with GenCAD (parse.error.coordinateRangeMm); larger values break the renderer grid. */
 export const MAX_MM = 1e9;
 export type FormatErrorCode = 'INVALID_FORMAT' | 'UNRECOGNIZED' | 'LIMIT_EXCEEDED' | 'KEY_REQUIRED' | 'INVALID_KEY' | 'COMPANIONS_REQUIRED' | 'UNSUPPORTED_VARIANT' | 'WRONG_KIND' | 'AMBIGUOUS_FORMAT';
@@ -12,6 +19,8 @@ export interface ParseInput {
   data: Uint8Array;
   companions?: Record<string, Uint8Array>;
   options?: ParseOptions;
+  /** The platform a direct file's name came from (see source-name.ts); absent for an archive entry or when unknown. */
+  platform?: SourcePlatform;
 }
 /** null means "not this format"; a recognized but malformed file throws BoardFormatError. */
 export type BoardParser = (input: ParseInput) => Board | null;
@@ -385,6 +394,6 @@ function assemble(input: ParseInput, raw: RawBoard): Board {
   }
   const bounds = boundsOf(outline);
   if (!Object.values(bounds).every(Number.isFinite)) throw new BoardFormatError('Invalid board bounds.');
-  const name = input.name.split(/[\\/]/).pop()?.replace(/\.[^.]*$/, '') ?? input.name;
+  const name = sourceBaseName(input.name, input.platform).replace(/\.[^.]*$/, '');
   return { name, format: raw.format, units: 'mm', components, pins, nets: [...netMap].map(([net, pinIds], index) => ({ id: `net:${index}`, name: net, pinIds })), outline, bounds, warnings };
 }

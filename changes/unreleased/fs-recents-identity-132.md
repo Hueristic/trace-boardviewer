@@ -1,0 +1,1 @@
+- A board that is opened under another spelling of its name (Mac folds case and normalises Unicode) appears once in the recent boards, not twice; the newest spelling is kept.

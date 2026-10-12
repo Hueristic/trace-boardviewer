@@ -21,7 +21,7 @@ export const formatIdOf = (id: string): FormatId => ((FORMAT_IDS as readonly str
 const GENCAD_HEADER_KEYS = new Set([
   'parse.error.binary', 'parse.error.empty', 'parse.error.requiresGencad14', 'parse.error.unitsMissing', 'parse.error.unsupportedUnit',
   'parse.error.userUnitDivisor', 'parse.error.badSectionMarker', 'parse.error.missingSection', 'parse.error.missingSectionEnd', 'parse.error.duplicateSection',
-  'parse.error.mismatchedSectionEnd', 'parse.error.dataOutsideSection',
+  'parse.error.mismatchedSectionEnd', 'parse.error.dataOutsideSection', 'parse.error.gencadStorageTrailingBytes',
 ]);
 const GENCAD_BUILD_KEYS = new Set(['parse.error.noComponents', 'parse.error.noPins', 'parse.error.coordinateRange', 'parse.error.coordinateRangeMm', 'parse.error.sizeRangeMm']);
 const GENCAD_LIMIT_KEYS = new Set(['parse.error.tooLarge', 'parse.error.tooManyRecords']);

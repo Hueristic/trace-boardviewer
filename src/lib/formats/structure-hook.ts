@@ -12,6 +12,7 @@
  * into a report without changing the schema, which the golden test (src/lib/diagnostics/schema.golden.txt) guards.
  */
 import type { HeaderCode, HeaderCount, HookId, PadAngleMode, Stage, UnitKind, Variant } from '../diagnostics/report';
+import type { SourcePlatform } from './source-name';
 
 /** The pipeline steps a hook can confirm; 'records' and 'build' follow once every step of the format is complete. */
 export type HookStep = Extract<Stage, 'header' | 'container' | 'decrypt' | 'decompress'>;
@@ -23,6 +24,8 @@ export interface StructureInput {
   readonly companions: Readonly<Record<string, Uint8Array>>;
   /** The lowercase extension class of the file (see input-facts.ts): selects the FZ/CAE parity variant, nothing else. */
   readonly extension: string;
+  /** The platform the file's name came from (see source-name.ts); absent when unknown, which keeps the readers' rule. */
+  readonly platform?: SourcePlatform;
   /** The fixed public basename of a companion-set member (format.asc, pins.asc, nails.asc), when the file is one; never any other name. */
   readonly companionRole?: string;
   /** Session keys the user typed for this run; a hook may use them to reach the structure behind the encryption, never report them. */

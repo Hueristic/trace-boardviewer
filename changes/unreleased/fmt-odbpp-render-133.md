@@ -1,0 +1,2 @@
+- ODB++ boards now show their copper in the board view: the pads, copper tracks and arcs of the side you are viewing, and the drilled holes on both sides. The copper is drawn under the parts.
+- Boards without copper data, and all other file formats, look exactly as before.

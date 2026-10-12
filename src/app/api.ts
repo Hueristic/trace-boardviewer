@@ -1,7 +1,7 @@
 import type { ViewerCamera, ViewerHighlight, ViewerProbeRegion, SchematicSelection } from '../components/viewer-contracts';
 import type { BoardIndex } from '../lib/board-index';
 import type { BoardNetTarget, BoardTarget, LinkReport, Mapping, PdfLinkReport, SchematicNetTarget, SchematicTarget, SearchResult, SearchRow } from '../lib/crossprobe';
-import type { DocumentAnnotation, DocumentBookmark, DocumentCalibration, DocumentKind, DocumentRecord, WorkspaceExportResult, WorkspaceManifest, WorkspaceSplit, WorkspaceTab } from '../lib/documents';
+import type { DocumentAnnotation, DocumentBookmark, DocumentCalibration, DocumentKind, DocumentRecord, AliasRejection, WorkspaceExportOutcome, WorkspaceManifest, WorkspaceSplit, WorkspaceTab } from '../lib/documents';
 import type { PdfSession } from '../lib/pdf/session-contract';
 import type { SchSheetInstance, SchematicDesign } from '../lib/schematic/model';
 import type { Message } from '../lib/i18n';
@@ -21,7 +21,7 @@ import type BugReportContract = require('../../shared/bug-report-contract.cjs');
  *  - Pointer-rate data (canvas coordinates/zoom/measurement) NEVER goes through `WorkspaceState`: it lives in `statusStore`
  *    and only the status bar subscribes (P01). Documents' cameras are persisted through `setCamera`, rAF-throttled by the viewer.
  *  - Actions never throw to the UI: failures become `state.notice` (error) messages; async actions resolve when settled.
- *  - Message texts for user-facing text are `{ text }` English strings (catalogs are frozen this phase; `// i18n: pending`).
+ *  - Message texts for user-facing text are `{ text }` English strings (the texts are not in the catalogs yet; `// i18n: pending`).
  */
 
 export type DocumentStatus = 'loading' | 'ready' | 'missing' | 'changed' | 'unreadable' | 'error';
@@ -30,8 +30,8 @@ export type DocumentStatus = 'loading' | 'ready' | 'missing' | 'changed' | 'unre
 export interface DocumentRuntime {
   record: DocumentRecord;
   status: DocumentStatus;
-  /** English explanation for missing/changed/unreadable/error (what happened and what the user can do). */
-  message?: string;
+  /** Explanation for missing/changed/unreadable/error (what happened and what the user can do): a catalog message, or native text. */
+  message?: Message;
   /** kind 'pdf': live session (text index, outline, search); present while status is 'ready' or while it asks for a password. */
   pdf?: PdfSession;
   /** kind 'image': original bytes handed to ImageViewer. */
@@ -80,12 +80,13 @@ export interface SearchState {
 }
 
 export type NoticeKind = 'info' | 'success' | 'error';
-export interface Notice { id: number; kind: NoticeKind; message: Message }
+/** `sticky`: the notice stays until the user closes it. Set for failures of a file the application opened by itself (start-up, external open). */
+export interface Notice { id: number; kind: NoticeKind; message: Message; sticky?: boolean }
 
 export interface SaveState { dirty: boolean; saving: boolean; failure: string | null }
 
-/** An encrypted board waiting for its key (the same payload is re-parsed once a key is entered; keys are session-only). */
-export interface KeyRequest { fileName: string; kind: 'fz' | 'xzz'; code: 'KEY_REQUIRED' | 'INVALID_KEY'; message: string }
+/** An encrypted board waiting for its key (the same payload is re-parsed once a key is entered; keys are session-only). `reason` is the parser's reason as a catalog message; `message` is the English text. */
+export interface KeyRequest { fileName: string; kind: 'fz' | 'xzz'; code: 'KEY_REQUIRED' | 'INVALID_KEY'; message: string; reason?: Message }
 /** How far the parser of the running import got. */
 export interface ImportProgress {
   /** 0..1 when the parser reports its position (GenCAD, KiCad), else null (the UI shows no percentage). */
@@ -174,8 +175,8 @@ export interface WorkspaceActions {
   setAnnotations(id: string, next: DocumentAnnotation[]): void;
   /** Only ever called from a completed, user-confirmed calibration. */
   setCalibration(id: string, next: DocumentCalibration | undefined): void;
-  /** Saves first, then exports ONLY the listed documents (and the board/notes only when asked). Resolves null on cancel. */
-  exportWorkspace(options: { documentIds: string[]; includeBoard: boolean; includeNotes: boolean }): Promise<WorkspaceExportResult | null>;
+  /** Saves first, then exports ONLY the listed documents (and the board/notes only when asked). Resolves `cancelled` when the save dialog was dismissed and `failed` when it could not run or write; a notice says why. */
+  exportWorkspace(options: { documentIds: string[]; includeBoard: boolean; includeNotes: boolean }): Promise<WorkspaceExportOutcome>;
 
   // --- selection / cross-probe ---
   selectComponent(id: string | null, options?: { center?: boolean; origin?: SelectionOrigin }): void;
@@ -195,8 +196,10 @@ export interface WorkspaceActions {
   activateProbeRegion(documentId: string, regionId: string): void;
   setSchematicInstance(documentId: string, instancePath: string): void;
   clearSelection(): void;
-  setAlias(kind: 'refs' | 'nets', from: string, to: string): void;
-  removeAlias(kind: 'refs' | 'nets', from: string): void;
+  /** Null when the alias was set. Otherwise nothing changed, a notice says why, and the rule it broke is returned for the dialog. */
+  setAlias(kind: 'refs' | 'nets', from: string, to: string): AliasRejection | null;
+  /** False when the removal could not run (no workspace open): nothing changes. */
+  removeAlias(kind: 'refs' | 'nets', from: string): boolean;
 
   // --- unified search ---
   setSearchQuery(query: string): void;

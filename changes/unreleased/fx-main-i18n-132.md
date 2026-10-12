@@ -1,0 +1,3 @@
+- The macOS Edit and Window menus follow the chosen language, and the menu is updated when the language changes. The application menu has a Settings… item (Cmd+,) that opens the settings.
+- The extra shortcut rows of the Help dialog, the workspace tab and split labels, and the search field placeholder are translated in all eight languages.
+- The native dialogs for attaching documents and exporting a workspace show their titles, buttons and the ZIP filter in the chosen language.

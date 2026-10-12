@@ -1,0 +1,1 @@
+- The net banners and the schematic-net section are now shown in the interface language in all eight languages. Before, the board-net banner, the schematic-net section and the mapping reasons (why a match is ambiguous or missing) were English in every language.

@@ -1,0 +1,1 @@
+- Undoing a correction whose file belongs to a folder that was removed now says that the file is no longer known and reloads the lists, the same message a stale save already shows. Other undo failures keep the generic message.

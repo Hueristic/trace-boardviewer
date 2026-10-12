@@ -261,6 +261,25 @@ function buildGrid(boxes: Float64Array, count: number, extent: SchBounds): Grid 
   return { minX: extent.minX, minY: extent.minY, cw, ch, cols, rows, start, items, big: Int32Array.from(big) };
 }
 
+/**
+ * The texts the sheet paints on the canvas: the title-block rows, the file line under a sheet symbol and its missing mark. The viewer
+ * passes the catalog texts of the UI language; a caller that passes no labels gets ENGLISH_CANVAS_LABELS. `language` identifies the set
+ * and is the key of the render cache (SheetCache), so two languages never share sheet data.
+ */
+export interface CanvasLabels {
+  language: string;
+  title: string;
+  company: string;
+  revDate: string;
+  fileSheet: string;
+  page: string;
+  file: string;
+  fileMissing: string;
+}
+export const ENGLISH_CANVAS_LABELS: CanvasLabels = {
+  language: 'en', title: 'Title', company: 'Company', revDate: 'Rev / Date', fileSheet: 'File / Sheet', page: 'page', file: 'File:', fileMissing: 'file missing',
+};
+
 export interface SheetData {
   def: SchSheetDef;
   /** Everything that can appear on the sheet (content and paper): the extent a camera may roam over, so stray items stay reachable by panning. */
@@ -385,7 +404,7 @@ function sheetFitBounds(extent: SchBounds, frame: PaperFrame | null, boxes: Floa
   return hasArea(content) ? content : { ...extent };
 }
 
-export function buildSheetData(def: SchSheetDef): SheetData {
+export function buildSheetData(def: SchSheetDef, canvas: CanvasLabels = ENGLISH_CANVAS_LABELS): SheetData {
   const counts = [def.symbols.length, def.wires.length, def.buses.length, def.busEntries.length, def.junctions.length, def.noConnects.length, def.labels.length, def.sheetRefs.length, def.graphics.length];
   const offsets: number[] = [];
   let count = 0;
@@ -420,7 +439,7 @@ export function buildSheetData(def: SchSheetDef): SheetData {
     grow(b, ref.at.x, ref.at.y); grow(b, ref.at.x + ref.size.x, ref.at.y + ref.size.y);
     for (const p of ref.pins) grow(b, p.at.x, p.at.y);
     // Name above, file name below (drawn 1.2 mm and 2.4 mm outside the rectangle).
-    const w = Math.max(textWidth(ref.name, LABEL_SIZE), textWidth(`File: ${ref.file}`, 1));
+    const w = Math.max(textWidth(ref.name, LABEL_SIZE), textWidth(`${canvas.file} ${ref.file}`, 1));
     grow(b, ref.at.x + w, ref.at.y - 2.4); grow(b, ref.at.x, ref.at.y + ref.size.y + 2.4);
     set(offsets[K.sheet] + i, b);
   });
@@ -463,15 +482,20 @@ export function queryData(data: SheetData, minX: number, minY: number, maxX: num
   return out;
 }
 
-/** Bounded cache of per-definition render data (index, real bounds, label layouts): least recently used goes first. */
+/**
+ * Bounded cache of per-definition render data (index, real bounds, label layouts): the least recently used definition goes first.
+ * A definition keeps one entry per label language, so a language change builds its own sheet data and never reuses another's.
+ */
 export class SheetCache {
-  private readonly map = new Map<SchSheetDef, SheetData>();
+  private readonly map = new Map<SchSheetDef, Map<string, SheetData>>();
   constructor(readonly limit = 6) {}
-  get(def: SchSheetDef): SheetData {
-    let data = this.map.get(def);
-    if (data) this.map.delete(def); else data = buildSheetData(def);
-    this.map.set(def, data);
+  get(def: SchSheetDef, labels: CanvasLabels = ENGLISH_CANVAS_LABELS): SheetData {
+    let byLanguage = this.map.get(def);
+    if (byLanguage) this.map.delete(def); else byLanguage = new Map<string, SheetData>();
+    this.map.set(def, byLanguage);
     while (this.map.size > this.limit) this.map.delete(this.map.keys().next().value as SchSheetDef);
+    let data = byLanguage.get(labels.language);
+    if (!data) { data = buildSheetData(def, labels); byLanguage.set(labels.language, data); }
     return data;
   }
   get size() { return this.map.size; }
@@ -745,6 +769,8 @@ export interface SheetScene {
   sheetResolved: readonly boolean[];
   netHighlight: NetHighlight | null;
   page: string;
+  /** The canvas texts of the sheet's language; omitted: ENGLISH_CANVAS_LABELS. */
+  labels?: CanvasLabels;
 }
 
 type PathLike = Pick<Path2D, 'moveTo' | 'lineTo' | 'rect' | 'arc' | 'closePath'>;
@@ -821,13 +847,13 @@ function drawPaper(ctx: CanvasRenderingContext2D, scene: SheetScene, pen: TextPe
   for (let r = 1; r < 4; r++) { ctx.moveTo(t.minX, t.minY + rowH * r); ctx.lineTo(t.maxX, t.minY + rowH * r); }
   ctx.stroke();
   // Title block text (screen space; skipped when it would be unreadable).
-  const def = scene.data.def, block = def.titleBlock;
+  const def = scene.data.def, block = def.titleBlock, canvasLabels = scene.labels ?? ENGLISH_CANVAS_LABELS;
   const pick = (...keys: string[]) => { for (const k of keys) { const v = block[k] ?? block[k.toLowerCase()]; if (v) return v; } return ''; };
   const rows: Array<[string, string, number]> = [
-    ['Title', def.title || pick('title', 'Title') || def.name, 2],
-    ['Company', pick('company', 'Company'), 1.4],
-    ['Rev / Date', [pick('rev', 'Rev'), pick('date', 'Date')].filter(Boolean).join('   '), 1.4],
-    ['File / Sheet', `${def.file || def.name}${scene.page ? `   page ${scene.page}` : ''}`, 1.4],
+    [canvasLabels.title, def.title || pick('title', 'Title') || def.name, 2],
+    [canvasLabels.company, pick('company', 'Company'), 1.4],
+    [canvasLabels.revDate, [pick('rev', 'Rev'), pick('date', 'Date')].filter(Boolean).join('   '), 1.4],
+    [canvasLabels.fileSheet, `${def.file || def.name}${scene.page ? `   ${canvasLabels.page} ${scene.page}` : ''}`, 1.4],
   ];
   const w = t.maxX - t.minX;
   rows.forEach(([label, value, size], r) => {
@@ -872,6 +898,7 @@ export function drawSheet(ctx: CanvasRenderingContext2D, scene: SheetScene): Ren
   const t0 = performance.now();
   const { data, view, width, height, dpr, palette: pal, netHighlight: net } = scene;
   const def = data.def, scale = view.scale;
+  const canvasLabels = scene.labels ?? ENGLISH_CANVAS_LABELS;
   const px = 1 / scale;
   const pen = new TextPen(ctx, scene);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -1074,8 +1101,8 @@ export function drawSheet(ctx: CanvasRenderingContext2D, scene: SheetScene): Ren
   for (const r of sheets) {
     const ref = def.sheetRefs[r], resolved = scene.sheetResolved[r];
     pen.draw(ref.name, { at: { x: ref.at.x, y: ref.at.y - 1.2 }, angle: 0, anchor: 'start', dy: 0 }, LABEL_SIZE, pal.sheetSymbol, { bold: true });
-    pen.draw(`File: ${ref.file}`, { at: { x: ref.at.x, y: ref.at.y + ref.size.y + 1.4 }, angle: 0, anchor: 'start', dy: 0 }, 1, pal.muted);
-    if (!resolved) pen.draw('file missing', { at: { x: ref.at.x + ref.size.x / 2, y: ref.at.y + ref.size.y / 2 }, angle: 0, anchor: 'middle', dy: 0 }, LABEL_SIZE, pal.danger, { bold: true, minPx: 4 });
+    pen.draw(`${canvasLabels.file} ${ref.file}`, { at: { x: ref.at.x, y: ref.at.y + ref.size.y + 1.4 }, angle: 0, anchor: 'start', dy: 0 }, 1, pal.muted);
+    if (!resolved) pen.draw(canvasLabels.fileMissing, { at: { x: ref.at.x + ref.size.x / 2, y: ref.at.y + ref.size.y / 2 }, angle: 0, anchor: 'middle', dy: 0 }, LABEL_SIZE, pal.danger, { bold: true, minPx: 4 });
     for (const p of ref.pins) {
       const inward = Math.abs(p.at.x - ref.at.x) < 1e-6 ? 0 : Math.abs(p.at.x - (ref.at.x + ref.size.x)) < 1e-6 ? 180 : Math.abs(p.at.y - ref.at.y) < 1e-6 ? 270 : 90;
       const o = normalizeTextOrientation(inward, 'start');

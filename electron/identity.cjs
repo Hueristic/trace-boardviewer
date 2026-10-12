@@ -16,7 +16,7 @@
 //    probeCaseInsensitive; wired in phase 3 on a real Mac) darwin keeps paths exact, which can at worst
 //    show one file twice and never merges two files.
 //
-// Text is English with a stable `code` (// i18n: pending): the catalogs are frozen.
+// Text is English with a stable `code` (// i18n: pending): the texts are not in the catalogs yet.
 
 const { createHash } = require('node:crypto');
 
@@ -30,7 +30,7 @@ function identityError(message, code) {
 
 const toBytes = (data) => Buffer.from(data.buffer, data.byteOffset, data.byteLength);
 const sha256Hex = (data) => createHash('sha256').update(data).digest('hex');
-// The lowercase basename of an entry, whichever separator the caller used.
+// The lowercase basename of an archive entry name. Both separators count on every platform: Windows tools write a backslash into a zip.
 const entryName = (name) => name.slice(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1).toLowerCase();
 
 function uint64be(value) {
@@ -79,11 +79,13 @@ function samePath(a, b, options) { return pathIdentity(a, options) === pathIdent
 // Tells whether the volume holding `filename` folds case: true / false, or null when it cannot be
 // decided (no letters in the name, or the probe failed). A case-swapped spelling that resolves to the
 // same device and inode is the same file, so the volume is case-insensitive.
-async function probeCaseInsensitive(filename, fs = require('node:fs/promises')) {
-  const separator = Math.max(filename.lastIndexOf('/'), filename.lastIndexOf('\\'));
+async function probeCaseInsensitive(filename, fs = require('node:fs/promises'), platform = process.platform) {
+  // On POSIX a backslash is a character of a name; on Windows it separates the directories as well.
+  const separator = platform === 'win32' ? Math.max(filename.lastIndexOf('/'), filename.lastIndexOf('\\')) : filename.lastIndexOf('/');
   const base = filename.slice(separator + 1);
   const swapped = [...base].map((character) => (character === character.toLowerCase() ? character.toUpperCase() : character.toLowerCase())).join('');
-  if (!base || swapped === base) return null;
+  // A swap that changes the length (ß becomes SS) has no same-length spelling to look up: undecided, not case-sensitive.
+  if (!base || swapped === base || swapped.length !== base.length) return null;
   try {
     const original = await fs.stat(filename);
     try {

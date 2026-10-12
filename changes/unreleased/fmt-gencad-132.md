@@ -1,0 +1,2 @@
+- A GenCAD file in a CAD storage wrapper that has non-zero bytes after its board text is still not opened. The message now asks you to export the board from the source tool as a text GENCAD 1.4 file, and it is shown in all eight languages.
+- TRACE does not guess the version of such a file.

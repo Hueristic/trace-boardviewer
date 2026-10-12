@@ -8,14 +8,19 @@
   "header.settings": "Ustawienia",
   "layout.workshop": "Warsztat",
   "layout.focus": "Skupienie",
-
   "window.minimize": "Minimalizuj okno",
   "window.restore": "Przywróć okno",
   "window.maximize": "Maksymalizuj okno",
   "window.close": "Zamknij aplikację",
-
   "status.fileInfo": "Informacje o pliku",
   "status.shortcuts": "Skróty klawiszowe",
+  "status.saved": "Zapisano",
+  "status.saving": "Zapisywanie…",
+  "status.unsaved": "Niezapisane zmiany",
+  "status.failed": "Nie udało się zapisać: {message}",
+  "status.notSaved": "Niezapisane (tryb przeglądarki)",
+  "status.region": "Pasek stanu",
+  "status.zoom": "Powiększenie",
 
   "welcome.eyebrow": "POŁĄCZENIA UKRYTE W PŁYTCE",
   "welcome.title1": "Zajrzyj w głąb.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Otwierane płytki pojawią się tutaj.",
   "welcome.footerLocal": "Lokalny obszar roboczy · działa offline",
   "welcome.shortcuts": "Skróty klawiszowe",
-
   "toast.close": "Zamknij powiadomienie",
   "toast.settingsSaveFailed": "Nie udało się zapisać ustawień.",
   "toast.settingsReadFailed": "Nie udało się odczytać ustawień.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Nie udało się uruchomić aplikacji.",
   "toast.importCancelled": "Otwieranie pliku zostało anulowane.",
   "toast.importStopped": "Otwieranie pliku przerwano po {seconds} s bez postępu. Plik może być uszkodzony lub nietypowo złożony.",
-
+  "toast.companionOnlineOnly": "Plik pomocniczy jest dostępny tylko online. Otwórz go lub dołącz ręcznie.",
+  "toast.companionOnlineOnlyNames": "Dotyczy plików pomocniczych: {names}.",
+  "toast.noSandboxRevokeFailed": "Nie udało się zmienić ustawienia.",
   "loading.processing": "Przetwarzanie płytki…",
   "loading.reading": "Odczyt pliku…",
   "loading.hint": "Jeszcze chwila, a obraz się ułoży.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Ten plik wczytuje się wyjątkowo długo. Możesz poczekać albo anulować.",
   "loading.cancel": "Anuluj",
   "drop.title": "Upuść płytkę",
-  "fileInput.aria": "Plik boardview"
+  "fileInput.aria": "Plik boardview",
+  "toast.componentMissing": "Tego elementu nie ma na tej płytce.",
+  "toast.documentsAfterBoard": "Dokumenty przeciągnięte razem z płytką zostaną dołączone po jej otwarciu. Przeciągnij je wtedy ponownie.",
+  "toast.attachedOne": "Dołączono „{name}”.",
+  "toast.attachedMany": "Dołączono dokumenty: {count}.",
+
+  "config.locked": "Ustawień nie można odczytać, ponieważ plik blokuje inny program; nie zostaną nadpisane.",
+  "config.readOnly": "Plik ustawień jest tylko do odczytu: zmiany dotyczą tylko tej sesji, a plik nie jest zastępowany.",
+  "config.unreadable": "Plik ustawień jest uszkodzony lub zapisała go inna wersja: program uruchomił się z domyślnymi ustawieniami; stary plik zostanie zachowany przed pierwszym zapisem."
 }

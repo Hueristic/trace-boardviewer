@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isApplePlatform, modifierLabels, resolveShortcut } from './shortcuts';
+import { OPEN_SETTINGS_EVENT, isApplePlatform, modifierLabels, resolveShortcut, searchShortcutLabel } from './shortcuts';
 import type { ShortcutContext, ShortcutKey } from './shortcuts';
 
 /** The shell's global shortcuts (Shell.tsx hands the decision to resolveShortcut): which dialog swallows which key, and the Mac readings. */
@@ -12,7 +12,7 @@ const action = (event: ShortcutKey, over: Partial<ShortcutContext> = {}) => reso
 const EMPTY = { hasBoard: false, boardVisible: false };
 
 // Every shortcut the shell knows, including the ones that leaked behind the key dialog (F1, ?, Alt+2, Ctrl+\, m, Ctrl+O).
-const EVERY_KEY: ShortcutKey[] = [press('F1'), press('?'), alt('2', { code: 'Digit2' }), ctrl('\\'), press('m'), ctrl('o'), ctrl('f'), ctrl('1'), ctrl('2'), press('f'), press('r'), press('l'), press('n'), press('Escape'), press('+'), press('='), press('-')];
+const EVERY_KEY: ShortcutKey[] = [press('F1'), press('?'), alt('2', { code: 'Digit2' }), ctrl('\\'), press('m'), ctrl('o'), ctrl('f'), ctrl('1'), ctrl('2'), ctrl(','), press('f'), press('r'), press('l'), press('n'), press('Escape'), press('+'), press('='), press('-')];
 
 describe('resolveShortcut: dialogs own the keyboard', () => {
   it('H3-02: while an encryption key is being asked for, no shortcut fires, Esc included (the dialog cancels itself)', () => {
@@ -27,12 +27,16 @@ describe('resolveShortcut: dialogs own the keyboard', () => {
 
   it('a pending key request wins over an open modal: Esc goes to the key dialog, not to the modal behind it', () => {
     expect(resolveShortcut(press('Escape'), ctx({ modal: true, keyRequest: true }))).toBeNull();
+    // The bug-report draft keeps its leave prompt: an Esc that reaches the window is left to the dialog's cancel, not closed here.
+    expect(resolveShortcut(press('Escape'), ctx({ modal: true, modalGuard: true }))).toBeNull();
+    expect(resolveShortcut(press('Escape'), ctx({ modal: true, modalGuard: false }))).toEqual({ action: 'close-modal', prevent: true });
   });
 });
 
 describe('resolveShortcut: without a board', () => {
-  it('only Open, the help (F1 / ?) and a swallowed Ctrl+F remain', () => {
+  it('only Open, Settings, the help (F1 / ?) and a swallowed Ctrl+F remain', () => {
     expect(resolveShortcut(ctrl('o'), ctx(EMPTY))).toEqual({ action: 'open', prevent: true });
+    expect(action(ctrl(','), EMPTY)).toBe('settings');
     expect(resolveShortcut(ctrl('f'), ctx(EMPTY))).toEqual({ action: null, prevent: true });
     expect(resolveShortcut(press('F1'), ctx(EMPTY))).toEqual({ action: 'help', prevent: true });
     expect(action(press('?'), EMPTY)).toBe('help');
@@ -59,12 +63,21 @@ describe('resolveShortcut: with a board', () => {
     }
   });
 
-  it('Open, search, the layouts, the split view and the tab keys also work from a text field', () => {
+  it('Open, search, the layouts and the split view also work from a text field', () => {
     expect(action(ctrl('o'), { editable: true })).toBe('open');
     expect(action(ctrl('f'), { editable: true })).toBe('search');
     expect(action(ctrl('1'), { editable: true })).toBe('layout-workshop');
     expect(action(ctrl('\\'), { editable: true })).toBe('split');
-    expect(action(alt('3', { code: 'Digit3' }), { editable: true })).toBe('tab-documents');
+  });
+
+  it('O-39: a text field wins over Alt+digit, so a note typed in a PDF keeps its tab and the key is not swallowed', () => {
+    const typed: ShortcutKey[] = [alt('1', { code: 'Digit1' }), alt('2', { code: 'Digit2' }), alt('3', { code: 'Digit3' }), alt('¡', { code: 'Digit1' }), alt('™', { code: 'Digit2' }), alt('2', { code: 'Numpad2' })];
+    for (const event of typed) expect(resolveShortcut(event, ctx({ editable: true })), `${event.key} in a text field`).toBeNull();
+    // The PDF note draft is a textarea inside the PDF viewer: the viewer and pdf flags are set too.
+    expect(resolveShortcut(alt('2', { code: 'Digit2' }), ctx({ editable: true, viewer: true, pdf: true }))).toBeNull();
+    // Outside a text field the same keys still switch the tabs, also inside a viewer.
+    expect(action(alt('2', { code: 'Digit2' }), { viewer: true, pdf: true })).toBe('tab-schematic');
+    expect(action(alt('2', { code: 'Digit2' }), { editable: false })).toBe('tab-schematic');
   });
 
   it('Alt+1/2/3 switch the tabs by physical key: on a Mac Option+digit reports a symbol, the numpad reports a digit', () => {
@@ -102,6 +115,34 @@ describe('resolveShortcut: with a board', () => {
   });
 });
 
+describe('resolveShortcut: Ctrl+, / Cmd+, opens Settings', () => {
+  it('both modifiers, with or without a board, and inside a viewer', () => {
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+      expect(action(press(',', modifier))).toBe('settings');
+      expect(action(press(',', modifier), EMPTY)).toBe('settings');
+      expect(action(press(',', modifier), { viewer: true })).toBe('settings');
+    }
+    expect(resolveShortcut(ctrl(','), ctx())).toEqual({ action: 'settings', prevent: true });
+  });
+
+  it('works while a text field has focus (HUNT-WIN-20261011-12): the chord types nothing; a typed comma and Alt+comma are not Settings', () => {
+    expect(action(ctrl(','), { editable: true })).toBe('settings');
+    expect(action(press(',', { metaKey: true }), { editable: true, ...EMPTY })).toBe('settings');
+    expect(action(ctrl(','), { editable: true, ...EMPTY })).toBe('settings');
+    expect(action(press(','), { editable: true })).toBeNull();
+    expect(action(press(','))).toBeNull();
+    expect(action(alt(','))).toBeNull();
+  });
+
+  it('a dialog, the note editor or a pending key request keeps the keyboard', () => {
+    for (const over of [{ modal: true }, { note: true }, { keyRequest: true }]) expect(action(ctrl(','), over), JSON.stringify(over)).toBeNull();
+  });
+
+  it('the window event the macOS app menu sends has a fixed name', () => {
+    expect(OPEN_SETTINGS_EVENT).toBe('trace:open-settings');
+  });
+});
+
 describe('shortcut hints', () => {
   it('name the platform modifier: Cmd / Option on Apple platforms (userAgentData or the legacy platform string), Ctrl / Alt elsewhere', () => {
     expect(isApplePlatform({ platform: 'MacIntel' })).toBe(true);
@@ -112,5 +153,14 @@ describe('shortcut hints', () => {
     expect(modifierLabels({ platform: 'MacIntel' })).toEqual({ mod: 'Cmd', alt: 'Option' });
     expect(modifierLabels({ platform: 'Win32' })).toEqual({ mod: 'Ctrl', alt: 'Alt' });
     expect(['Ctrl', 'Cmd']).toContain(modifierLabels().mod);
+  });
+
+  it('the search key hint names the platform key: Cmd+F on macOS, Ctrl+F on Windows and Linux (the Control glyph was wrong on macOS)', () => {
+    expect(searchShortcutLabel({ platform: 'MacIntel' })).toBe('⌘F');
+    expect(searchShortcutLabel({ userAgentData: { platform: 'macOS' } })).toBe('⌘F');
+    expect(searchShortcutLabel({ platform: 'iPad' })).toBe('⌘F');
+    expect(searchShortcutLabel({ userAgentData: { platform: 'Windows' }, platform: 'Win32' })).toBe('Ctrl+F');
+    expect(searchShortcutLabel({ platform: 'Linux x86_64' })).toBe('Ctrl+F');
+    expect(searchShortcutLabel({})).toBe('Ctrl+F');
   });
 });

@@ -5,6 +5,7 @@
   "common.delete": "Delete",
   "common.note": "Note",
   "common.skip": "Skip",
+  "common.cancel": "Cancel",
 
   "unit.components": { "one": "{count} component", "other": "{count} components" },
   "unit.pins": { "one": "{count} pin", "other": "{count} pins" },

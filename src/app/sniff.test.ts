@@ -35,6 +35,26 @@ describe('sniffDocument (browser fallback, by bytes)', () => {
     }
   });
 
+  it('recognizes byte-order-marked UTF-16 schematics in both byte orders (O-27) and still refuses UTF-16 SVG', () => {
+    // Synthetic text encoded here: a BOM (FF FE little endian, FE FF big endian), then two bytes per code unit.
+    const utf16 = (value: string, bigEndian: boolean) => {
+      const bytes = bigEndian ? [0xfe, 0xff] : [0xff, 0xfe];
+      for (let index = 0; index < value.length; index++) {
+        const unit = value.charCodeAt(index);
+        bytes.push(bigEndian ? unit >> 8 : unit & 0xff, bigEndian ? unit & 0xff : unit >> 8);
+      }
+      return Uint8Array.from(bytes);
+    };
+    for (const bigEndian of [false, true]) {
+      const order = bigEndian ? 'BE' : 'LE';
+      expect(sniffDocument(utf16('(kicad_sch (version 20231120) (generator "x"))', bigEndian)), `KiCad ${order}`).toEqual({ kind: 'schematic', format: 'kicad_sch' });
+      expect(sniffDocument(utf16('EESchema Schematic File Version 4\nEELAYER 30 0', bigEndian)), `legacy ${order}`).toEqual({ kind: 'schematic', format: 'eeschema' });
+      expect(sniffDocument(utf16('EESchema-LIBRARY Version 2.4\n#encoding utf-8', bigEndian)), `library ${order}`).toEqual({ kind: 'schematic', format: 'eeschema-lib' });
+      expect(sniffDocument(utf16('<?xml version="1.0" encoding="UTF-16"?><eagle version="9.6.2"><drawing><schematic><sheets/></schematic></drawing></eagle>', bigEndian)), `EAGLE ${order}`).toEqual({ kind: 'schematic', format: 'eagle' });
+      expect(sniffDocument(utf16('<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"/>', bigEndian)), `SVG ${order}`).toBeNull();
+    }
+  });
+
   it('refuses everything else: boards, libraries, HTML, binary noise, by extension-independent content', () => {
     expect(sniffDocument(enc('<?xml version="1.0"?><eagle version="9.6"><drawing><board/></drawing></eagle>'))).toBeNull();
     expect(sniffDocument(enc('(kicad_pcb (version 20240108))'))).toBeNull();

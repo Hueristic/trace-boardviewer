@@ -20,6 +20,30 @@ const NEEDED = Object.keys(JOB).filter(path => odbTail(path)).sort();
 /** Deterministic xorshift32 generator. */
 function rng(seed: number) { let state = seed >>> 0 || 1; return () => { state ^= state << 13; state ^= state >>> 17; state ^= state << 5; return (state >>> 0) / 0x1_0000_0000; }; }
 
+describe('layer features and tools (copper and drill records)', () => {
+  const PRODUCT: Record<string, string> = {
+    ...JOB,
+    'steps/pcb/layers/top/features': 'UNITS=MM\nP 1 2 0 P 0 8 0.0\n',
+    'steps/pcb/layers/drill/features': 'UNITS=MM\nP 3 4 0 P 0 8 0.0\n',
+    'steps/pcb/layers/drill/tools': 'TOOLS {\nNUM=1\nTYPE=PLATED\nDRILL_SIZE=900\n}\n',
+  };
+  it('keeps the layer features and tools of a product model with the other files it needs', () => {
+    const tree = readContainer(zipOf(PRODUCT), limits());
+    expect(tree?.files.has('steps/pcb/layers/top/features')).toBe(true);
+    expect(tree?.files.has('steps/pcb/layers/drill/tools')).toBe(true);
+    expect(tree?.files.has('matrix/matrix')).toBe(true);
+    expect(tree?.auxDropped).toEqual([]);
+  });
+  it('drops layer files over the layer budget, names them, and keeps the rest of the product model', () => {
+    const tree = readContainer(zipOf(PRODUCT), limits({ maxAuxBytes: 40 }));
+    expect(tree?.auxDropped.slice().sort()).toEqual(['steps/pcb/layers/drill/features', 'steps/pcb/layers/drill/tools']);
+    expect(tree?.files.has('steps/pcb/layers/top/features')).toBe(true);
+    expect(tree?.files.has('steps/pcb/layers/drill/tools')).toBe(false);
+    expect(tree?.files.has('matrix/matrix')).toBe(true);
+    expect(tree?.files.has('steps/pcb/layers/comp_+_top/components')).toBe(true);
+  });
+});
+
 describe('entry paths', () => {
   it('normalizes separators and case and refuses anything that could leave the archive root', () => {
     expect(normalizeEntryPath('./Job\\Steps//PCB/./eda/DATA')).toBe('job/steps/pcb/eda/data');
@@ -34,7 +58,7 @@ describe('entry paths', () => {
     expect(odbTail('job/steps/pcb/layers/comp_+_bot/components.z')).toEqual({ root: 'job/', tail: 'steps/pcb/layers/comp_+_bot/components.z' });
     expect(odbTail('export/job/misc/info')).toEqual({ root: 'export/job/', tail: 'misc/info' });
     expect(odbTail('a/b/c/matrix/matrix')).toBeNull();
-    expect(odbTail('job/steps/pcb/layers/top/features')).toBeNull(); // copper features are never kept
+    expect(odbTail('job/steps/pcb/layers/top/features')).toEqual({ root: 'job/', tail: 'steps/pcb/layers/top/features' }); // layer features are kept, under their own budget
     expect(odbTail('job/steps/pcb/eda/data/extra')).toBeNull();
   });
 });

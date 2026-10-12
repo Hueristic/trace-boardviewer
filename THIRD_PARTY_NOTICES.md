@@ -5,8 +5,12 @@ TRACE's original source and artwork are covered by the root `LICENSE`. The appli
 | Component | License text |
 | --- | --- |
 | React and React DOM | [MIT](assets/licenses/react-LICENSE.txt) |
+| scheduler 0.28.0 (the scheduler React DOM uses; bundled into the renderer) | [MIT](assets/licenses/scheduler-MIT.txt) |
+| Electron 44.5.1 runtime (the application's Electron build, with its Chromium components) | [LICENSE.electron.txt](assets/licenses/electron-LICENSE.electron.txt); the Chromium notices are in `LICENSES.chromium.html`, shipped with the runtime |
 | cfb (development dependency, not part of the application; only the tests use it, to build synthetic OLE containers — the Altium reader is original code) | [Apache-2.0](assets/licenses/cfb-Apache-2.0.txt) |
 | fast-xml-parser (EAGLE XML) | [MIT](assets/licenses/fast-xml-parser-MIT.txt) |
+| Packages bundled with fast-xml-parser 5.11.2 (EAGLE XML): anynum 1.0.1, fast-xml-builder 1.3.1, is-unsafe 2.0.2, path-expression-matcher 1.6.2, strnum 2.4.2, xml-naming 0.3.0 | [anynum](assets/licenses/anynum-MIT.txt), [fast-xml-builder](assets/licenses/fast-xml-builder-MIT.txt), [is-unsafe](assets/licenses/is-unsafe-MIT.txt), [path-expression-matcher](assets/licenses/path-expression-matcher-MIT.txt), [strnum](assets/licenses/strnum-MIT.txt), [xml-naming](assets/licenses/xml-naming-MIT.txt), all MIT |
+| @nodable/entities 3.1.0 (bundled with fast-xml-parser; MIT by its `package.json`, the package ships no licence file, so none is copied) | MIT (package metadata only) |
 | fflate (project export in the main process, gzip inflation for the ODB++ reader) | [MIT](assets/licenses/fflate-MIT.txt) |
 | DES tables/algorithm used for XZZ record decryption (following dhuertas/DES) | [MIT](assets/licenses/des-dhuertas-MIT.txt) |
 | OpenBoardView (file-format reference for BDV/BVR/ASC/BRD semantics; no code is copied) | [MIT](assets/licenses/openboardview-MIT.txt) |
@@ -38,6 +42,8 @@ The FZ and CAE default key words let TRACE open files in those two formats witho
 The PDF.js resources are copied unmodified from `node_modules/pdfjs-dist` into `dist/pdfjs/{cmaps,standard_fonts,wasm,iccs}/` at build time, together with the license files that ship in the same upstream folders (`LICENSE`, `LICENSE_*`), and are read from the application directory only: a PDF never causes a network request. The Liberation Sans fonts are separate font data files (not linked into TRACE's code); they are used by PDF.js to draw text of non-embedded Helvetica/Arial-family fonts, and their license text is preserved in full. The PDF.js worker (`pdf.worker`) is a separate Apache-2.0 JavaScript module. The QuickJS engine of PDF.js' document-scripting sandbox (`quickjs-eval.*`) is deliberately not shipped: document scripting is not supported.
 
 The text recognition engine (Tesseract with Leptonica, libpng, zlib, libjpeg, LibTIFF and libwebp, compiled to WebAssembly by the tesseract.js-core project) and the English language data are copied unmodified from `node_modules/tesseract.js-core` and `node_modules/@tesseract.js-data/eng` into `dist/assets/` at build time; the two packages are development dependencies, so nothing else of them is shipped. They run in a dedicated worker with no network access and are read from the application directory only: nothing is downloaded at run time. The engine's own licence text is the `LICENSE` file of tesseract.js-core; the texts of the libraries compiled into it are the upstream licence statements, as also reproduced in Electron's `LICENSES.chromium.html`. This software is based in part on the work of the Independent JPEG Group.
+
+Not shipped in the application, so not listed above: `@napi-rs/canvas` 1.0.10 (MIT, the Node-only canvas path of pdfjs-dist, excluded from app.asar by `build.files`), `@types/react` (type declarations only) and every development, build and test tool in `devDependencies`. The production dependencies of `package.json` (React, React DOM, fast-xml-parser, fflate, lucide-react, pdfjs-dist and the two font packages) and their bundled transitive packages are the ones listed in the table.
 
 The extracted Electron runtime includes its upstream license as `LICENSE.electron.txt`, alongside `LICENSES.chromium.html`. These notices cover Electron, Chromium and their included components and remain part of the portable EXE's payload.
 

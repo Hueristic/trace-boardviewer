@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { allegroHook, parseAllegro } from './allegro';
 import { makeAllegro } from './allegro-fixture';
-import { BoardFormatError } from './common';
+import { BoardFormatError, MAX_NATIVE_ALLEGRO_IMPORT_BYTES, MAX_NATIVE_ALLEGRO_RECORDS } from './common';
 import { parseBoard, parseWith } from './index';
 import { collectDiagnostic } from '../diagnostics/collect';
 import allegroAdapter from './adapters/allegro-brd';
@@ -100,15 +100,38 @@ describe('native Allegro database', () => {
     expect(failure(fixture.data).code).toBe('LIMIT_EXCEEDED');
   });
 
+  it('refuses a native database one byte above the native import limit and accepts one exactly at it', () => {
+    const limit = MAX_NATIVE_ALLEGRO_IMPORT_BYTES, data = new Uint8Array(limit + 1);
+    data.set(makeAllegro().data);
+    expect(parse(data.subarray(0, limit)).pins).toHaveLength(2);
+    expect(failure(data)).toMatchObject({ code: 'LIMIT_EXCEEDED', format: 'allegro-brd' });
+    expect(failure(data).message).toBe('Allegro: database exceeds the 240 MiB import limit.');
+    expect(failure(data).issue).toEqual({ key: 'parse.error.nativeByteLimit', params: { max: 240 } });
+  }, 60_000);
+  it('applies the same native limit through the format dispatcher', () => {
+    const limit = MAX_NATIVE_ALLEGRO_IMPORT_BYTES, data = new Uint8Array(limit + 1);
+    data.set(makeAllegro().data);
+    expect(parseBoard({ name: 'native.brd', data: data.subarray(0, limit) }).format).toBe('Allegro BRD');
+    expect(() => parseBoard({ name: 'native.brd', data })).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED', message: 'Allegro: database exceeds the 240 MiB import limit.' }));
+  }, 60_000);
+  it('refuses a native database that declares more objects than the record budget', () => {
+    const fixture = makeAllegro();
+    new DataView(fixture.data.buffer).setUint32(20, MAX_NATIVE_ALLEGRO_RECORDS + 1, true);
+    expect(failure(fixture.data)).toMatchObject({ code: 'LIMIT_EXCEEDED', format: 'allegro-brd' });
+    expect(failure(fixture.data).message).toMatch(/record limit/);
+    expect(failure(fixture.data).issue).toEqual({ key: 'parse.error.nativeRecordLimit', params: { max: MAX_NATIVE_ALLEGRO_RECORDS } });
+  });
   it('rejects an undocumented side as an unsupported variant', () => {
     const fixture = makeAllegro(); fixture.data[fixture.offsets.component + 2] = 8;
     expect(failure(fixture.data).code).toBe('UNSUPPORTED_VARIANT');
+    expect(failure(fixture.data).issue).toEqual({ key: 'parse.error.allegroLayerUnsupported', params: { code: 8 } });
   });
 
   it('identifies legacy layouts and reports only the writer version before refusing their records', async () => {
     const data = unsupportedAllegro(0x00120a0a, 'allv15-7');
     expect(failure(data)).toMatchObject({ code: 'UNSUPPORTED_VARIANT', format: 'allegro-brd' });
     expect(failure(data).message).toMatch(/layout 0x00120a00.*requires a documented 16\.0–17\.5 layout/);
+    expect(failure(data).issue).toEqual({ key: 'parse.error.allegroLayoutUnsupported', params: { layout: '0x00120a00' } });
     const report = await collectDiagnostic({ name: 'renamed.bin', data }, { os: 'win32' });
     expect(report.structure).toMatchObject({ hook: 'allegro-brd', headerOk: false, header: { codes: { version: 157 } } });
     expect(report.detection.adapters.find(entry => entry.id === 'allegro-brd')).toMatchObject({ sniff: 'certain', code: 'UNSUPPORTED_VARIANT', stage: 'header' });

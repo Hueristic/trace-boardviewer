@@ -13,16 +13,31 @@
   "help.footer": "Mouse wheel: zoom at the cursor. Drag: pan the board. Click: select a component or pin.",
   "help.diagnosticReport": "Format diagnostic report…",
   "help.diagnosticHint": "Describes a file that does not open, without its content.",
-
+  "help.settings": "Open settings",
   "recents.title": "Recent boards",
   "recents.empty": "No file has been opened yet.",
   "recents.openOther": "Open another file",
-
   "info.title": "Board information",
   "info.format": "Format",
   "info.size": "Board size",
   "info.counts": "Components / pins / nets",
   "info.footer": "Guide lines show net connectivity. They do not replace the geometry of the copper traces in the file.",
+  "key.skipHelp": "You can skip this step and keep using the app. This encrypted file will remain unopened until a matching key is supplied.",
+  "help.shortcutTabs": "Board / Schematic / Documents tab",
+  "help.shortcutSplit": "Split view on / off",
+  "help.shortcutResize": "Resize split panes (divider focused)",
+  "help.shortcutResults": "Search results: move / open",
+  "help.shortcutClearSearch": "Clear the search field (second press leaves it)",
 
-  "key.skipHelp": "You can skip this step and keep using the app. This encrypted file will remain unopened until a matching key is supplied."
+  "dialogs.keyTitleFz": "FZ / CAE encryption key",
+  "dialogs.keyTitleXzz": "XZZ encryption key",
+  "dialogs.keyLabelFz": "Paste the 44 hexadecimal 32-bit words of the vendor key (0x optional; spaces, commas or new lines between them).",
+  "dialogs.keyLabelXzz": "Enter the 16 hexadecimal digits of the key.",
+  "dialogs.keyValid": "Key format is valid. It is kept for this session only and never saved.",
+  "dialogs.keyUse": "Use key",
+  "dialogs.shortcutResizeKeys": "← →  ·  Shift = big steps  ·  Enter = reset",
+  "dialogs.keyXzzHexOnly": "Only hexadecimal digits (0-9, a-f) are allowed.",
+  "dialogs.keyXzzCount": "Enter exactly 16 hexadecimal digits ({count} so far).",
+  "dialogs.keyFzWordInvalid": "\"{word}\" is not a hexadecimal 32-bit word.",
+  "dialogs.keyFzWordCount": "Enter 44 hexadecimal 32-bit words ({count} so far)."
 }

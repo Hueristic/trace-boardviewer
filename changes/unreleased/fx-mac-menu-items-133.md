@@ -1,0 +1,1 @@
+- On macOS the application menu items About, Hide, Hide Others, Show All, Quit, Undo, Redo, Cut, Copy, Paste, Select All, Minimize, Zoom and Close Window are shown in the language of the application. They stayed in English before, whatever the language.

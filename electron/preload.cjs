@@ -31,15 +31,17 @@ function call(channel, ...args) {
 // Close/quit flush (W-fin-lifecycle-02): before it destroys the window or shuts the store down, the main process
 // sends 'trace:flush-request' with a number. Every listener registered through onFlushRequest writes what the
 // renderer still holds (the debounced workspace snapshot) and may return a promise; once all of them settled the
-// answer 'trace:flush-done' goes back with the same number. With no listener it answers at once, so a renderer
-// that has not subscribed (yet) never holds the main process up. The request is only ever listened to here.
+// answer 'trace:flush-done' goes back with the same number and whether every one of them succeeded: a listener that
+// rejects reports what it holds as not saved, and the main process then keeps the window open and asks (U-04). With
+// no listener it answers at once, so a renderer that has not subscribed (yet) never holds the main process up. The
+// request is only ever listened to here.
 const flushListeners = new Set();
 ipcRenderer.on('trace:flush-request', (_event, id) => {
   if (!Number.isSafeInteger(id)) return;
   const pending = [...flushListeners].map((listener) => {
     try { return Promise.resolve(listener()); } catch (error) { return Promise.reject(error); }
   });
-  void Promise.allSettled(pending).then(() => ipcRenderer.send('trace:flush-done', id));
+  void Promise.allSettled(pending).then((results) => ipcRenderer.send('trace:flush-done', id, results.every((result) => result.status === 'fulfilled')));
 });
 function onFlushRequest(listener) {
   if (typeof listener !== 'function') throw new TypeError('The flush listener must be a function.'); // Developer-facing; the sandboxed preload stays standalone.
@@ -47,7 +49,21 @@ function onFlushRequest(listener) {
   return () => { flushListeners.delete(listener); };
 }
 
+// The language saved in the settings, read synchronously before the first paint (TB-041): the renderer starts in it instead of the system
+// language. null when none is saved (a new profile, or a settings file that could not be read); a failed read also gives null.
+const initialLanguage = (() => {
+  try {
+    const value = ipcRenderer.sendSync('trace:initial-language');
+    return typeof value === 'string' ? value : null;
+  } catch {
+    return null;
+  }
+})();
+
 contextBridge.exposeInMainWorld('traceDesktop', Object.freeze({
+  // True only when the main process set the QA switch of the device database for this window (electron/device-switch.cjs).
+  qaDeviceDatabase: typeof process !== 'undefined' && process.argv?.includes('--trace-qa-device-database') === true,
+  initialLanguage,
   // Board payloads carry the original bytes: structured clone delivers the main-process Uint8Array
   // (and any companion sidecars) to the renderer as Uint8Array values.
   openBoard: () => call('trace:open-board'),
@@ -56,6 +72,7 @@ contextBridge.exposeInMainWorld('traceDesktop', Object.freeze({
   initialBoard: () => call('trace:initial-board'),
   recentBoards: () => call('trace:recent-boards'),
   getSettings: () => call('trace:get-settings'),
+  getConfigState: () => call('trace:config-state'),
   saveSettings: (settings) => call('trace:save-settings', settings),
   getNotes: (boardKey) => call('trace:get-notes', boardKey),
   saveNotes: (boardKey, notes) => call('trace:save-notes', boardKey, notes),
@@ -83,26 +100,53 @@ contextBridge.exposeInMainWorld('traceDesktop', Object.freeze({
   appendReadings: (familyId, events) => call('trace:append-readings', familyId, events),
   importReadings: () => call('trace:import-readings'),
   exportReadings: (request) => call('trace:export-readings', request),
+  // Library device catalogue (main process: electron/library/devices-bridge.cjs). Roots are named by the id libraryPickRoot returns; a
+  // scan takes ids and step switches only, and the corrections take the document only. No path or URL is ever sent from here.
+  libraryPickRoot: () => call('trace:library-pick-root'),
+  libraryListRoots: () => call('trace:library-list-roots'),
+  libraryRemoveRoot: (request) => call('trace:library-remove-root', request),
+  libraryScan: (request) => call('trace:library-scan', request),
+  libraryCancelScan: () => call('trace:library-cancel-scan'),
+  libraryScanSkipStep: (request) => call('trace:library-scan-skip-step', request),
+  libraryListFolders: (request) => call('trace:library-list-folders', request),
+  libraryListBoards: (request) => call('trace:library-list-boards', request),
+  libraryBoardDetail: (request) => call('trace:library-board-detail', request),
+  libraryLoadCorrections: () => call('trace:library-load-corrections'),
+  librarySaveCorrections: (document) => call('trace:library-save-corrections', document),
   // Support notice and top bar heart: the renderer names one of three fixed links by id ('stripe' | 'kofi' | 'support'); bug reports stay in-app.
   openSupportLink: (id) => call('trace:open-support-link', id),
   getSupportStatus: () => call('trace:get-support-status'),
   prepareSupport: () => call('trace:prepare-support'),
-  checkSupport: () => call('trace:check-support'),
-  // Update notification: neither call takes an argument (none is forwarded). The main process fetches the release info itself and keeps the validated tag; the renderer never sends a URL or a tag.
+  // Only the Verify button passes { userAction: true }: the one call that may reach the network while the support opt-in is off.
+  checkSupport: (request) => call('trace:check-support', { userAction: request?.userAction === true }),
+  // Update notification: startup and manual checks use distinct main-process gates; neither call takes an argument. The renderer never sends a URL or a tag.
+  checkForStartupUpdates: () => call('trace:check-for-startup-updates'),
   checkForUpdates: () => call('trace:check-for-updates'),
   openUpdatePage: () => call('trace:open-update-page'),
   // Network activity (Settings > Network): neither call takes an argument (none is forwarded). The log is read-only for the renderer, which can only empty it;
   // it can neither name a URL or a host nor start a request.
   getNetworkActivity: () => call('trace:get-network-activity'),
   clearNetworkActivity: () => call('trace:clear-network-activity'),
+  // Linux "Do not ask again" (Settings > Linux): the renderer reads whether the answer is stored and can take it back. No argument is forwarded.
+  getNoSandboxConsent: () => call('trace:get-no-sandbox-consent'),
+  revokeNoSandboxConsent: () => call('trace:revoke-no-sandbox'),
   minimize: () => ipcRenderer.send('trace:minimize'),
   maximize: () => ipcRenderer.send('trace:maximize'),
   close: () => ipcRenderer.send('trace:close'),
   isMaximized: () => call('trace:is-maximized'),
   onMaximized: (listener) => subscribe('trace:maximized', listener),
+  onConfigStateChanged: (listener) => subscribe('trace:config-state-changed', listener),
+  onSettingsChanged: (listener) => subscribe('trace:settings-changed', listener), // the settings were read again after a lock ended (main.cjs)
+  // The path of a file the user dropped (a real File object only). Main grants it before this returns (see electron/path-grants.cjs).
   droppedFilePath: (file) => {
-    try { return webUtils.getPathForFile(file); } catch { return ''; }
+    try {
+      const filename = webUtils.getPathForFile(file);
+      if (filename) ipcRenderer.sendSync('trace:grant-dropped', filename);
+      return filename;
+    } catch { return ''; }
   },
   onOpenBoard: (listener) => subscribe('trace:board-opened', listener),
+  // An external open (second instance, open-file) that could not be read: the message, in the application's language.
+  onOpenFailed: (listener) => subscribe('trace:open-failed', listener),
   onFlushRequest,
 }));

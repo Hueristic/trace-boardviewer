@@ -1,0 +1,1 @@
+- Documents list: picking a schematic now shows that schematic in the Schematic tab. Before, the tab kept showing the last cross-probed schematic, so a second schematic in the list could not be reached from the list.

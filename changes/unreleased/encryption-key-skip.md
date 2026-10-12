@@ -1,1 +1,0 @@
-- Encryption-key entry explicitly offers Skip and explains that the app stays usable while the individual encrypted file remains unopened. FZ/CAE still tries the published default key automatically; no application activation licence is required.

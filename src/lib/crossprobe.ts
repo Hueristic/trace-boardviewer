@@ -360,7 +360,7 @@ export function buildSchematicIndex(designs: readonly (SchematicDesign | Schemat
 
 export type RefLinkStatus = 'unique' | 'ambiguous' | 'board-only' | 'schematic-only' | 'alias';
 export type RefReason =
-  | 'several-schematic-placements' | 'several-board-parts' | 'unannotated-schematic-reference' | 'duplicate-annotation' | 'alias-target-missing'
+  | 'several-schematic-placements' | 'several-schematic-documents' | 'several-board-parts' | 'unannotated-schematic-reference' | 'duplicate-annotation' | 'alias-target-missing'
   | 'alias-overrides-exact-match' | 'schematic-dnp' | 'no-schematic-part' | 'no-board-component';
 export type PinStatus = 'match' | 'net-differs' | 'pin-missing-on-board' | 'pin-missing-on-schematic' | 'ambiguous' | 'net-unknown';
 export type PinReason =
@@ -544,10 +544,7 @@ export function linkBoardSchematic(board: BoardIndex, schematic: SchematicIndex,
       continue;
     }
     const ambiguity: RefReason[] = [];
-    if (parts.length > 1) {
-      const perRef = new Set<string>();
-      for (const part of parts) { if (perRef.has(part.refKey)) { ambiguity.push('several-schematic-placements'); break; } perRef.add(part.refKey); }
-    }
+    if (parts.length > 1) ambiguity.push(...placementReasons(parts));
     if (components.length > 1) ambiguity.push('several-board-parts');
     if (parts.some(part => part.unannotated)) ambiguity.push('unannotated-schematic-reference');
     if (parts.some(part => part.duplicateAnnotation)) ambiguity.push('duplicate-annotation');
@@ -688,8 +685,26 @@ export function linkBoardSchematic(board: BoardIndex, schematic: SchematicIndex,
 
 export type MappingStatus = 'unique' | 'ambiguous' | 'missing';
 export type MappingReason =
-  | 'several-schematic-placements' | 'several-board-parts' | 'alias-merged-parts' | 'unannotated-schematic-reference' | 'duplicate-annotation' | 'schematic-pin-nets-conflict' | 'board-pin-nets-conflict'
+  | 'several-schematic-placements' | 'several-schematic-documents' | 'several-board-parts' | 'alias-merged-parts' | 'unannotated-schematic-reference' | 'duplicate-annotation' | 'schematic-pin-nets-conflict' | 'board-pin-nets-conflict'
   | 'no-schematic-part' | 'no-board-component' | 'pin-missing-on-schematic' | 'pin-missing-on-board' | 'unknown-component' | 'unknown-pin' | 'unknown-symbol' | 'virtual-symbol' | 'unknown-net' | 'several-schematic-nets' | 'several-board-nets' | 'no-schematic-net' | 'no-board-net';
+/**
+ * O-42: the placement reasons of the schematic parts that share one reference. Repeats inside one schematic document are
+ * "placed more than once"; the same reference in another attached schematic is its own reason, so a duplicate in a different
+ * file is never reported as a second placement inside this one.
+ */
+function placementReasons(parts: readonly { documentId: string; refKey: string }[]): Array<'several-schematic-placements' | 'several-schematic-documents'> {
+  const placements = new Map<string, number>(), documentsOf = new Map<string, Set<string>>();
+  for (const { documentId, refKey } of parts) {
+    const placed = documentId + SEP + refKey;
+    placements.set(placed, (placements.get(placed) ?? 0) + 1);
+    const documents = documentsOf.get(refKey) ?? new Set<string>();
+    documents.add(documentId); documentsOf.set(refKey, documents);
+  }
+  const reasons: Array<'several-schematic-placements' | 'several-schematic-documents'> = [];
+  if ([...placements.values()].some(count => count > 1)) reasons.push('several-schematic-placements');
+  if ([...documentsOf.values()].some(documents => documents.size > 1)) reasons.push('several-schematic-documents');
+  return reasons;
+}
 /** `unique` = exactly one counterpart and no duplicate on either side; `ambiguous` = the UI must make the user choose; `missing` = nothing links. */
 export interface Mapping<T> {
   status: MappingStatus;
@@ -770,10 +785,8 @@ export function mapBoardSelectionToSchematic(board: BoardIndex, schematic: Schem
   if (!matched.length) return nothing('pin-missing-on-schematic');
   const reasons: MappingReason[] = [];
   if ((board.byRef.get(key)?.length ?? 1) > 1) reasons.push('several-board-parts');
-  const perRef = new Set<string>();
-  let repeated = false;
-  for (const { part } of parts) { if (perRef.has(part.refKey)) repeated = true; perRef.add(part.refKey); }
-  if (repeated) reasons.push('several-schematic-placements');
+  const placed = placementReasons(parts.map(({ part }) => part));
+  if (placed.length) reasons.push(...placed);
   else if (matched.length > 1 && aliasedKeys) reasons.push('alias-merged-parts');
   if (parts.some(({ part }) => part.unannotated)) reasons.push('unannotated-schematic-reference');
   if (parts.some(({ part }) => part.duplicateAnnotation)) reasons.push('duplicate-annotation');
@@ -807,7 +820,7 @@ export function mapSchematicSelectionToBoard(board: BoardIndex, schematic: Schem
   if (!matched.length) return nothing('pin-missing-on-board');
   const reasons: MappingReason[] = [];
   if (components.length > 1) reasons.push('several-board-parts');
-  if ((schematic.partsByRef.get(part.refKey)?.length ?? 1) > 1) reasons.push('several-schematic-placements');
+  reasons.push(...placementReasons(schematic.partsByRef.get(part.refKey) ?? [part]));
   if (part.unannotated) reasons.push('unannotated-schematic-reference');
   if (part.duplicateAnnotation) reasons.push('duplicate-annotation');
   if (number !== undefined && matched.some(component => groupOf(component)!.nets.length > 1)) reasons.push('board-pin-nets-conflict');

@@ -238,8 +238,10 @@ export function parseFz(input: ParseInput): Board | null {
   const data = unwrapFzContainer(input.data);
   if (data.length > MAX_IMPORT_BYTES) throw new BoardFormatError(`${format}: file exceeds the 64 MiB import limit.`, 'LIMIT_EXCEEDED', 'FZ/CAE');
   // keyKind travels only with key errors: the UI opens its key dialog on these two codes and nothing else.
-  function fail(message: string, code: FormatErrorCode = 'INVALID_FORMAT'): never {
-    throw new BoardFormatError(`${format}: ${message}`, code, 'FZ/CAE', code === 'KEY_REQUIRED' || code === 'INVALID_KEY' ? 'fz' : undefined);
+  function fail(message: string, code: FormatErrorCode = 'INVALID_FORMAT', issue?: ParseIssue): never {
+    const error = new BoardFormatError(`${format}: ${message}`, code, 'FZ/CAE', code === 'KEY_REQUIRED' || code === 'INVALID_KEY' ? 'fz' : undefined);
+    if (issue) error.issue = issue;
+    throw error;
   }
   if (CONTENT_SIGNATURE.test(asciiPrefix(data, 64))) return buildBoard(input, parseFzContent(decodeText(data), undefined, format)); // already decoded content (upstream only reads containers)
   if (looksLikeText(data)) return null; // any other text belongs to another format
@@ -264,7 +266,7 @@ export function parseFz(input: ParseInput): Board | null {
   // (KEY_REQUIRED). Once the built-in key has produced the container header, a later failure means the file is damaged.
   if (!hasFzZlibHeader(head)) {
     if (hasFzZlibHeader(data)) fail('unencrypted container lengths are inconsistent.');
-    if (explicitKey === undefined) fail('this file is encrypted and the built-in key does not open it; the vendor RC6 key (44 32-bit words) is required.', 'KEY_REQUIRED');
+    if (explicitKey === undefined) fail('this file is encrypted and the built-in key does not open it; the vendor RC6 key (44 32-bit words) is required.', 'KEY_REQUIRED', { key: 'parse.error.fzKeyRequired', params: { format } });
     fail('the key did not produce a valid container; check the key.', 'INVALID_KEY');
   }
   const damaged = (message: string, keyMessage: string): never => explicitKey === undefined ? fail(message) : fail(keyMessage, 'INVALID_KEY');

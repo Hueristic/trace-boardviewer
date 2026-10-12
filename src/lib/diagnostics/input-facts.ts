@@ -4,7 +4,7 @@
  * file is ever copied into a fact: every value is a member of a closed enumeration or a rounded number.
  */
 import { detectUnsupported } from '../formats/recognizers';
-import { EXTENSIONS, log2Ceil, type Container, type DiagnosticReport, type Encoding, type LineEndings } from './report';
+import { EXTENSIONS, log2Ceil, type Container, type DiagnosticReport, type Encoding, type LineEndings, type OsFamily } from './report';
 
 type InputFacts = DiagnosticReport['input'];
 const TEXT_SAMPLE = 64 * 1024;
@@ -20,8 +20,10 @@ const zlibAt = (data: Uint8Array, offset: number): boolean =>
   data.length >= offset + 6 && (data[offset] & 0x0f) === 8 && (data[offset] >> 4) <= 7 && ((data[offset] << 8) | data[offset + 1]) % 31 === 0 && !(data[offset + 1] & 0x20);
 
 /** The extension class: a whitelisted lowercase extension, "other", or "none". Only the part after the last dot is looked at. */
-export function extensionClass(name: string): string {
-  const base = name.split(/[\\/]/).pop() ?? '';
+export function extensionClass(name: string, os: OsFamily): string {
+  // On win32 both separators split the directories; elsewhere only the slash does (a backslash is part of a POSIX file name).
+  const cut = os === 'win32' ? Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) : name.lastIndexOf('/');
+  const base = name.slice(cut + 1);
   const dot = base.lastIndexOf('.');
   if (dot <= 0 && !(dot === 0 && base.length > 1)) return 'none';
   const extension = base.slice(dot).toLowerCase();
@@ -144,14 +146,14 @@ export function entropyProfile(data: Uint8Array): number[] {
 }
 
 /** Every input fact of one file plus its companions (by name only: the companions' extensions and how many there are). */
-export function inputFacts(name: string, data: Uint8Array, companions: Readonly<Record<string, Uint8Array>>): InputFacts {
+export function inputFacts(name: string, data: Uint8Array, companions: Readonly<Record<string, Uint8Array>>, os: OsFamily): InputFacts {
   const magic = magicLabel(data);
   const text = textFacts(data, magic);
   const companionNames = Object.keys(companions).sort().slice(0, 8);
   return {
-    extension: extensionClass(name),
+    extension: extensionClass(name, os),
     sizeLog2: Math.min(27, log2Ceil(data.length)),
-    companions: { count: companionNames.length, extensions: companionNames.map(extensionClass) },
+    companions: { count: companionNames.length, extensions: companionNames.map((companion) => extensionClass(companion, os)) },
     container: containerKind(data, magic),
     textLike: text.textLike,
     encoding: text.encoding,

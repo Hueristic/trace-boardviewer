@@ -9,7 +9,7 @@ Never attach proprietary or customer files; a description or a small file of you
 ## What TRACE does and does not do
 
 - Board, schematic and document files are read locally and are never uploaded; there is no account and no telemetry.
-- An optional stable-update check contacts `api.github.com` once at start, switchable in Settings. It sends no board data, never
+- An optional stable-update check is off until you choose it at the first start (you can change it in Settings); when it is on, it contacts `api.github.com` once at start. It sends no board data, never
   downloads or runs an update, and only shows a release-page link.
 - Optional support verification contacts `trace-support.trace-boardviewer.workers.dev` only after the user's explicit Verify
   payment action. It sends a random app-generated reference, never a name, email, amount, board, note or credential. Stripe and

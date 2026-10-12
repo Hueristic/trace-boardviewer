@@ -7,7 +7,8 @@ import type { Bounds2, Point2, ViewTransform } from '../lib/geometry';
 import { canvasGroup, classifyComponent } from '../lib/part-kind';
 import type { CanvasGroup } from '../lib/part-kind';
 import { clipSegmentToBounds } from '../lib/render-geometry';
-import type { Board, BoardComponent, BoardPin, BoardSide, Language, ViewSide } from '../lib/types';
+import type { Board, BoardComponent, BoardCopper, BoardPin, BoardSide, Language, ViewSide } from '../lib/types';
+import { BOARD_PALETTES } from './board-palette';
 import { strokeMeasurementLine } from './board-measure-line';
 import { boundsCover, buildPadLayers, PAD_REGION_SLACK, PAD_VIEW_MARGIN_PX, planPadLayers, samePadPlan } from './board-pad-layers';
 import type { PadLayerPlan, PadLayers } from './board-pad-layers';
@@ -34,18 +35,18 @@ class RecordingPath {
   readonly ops: string[] = [];
   moveTo(x: number, y: number) { this.ops.push(`M${x},${y}`); }
   lineTo(x: number, y: number) { this.ops.push(`L${x},${y}`); }
-  arc(x: number, y: number, r: number, a: number, b: number) { this.ops.push(`A${x},${y},${r},${a},${b}`); }
+  arc(x: number, y: number, r: number, a: number, b: number, ccw?: boolean) { this.ops.push(`A${x},${y},${r},${a},${b}${ccw === undefined ? '' : `,${ccw}`}`); }
   rect(x: number, y: number, w: number, h: number) { this.ops.push(`R${x},${y},${w},${h}`); }
   closePath() { this.ops.push('Z'); }
   toString() { return this.ops.join(' '); }
 }
 
 interface ContextState {
-  transform: number[]; fillStyle: string; strokeStyle: string; lineWidth: number; globalAlpha: number; lineDash: number[]; lineDashOffset: number;
+  transform: number[]; fillStyle: string; strokeStyle: string; lineWidth: number; lineCap: string; globalAlpha: number; lineDash: number[]; lineDashOffset: number;
   shadowColor: string; shadowBlur: number; font: string; textAlign: string; textBaseline: string; clips: string[];
 }
 const initialState = (): ContextState => ({
-  transform: [1, 0, 0, 1, 0, 0], fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, globalAlpha: 1, lineDash: [], lineDashOffset: 0,
+  transform: [1, 0, 0, 1, 0, 0], fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, lineCap: 'butt', globalAlpha: 1, lineDash: [], lineDashOffset: 0,
   shadowColor: 'rgba(0, 0, 0, 0)', shadowBlur: 0, font: '10px sans-serif', textAlign: 'start', textBaseline: 'alphabetic', clips: [],
 });
 const copyState = (state: ContextState): ContextState => ({ ...state, transform: [...state.transform], lineDash: [...state.lineDash], clips: [...state.clips] });
@@ -71,6 +72,7 @@ class RecordingContext {
   get font() { return this.state.font; } set font(value: string) { this.state.font = value; }
   get textAlign() { return this.state.textAlign; } set textAlign(value: string) { this.state.textAlign = value; }
   get textBaseline() { return this.state.textBaseline; } set textBaseline(value: string) { this.state.textBaseline = value; }
+  get lineCap() { return this.state.lineCap; } set lineCap(value: string) { this.state.lineCap = value; }
 
   setTransform(a: number, b: number, c: number, d: number, e: number, f: number) { this.state.transform = [a, b, c, d, e, f]; }
   save() { this.stack.push(copyState(this.state)); }
@@ -89,7 +91,7 @@ class RecordingContext {
 
   private common() { const s = this.state; return `T=${this.t} a=${n(s.globalAlpha)} sh=${s.shadowColor}/${n(s.shadowBlur)} clip=${s.clips.join(';')}`; }
   private fillState() { return `fs=${this.state.fillStyle} ${this.common()}`; }
-  private strokeState() { const s = this.state; return `ss=${s.strokeStyle} lw=${n(s.lineWidth)} dash=${s.lineDash.map(n).join(',')}+${n(s.lineDashOffset)} ${this.common()}`; }
+  private strokeState() { const s = this.state; return `ss=${s.strokeStyle} lw=${n(s.lineWidth)} dash=${s.lineDash.map(n).join(',')}+${n(s.lineDashOffset)}${s.lineCap === 'butt' ? '' : ` lc=${s.lineCap}`} ${this.common()}`; }
   private textState() { const s = this.state; return `font=${s.font} align=${s.textAlign}/${s.textBaseline}`; }
   private shape(path?: unknown) { return path === undefined ? `[${this.path.join(' ')}]` : `{${String(path)}}`; }
 
@@ -795,6 +797,126 @@ describe('Canvas2D board renderer: feature layers and panes', () => {
       expect(created).toBe(first); // the same pad batches and part outlines: nothing new
       renderer.invalidate();
       renderer.render('base', main(), plain);
+      expect(created).toBe(first * 2);
+    } finally { vi.stubGlobal('Path2D', RecordingPath); }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Copper of the board (Board.copper): drawn by the outline layer, culled and batched like the pads
+// ---------------------------------------------------------------------------------------------
+
+describe('Canvas2D board renderer: copper of the board', () => {
+  const palette = BOARD_PALETTES.dark;
+  const plain = testBoard();
+  // Pads, tracks, an arc and holes on both sides near the board, and a few records far outside it (outside the view, so not drawn).
+  const copper: BoardCopper = {
+    pads: [
+      { side: 'top', x: 20, y: 30, shape: 'round', width: 0.6, height: 0.6, rotation: 0, mirrored: false },
+      { side: 'top', x: 40, y: 30, shape: 'rect', width: 1.2, height: 0.6, rotation: 90, mirrored: false },
+      { side: 'bottom', x: 25, y: 60, shape: 'oval', width: 1, height: 2, rotation: 45, mirrored: false },
+      { side: 'top', x: 500, y: 500, shape: 'square', width: 0.5, height: 0.5, rotation: 0, mirrored: false },
+    ],
+    lines: [
+      { side: 'top', x1: 10, y1: 10, x2: 60, y2: 10, width: 0.25 },
+      { side: 'bottom', x1: 10, y1: 15, x2: 60, y2: 15, width: 0.25 },
+      { side: 'top', x1: 300, y1: 300, x2: 310, y2: 300, width: 0.25 },
+    ],
+    arcs: [{ side: 'top', x1: 60, y1: 10, x2: 65, y2: 15, cx: 60, cy: 15, width: 0.25, clockwise: true }],
+    holes: [
+      { x: 20, y: 30, shape: 'round', width: 0.9, height: 0.9, rotation: 0, plating: 'plated' },
+      { x: 90, y: 40, shape: 'oval', width: 1, height: 2, rotation: 0, plating: 'non-plated' },
+      { x: 400, y: 400, shape: 'round', width: 0.3, height: 0.3, rotation: 0, plating: 'unknown' },
+    ],
+  };
+  const withCopper: Board = { ...plain, copper };
+  const view: ViewTransform = { center: boundsCenter(plain.bounds), scale: 7, rotation: 0, mirrored: false };
+  const state: BoardRenderState = {
+    theme: 'dark', selectedComponentId: null, selectedPinId: null, selectedNet: null, showLabels: true, showConnections: true, measureMode: false, language: 'en',
+    hoverComponentId: null, dragging: false, measurement: [], cursor: null, selectionPulse: 1,
+  };
+  const logOf = (board: Board, side: ViewSide = 'top', selectedNet: string | null = null): string[] => {
+    const base = new RecordingContext(), overlay = new RecordingContext();
+    const renderer = new Canvas2DBoardRenderer(canvasOf(base), canvasOf(overlay));
+    renderer.setScene(buildBoardScene(board)); renderer.setSize({ width: WIDTH, height: HEIGHT, dpr: 1 }); renderer.setLayers([]);
+    renderer.render('base', [fullPane(view, side, WIDTH, HEIGHT)], { ...state, selectedNet });
+    return base.take();
+  };
+  const isCopper = (line: string, colour: string) => line.includes(`fs=${colour} `) || line.includes(`ss=${colour} `);
+
+  it('draws no copper for a board without copper, and the same operations for an empty copper record', () => {
+    const absent = logOf(plain);
+    expect(absent.some(line => isCopper(line, palette.copperTop) || isCopper(line, palette.copperBottom))).toBe(false);
+    expect(logOf({ ...plain, copper: undefined })).toEqual(absent);
+    expect(logOf({ ...plain, copper: { pads: [], lines: [], arcs: [], holes: [] } })).toEqual(absent);
+  });
+
+  it('draws the copper between the board fill and the parts, with the holes over the copper', () => {
+    const log = logOf(withCopper);
+    const fill = log.findIndex(line => line.startsWith('fill ') && line.includes(`fs=${palette.board} `));
+    const copperAt = log.findIndex(line => isCopper(line, palette.copperTop));
+    const hole = log.findIndex((line, index) => index > copperAt && line.startsWith('fill ') && line.includes(`fs=${palette.background} `));
+    const part = log.findIndex(line => line.startsWith('fill ') && [palette.body, palette.chip, palette.connector].some(colour => line.includes(`fs=${colour} `)));
+    expect([fill, copperAt, hole, part].every(index => index >= 0)).toBe(true);
+    expect(fill).toBeLessThan(copperAt);
+    expect(copperAt).toBeLessThan(hole);
+    expect(hole).toBeLessThan(part);
+  });
+
+  it('draws the copper of the viewed side only, and the holes on both sides', () => {
+    const top = logOf(withCopper, 'top'), bottom = logOf(withCopper, 'bottom');
+    expect(top.some(line => isCopper(line, palette.copperTop))).toBe(true);
+    expect(top.some(line => isCopper(line, palette.copperBottom))).toBe(false);
+    expect(bottom.some(line => isCopper(line, palette.copperBottom))).toBe(true);
+    expect(bottom.some(line => isCopper(line, palette.copperTop))).toBe(false);
+    for (const log of [top, bottom]) expect(log.some(line => line.startsWith('fill ') && line.includes(`fs=${palette.background} `))).toBe(true);
+  });
+
+  it('draws only the copper the view touches: no far record reaches the drawing operations', () => {
+    const log = logOf(withCopper);
+    const copperOps = log.filter(line => isCopper(line, palette.copperTop) || (line.startsWith('fill ') && line.includes(`fs=${palette.background} `)));
+    const points = copperOps.flatMap(line => {
+      const shape = /^(?:fill|stroke) \{([^}]*)\}/.exec(line)?.[1] ?? '';
+      return shape.split(' ').map(op => /^[MLA]([-\d.e]+),([-\d.e]+)/.exec(op)).filter((match): match is RegExpExecArray => match !== null).map(match => [Number(match[1]), Number(match[2])]);
+    });
+    expect(points.some(([x, y]) => Math.abs(x - 20) < 1 && Math.abs(y - 30) < 1)).toBe(true);
+    expect(points.every(([x, y]) => Math.abs(x) < 200 && Math.abs(y) < 200)).toBe(true);
+  });
+
+  it('strokes tracks and arcs round-ended in the copper colour at their file width, and draws a clockwise arc with the anticlockwise flag', () => {
+    const strokes = logOf(withCopper).filter(line => line.startsWith('stroke ') && isCopper(line, palette.copperTop));
+    expect(strokes.length).toBeGreaterThan(0);
+    expect(strokes.every(line => line.includes(' lc=round '))).toBe(true);
+    expect(strokes.some(line => line.includes(' lw=0.25 '))).toBe(true);
+    // The arc runs from (60, 10) to (65, 15) around (60, 15): clockwise from the bottom to the right, so the flag is set.
+    expect(strokes.some(line => line.includes(`A60,15,5,${String(Math.atan2(-5, 0))},${String(Math.atan2(0, 5))},true`))).toBe(true);
+  });
+
+  it('dims the copper while a net is selected, like the pads', () => {
+    const copperOps = logOf(withCopper, 'top', 'GND').filter(line => isCopper(line, palette.copperTop));
+    expect(copperOps.length).toBeGreaterThan(0);
+    expect(copperOps.every(line => line.includes(' a=0.44 '))).toBe(true);
+  });
+
+  it('adds no layer: the layer list of a board with copper is the one of a board without', () => {
+    const renderer = new Canvas2DBoardRenderer(canvasOf(new RecordingContext()), canvasOf(new RecordingContext()));
+    renderer.setScene(buildBoardScene(withCopper)); renderer.setSize({ width: WIDTH, height: HEIGHT, dpr: 1 }); renderer.setLayers([]);
+    expect(renderer.layerIds('base')).toEqual(['background', 'outline', 'connections', 'bodies', 'pads', 'labels']);
+  });
+
+  it('keeps the copper paths while a pan stays inside the built region, and rebuilds them after invalidate()', () => {
+    const renderer = new Canvas2DBoardRenderer(canvasOf(new RecordingContext()), canvasOf(new RecordingContext()));
+    renderer.setScene(buildBoardScene(withCopper)); renderer.setSize({ width: WIDTH, height: HEIGHT, dpr: 1 }); renderer.setLayers([]);
+    let created = 0;
+    class CountingPath extends RecordingPath { constructor() { super(); created++; } }
+    vi.stubGlobal('Path2D', CountingPath);
+    try {
+      renderer.render('base', [fullPane(view, 'top', WIDTH, HEIGHT)], state);
+      const first = created;
+      renderer.render('base', [fullPane(panBy(view, { x: 30, y: 10 }), 'top', WIDTH, HEIGHT)], state);
+      expect(created).toBe(first);
+      renderer.invalidate();
+      renderer.render('base', [fullPane(view, 'top', WIDTH, HEIGHT)], state);
       expect(created).toBe(first * 2);
     } finally { vi.stubGlobal('Path2D', RecordingPath); }
   });

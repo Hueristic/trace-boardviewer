@@ -10,7 +10,7 @@ Original files are never copied, cached, extracted to disk, renamed, moved or de
 
 No Library process has network access. Content, names, identifiers, hashes and the database stay on the machine. Diagnostic reports exclude Library data; only enabled state, schema version, root count, a power-of-ten file-count bucket and closed error-code histograms may be included. No PDF Author, image EXIF, GPS or document copies belong in summaries.
 
-Renderer requests supply IDs, never paths. Main resolves them against registered roots, checks ownership, rechecks realpath containment and identity immediately before open/attach/reveal, and refuses links/junctions and NTFS streams. Schema validation cannot establish filesystem containment or trusted senders. Network roots picked by the dialog are allowed, including UNC roots, but never watched live. Every path in query/file responses is normalized relative to its root. Existing workspace open/attach payloads retain their existing absolute-path contract.
+Renderer requests supply IDs, never paths. Main resolves them against registered roots, checks ownership, rechecks realpath containment and identity immediately before open/attach/reveal, and refuses links/junctions and NTFS streams. Schema validation cannot establish filesystem containment or trusted senders. Network roots picked by the dialog are allowed, including UNC roots, but never watched live. Boards, documents, readings and workspace exports refuse UNC paths, so this rule is narrower than the Library's. Every path in query/file responses is normalized relative to its root. Existing workspace open/attach payloads retain their existing absolute-path contract.
 
 ## Types and defaults
 
@@ -56,13 +56,15 @@ Unknown field syntax stays a literal bare term. An unfinished quote produces a r
 
 ## Sniff-only registry seam
 
-`sniffAny` reads no files and passes at most 64 KiB of the supplied head to the sniffs, after the dispatcher's own bounded UTF-16 BOM normalization (`sniffHead`). Boards and ZIP archives come from the format registry (`../formats/registry`: `BOARD_ADAPTERS` and `CONTAINER_ADAPTERS`) through the dispatcher's `rankAdapters` and `ambiguousCandidates`, so a listing and an import rank the same candidates and apply the same rule: confidence, then extension ownership, then ID, and two CERTAIN (≥90) board candidates return ambiguity and no selected format. Containers and documents do not create a board ambiguity. The verdict reports alternatives, capability status, key requirements and input-budget excess without parsing. PDF/image/schematic signatures reuse the existing document sniff. RAR, 7z, gzip, spreadsheets and firmware are classified here only, because no board reader covers them; a ZIP head alone cannot establish its project kind (an EasyEDA Pro or ODB++ reader outranks the generic container when its own sniff matches). Firmware needs a binary head, a firmware extension and a power-of-two size class. A head that ends before the file is passed as such, so a reader whose markers may lie beyond the window stays a POSSIBLE candidate and the parse decides.
+`sniffAny` reads no files and passes at most 64 KiB of the supplied head to the sniffs, after the dispatcher's own bounded UTF-16 BOM normalization (`sniffHead`). Boards and ZIP archives come from the format registry (`../formats/registry`: `BOARD_ADAPTERS` and `CONTAINER_ADAPTERS`) through the dispatcher's `rankAdapters` and `ambiguousCandidates`, so a listing and an import rank the same candidates and apply the same rule: confidence, then extension ownership, then ID, and two CERTAIN (≥90) board candidates return ambiguity and no selected format. Containers and documents do not create a board ambiguity. The verdict reports alternatives, capability status, key requirements and input-budget excess without parsing. PDF/image/schematic signatures reuse the existing document sniff. RAR, 7z, spreadsheets and firmware are classified here only, because no board reader covers them. A gzip stream is classified here only when no registry reader is LIKELY (50 or more) about it: an ODB++ product model in a gzip tar whose names lie inside the sniff window takes that reader's verdict (a board archive), and any other gzip stream stays a gzip archive. A ZIP head alone cannot establish its project kind (an EasyEDA Pro or ODB++ reader outranks the generic container when its own sniff matches). Firmware needs a binary head, a firmware extension and a power-of-two size class. A head that ends before the file is passed as such, so a reader whose markers may lie beyond the window stays a POSSIBLE candidate and the parse decides.
 
 The registry's sniffs are the single implementation: where a board reader and the library once disagreed, the reader was followed (XZZ is the `.pcb` reader and is not flagged for a key from the head, the Landrex section lines stand alone on their line, HyperLynx and Fabmaster are LIKELY, never CERTAIN), or its sniff was corrected where it overclaimed (an EAGLE schematic and an OLE compound file under a name that is not an Altium PCB are only POSSIBLE board candidates, so the document sniff and the spreadsheet rule win). New readers need no change here.
 
 Keep the bounded-head, window and ambiguity regression tests. Adapter follow-up: optional `Board.meta` (`title`, `revision`, `drawing`, `company`, `date`, each ≤256), populated by GenCAD, KiCad and EAGLE.
 
 ## Package plug-in points
+
+The database and main-owned profile helpers are documented in [Library database](LIBRARY_STORE.md).
 
 | Area | Implements |
 | --- | --- |
@@ -75,3 +77,7 @@ Keep the bounded-head, window and ambiguity regression tests. Adapter follow-up:
 | Workspace integration | Open/attach/reveal by revalidated file IDs, existing SHA-256/file-set identity, diagnostic exclusion canary |
 
 Threat scope here is contract validation only: no IPC handler, process, permission, dependency or security setting is registered. The infrastructure packages must test forged senders, stale IDs, links escaping roots, changed files and sandbox network denial when they implement those boundaries.
+
+## Device scan ids
+
+The device catalogue (`electron/library/devices-bridge.cjs`) names roots, folders, boards and files by opaque UUIDs. They are generated per scan and kept in memory. The last scan's ids stay valid until the next scan replaces them or the process ends. A restart invalidates them, so the renderer must start a new scan before it uses an id again (the bridge answers an unknown id with a fixed code, never a path). After a damaged corrections file is set aside, the scan result shows the corrections as quarantined; the view names this and the count of items that need a manual check.

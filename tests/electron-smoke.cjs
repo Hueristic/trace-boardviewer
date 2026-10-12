@@ -93,9 +93,10 @@ test('real Electron: bridge surface, native errors with codes, workspace and doc
   await t.test('the bridge exposes the TraceDesktop API and nothing generic', async () => {
     const names = await page.evaluate(() => Object.keys(window.traceDesktop).sort());
     assert.deepEqual(names, [
-      'acceptBoard', 'appendReadings', 'checkForUpdates', 'clearNetworkActivity', 'close', 'droppedFilePath', 'exportReadings', 'exportWorkspace', 'getNetworkActivity', 'getNotes', 'getSettings', 'importReadings', 'initialBoard', 'isMaximized',
-      'cancelBugReport', 'checkSupport', 'discardBugReportDraft', 'getBugReportDraft', 'getSupportStatus', 'listReadingFamilies', 'loadWorkspace', 'locateDocuments', 'maximize', 'minimize', 'onFlushRequest', 'onMaximized', 'onOpenBoard', 'openBoard', 'openSupportLink', 'openUpdatePage', 'pickDiagnosticFile', 'pickDocuments', 'prepareBugReport', 'prepareSupport', 'readBoard', 'readDocument', 'readReadings',
+      'acceptBoard', 'appendReadings', 'checkForStartupUpdates', 'checkForUpdates', 'clearNetworkActivity', 'close', 'droppedFilePath', 'exportReadings', 'exportWorkspace', 'getNetworkActivity', 'getNotes', 'getSettings', 'importReadings', 'initialBoard', 'isMaximized',
+      'cancelBugReport', 'checkSupport', 'discardBugReportDraft', 'getBugReportDraft', 'getConfigState', 'getSupportStatus', 'listReadingFamilies', 'loadWorkspace', 'locateDocuments', 'maximize', 'minimize', 'onFlushRequest', 'onMaximized', 'onOpenBoard', 'onConfigStateChanged', 'onSettingsChanged', 'openBoard', 'openSupportLink', 'openUpdatePage', 'pickDiagnosticFile', 'pickDocuments', 'prepareBugReport', 'prepareSupport', 'readBoard', 'readDocument', 'readReadings',
       'recentBoards', 'saveBugReportDraft', 'saveDiagnosticReport', 'saveNotes', 'saveSettings', 'saveWorkspace', 'sendBugReport',
+      'libraryBoardDetail', 'libraryCancelScan', 'libraryListBoards', 'libraryListFolders', 'libraryListRoots', 'libraryLoadCorrections', 'libraryPickRoot', 'libraryRemoveRoot', 'libraryScan', 'libraryScanSkipStep', 'librarySaveCorrections', 'getNoSandboxConsent', 'revokeNoSandboxConsent', 'initialLanguage',
     ].sort());
     assert.equal(await page.evaluate(() => typeof window.ipcRenderer + typeof window.require + typeof window.process), 'undefinedundefinedundefined');
   });
@@ -177,7 +178,7 @@ test('real Electron: bridge surface, native errors with codes, workspace and doc
     assert.match(prepared.value.code, /^[a-f0-9]{32}$/);
     assert.equal((await run('() => window.traceDesktop.prepareSupport()')).value.code, prepared.value.code);
     await app.evaluate(({ session }) => { const partition = session.fromPartition('trace-egress', { cache: false }); globalThis.__supportRealFetch = partition.fetch; partition.fetch = async () => new Response('{"status":"pending"}', { status: 404 }); });
-    assert.equal((await run('() => window.traceDesktop.checkSupport()')).value.status, supportEnabled ? 'pending' : 'unavailable');
+    assert.equal((await run('() => window.traceDesktop.checkSupport({ userAction: true })')).value.status, supportEnabled ? 'pending' : 'unavailable');
     await app.evaluate(({ session }) => { session.fromPartition('trace-egress', { cache: false }).fetch = globalThis.__supportRealFetch; delete globalThis.__supportRealFetch; });
     await app.evaluate(({ shell }) => { globalThis.__supportOpened = []; shell.openExternal = async (url) => { globalThis.__supportOpened.push(url); }; });
     assert.equal((await run('() => window.traceDesktop.openSupportLink("stripe")')).ok, true);
@@ -196,11 +197,11 @@ test('real Electron: bridge surface, native errors with codes, workspace and doc
     await run('() => window.traceDesktop.clearNetworkActivity()');
   });
 
-  // New IPC 'trace:check-for-updates' and 'trace:open-update-page'.
+  // Startup and manual update checks use separate IPC gates.
   // Since the egress layer (electron/net/egress.cjs) main fetches through the in-memory partition 'trace-egress' only. The fetch of that session is replaced by a stand-in that records
   // what main asked and forwards the same request options to the REAL session.fetch of a second in-memory partition (so Electron 44 really accepts the request options and returns a
   // readable body), pointed at the local page that answers like releases/latest.
-  await t.test('update notification: checkForUpdates and openUpdatePage over the real bridge; main fetches through the egress partition, validates the tag and opens exactly the tag URL', async () => {
+  await t.test('update notification: startup/manual checks and openUpdatePage use the real bridge; main validates the tag and opens exactly its release URL', async () => {
     const early = await run('() => window.traceDesktop.openUpdatePage()');
     assert.equal(early.ok, false, 'nothing to open before a check');
     assert.match(early.message, /No update available/);
@@ -219,7 +220,7 @@ test('real Electron: bridge surface, native errors with codes, workspace and doc
       };
       shell.openExternal = async (url) => { globalThis.__updateOpened.push(url); };
     }, `http://127.0.0.1:${server.address().port}/__latest-release`);
-    const checked = await run('() => window.traceDesktop.checkForUpdates()');
+    const checked = await run('() => window.traceDesktop.checkForStartupUpdates()');
     assert.deepEqual(checked.value, { status: 'available', version: '99.0.0' }, 'the renderer gets status and version only');
     const [request] = await app.evaluate(() => globalThis.__updateRequests);
     assert.equal(request.url, 'https://api.github.com/repos/trace-boardviewer/trace-boardviewer/releases/latest', 'main asked the fixed API URL (the stand-in only redirected it afterwards)');
@@ -233,7 +234,7 @@ test('real Electron: bridge surface, native errors with codes, workspace and doc
     // Inside the cooldown (30 s after a request) a check makes no request and repeats the answer; once the clock of the main process is past it, a failing
     // request is the bare "unavailable" and forgets the tag.
     await app.evaluate(({ session }) => { session.fromPartition('trace-egress', { cache: false }).fetch = async (url) => { globalThis.__updateRequests.push({ url }); throw new Error('offline'); }; });
-    assert.deepEqual((await run('() => window.traceDesktop.checkForUpdates()')).value, { status: 'available', version: '99.0.0' }, 'the answer of the first request again');
+    assert.deepEqual((await run('() => window.traceDesktop.checkForUpdates()')).value, { status: 'available', version: '99.0.0' }, 'manual Check now shares the current answer during cooldown');
     assert.equal((await app.evaluate(() => globalThis.__updateRequests)).length, 1, 'no request inside the cooldown');
     await app.evaluate(() => { globalThis.__realNow = Date.now; Date.now = () => globalThis.__realNow() + 60000; });
     try { assert.deepEqual((await run('() => window.traceDesktop.checkForUpdates()')).value, { status: 'unavailable' }, 'past the cooldown the failing request is reported'); }
@@ -241,9 +242,9 @@ test('real Electron: bridge surface, native errors with codes, workspace and doc
     assert.equal((await app.evaluate(() => globalThis.__updateRequests)).length, 2);
     assert.equal((await run('() => window.traceDesktop.openUpdatePage()')).ok, false, 'the tag is forgotten');
     assert.equal((await app.evaluate(() => globalThis.__updateOpened)).length, 1);
-    // updateCheck is a stored setting: default on, kept when switched off.
+    // updateCheck is a stored setting: default off (the first start asks once), kept when switched off.
     const settings = (await run('() => window.traceDesktop.getSettings()')).value;
-    assert.equal(settings.updateCheck, true);
+    assert.equal(settings.updateCheck, false);
     const saved = await run('(s) => window.traceDesktop.saveSettings(s).then(() => window.traceDesktop.getSettings())', { ...settings, updateCheck: false });
     assert.equal(saved.value.updateCheck, false);
     await run('(s) => window.traceDesktop.saveSettings(s)', { ...saved.value, updateCheck: true });

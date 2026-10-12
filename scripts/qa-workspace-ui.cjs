@@ -737,6 +737,26 @@ const scenarios = {
     }
   },
 
+  async docpane() {
+    // O-45 (W-dev-ui-01): the PDF beside the document list keeps its room at 1306-1367 px windows (compact chrome, sidebar overlay);
+    // the 1440 px reference keeps the full chrome. Windows-hosted; widths are the synthetic mock workspace, not a packaged build.
+    for (const width of [1306, 1311, 1367, 1440]) {
+      const page = await openPage({ width, height: 900 });
+      await page.click('#wsp-tab-documents');
+      await page.locator('[data-testid=document-list] .wsp-doc-main', { hasText: 'service-manual.pdf' }).click();
+      await page.waitForSelector('[data-testid=documents-tab] .pdfv', { timeout: 10000 });
+      await sleep(600);
+      const pane = await page.evaluate(() => {
+        const pdf = document.querySelector('[data-testid=documents-tab] .pdfv');
+        const scroller = document.querySelector('[data-testid=documents-tab] .pdfv-scroller');
+        return { compact: pdf.dataset.compact, scroller: Math.round(scroller.getBoundingClientRect().width) };
+      });
+      if (width < 1440) check(`PDF beside the list gets the compact chrome at ${width}px and keeps >= 480px`, pane.compact === 'true' && pane.scroller >= 480, pane);
+      else check(`1440px keeps the full PDF chrome and a >= 380px scroller`, pane.compact === 'false' && pane.scroller >= 380, pane);
+      await page.close();
+    }
+  },
+
   async realapp() {
     if (!fs.existsSync(path.join(ROOT, 'src', 'app', 'useWorkspace.ts'))) { check('real core present (skipped: src/app/useWorkspace.ts missing)', true); return; }
     const gencad = `$HEADER\nGENCAD 1.4\nUNITS MM\nORIGIN 0 0\n$ENDHEADER\n$BOARD\nRECTANGLE 0 0 40 30\n$ENDBOARD\n$PADS\nPAD P ROUND -1\nCIRCLE 0 0 0.2\n$ENDPADS\n$PADSTACKS\nPADSTACK PS 0\nPAD P TOP 0 0\n$ENDPADSTACKS\n$SHAPES\nSHAPE S\nRECTANGLE -2 -1 4 2\nPIN 1 PS -1 0 TOP 0 0\nPIN 2 PS 1 0 TOP 0 0\n$ENDSHAPES\n$COMPONENTS\nCOMPONENT R1\nPLACE 10 20\nLAYER TOP\nROTATION 0\nSHAPE S 0 0\nDEVICE D\nCOMPONENT U1\nPLACE 25 10\nLAYER TOP\nROTATION 0\nSHAPE S 0 0\nDEVICE D\n$ENDCOMPONENTS\n$DEVICES\nDEVICE D\nVALUE "10 kOhm"\nPACKAGE "0402"\n$ENDDEVICES\n$SIGNALS\nSIGNAL GND\nNODE R1 1\nNODE U1 1\nSIGNAL "POWER 3V3"\nNODE R1 2\nNODE U1 2\n$ENDSIGNALS\n`;

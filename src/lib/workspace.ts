@@ -12,6 +12,7 @@
  * for arguments that would break a bound or an invariant instead of clamping silently.
  */
 import { WORKSPACE_LIMITS } from './documents';
+import type { AliasRejection } from './documents';
 import type {
   DocumentAnnotation, DocumentBookmark, DocumentCalibration, DocumentCamera, DocumentKind, DocumentLocateResult,
   DocumentRecord, WorkspaceAliases, WorkspaceManifest, WorkspaceSplit, WorkspaceTab,
@@ -19,7 +20,7 @@ import type {
 import { isKeyedNote, noteKeyText, normalizeName, sameNoteKey } from './note-keys';
 import type { BoardNote, KeyedNote, LegacyNote, NoteAnchor, NoteKey, NoteProblem } from './types';
 
-// i18n: pending (error texts are English with a stable `code`; the catalogs are frozen)
+// i18n: pending (error texts are English with a stable `code`; they are not in the catalogs yet)
 
 /** Same values as LIMITS in electron/workspace.cjs (`path` = WORKSPACE_LIMITS.pathLength). */
 export const WORKSPACE_MODEL_LIMITS = Object.freeze({
@@ -41,12 +42,14 @@ export type WorkspaceErrorCode =
 
 export class WorkspaceError extends Error {
   readonly code: WorkspaceErrorCode;
-  constructor(code: WorkspaceErrorCode, message: string) { super(message); this.name = 'WorkspaceError'; this.code = code; }
+  /** Set on an alias rejection: the rule it broke, so the UI can say why in its own language. */
+  readonly aliasReason?: AliasRejection;
+  constructor(code: WorkspaceErrorCode, message: string, aliasReason?: AliasRejection) { super(message); this.name = 'WorkspaceError'; this.code = code; this.aliasReason = aliasReason; }
 }
 const invalid = (field: string) => new WorkspaceError('MANIFEST_INVALID', `Invalid workspace manifest: ${field}.`);
 const argumentError = (message: string) => new WorkspaceError('INVALID_ARGUMENT', message);
 const notFound = (what: string, id: string) => new WorkspaceError('NOT_FOUND', `Unknown ${what}: ${JSON.stringify(id)}.`);
-const limitError = (what: string, max: number) => new WorkspaceError('LIMIT_EXCEEDED', `At most ${max} ${what} fit in one workspace.`);
+const limitError = (what: string, max: number, aliasReason?: AliasRejection) => new WorkspaceError('LIMIT_EXCEEDED', `At most ${max} ${what} fit in one workspace.`, aliasReason);
 
 type Obj = Record<string, unknown>;
 const isObject = (value: unknown): value is Obj => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -331,7 +334,13 @@ export interface IdentityEntry { name: string; data: ArrayBufferView }
 
 const MAX_IDENTITY_ENTRIES = 64;
 const toHex = (digest: ArrayBuffer) => Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
-const baseName = (name: string) => name.slice(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1).toLowerCase();
+/** The platform the file names come from (same values as OsFamily in diagnostics/report.ts). */
+export type IdentityOs = 'win32' | 'darwin' | 'linux' | 'other';
+/**
+ * The lowercase file name of an entry. On win32 both separators split the directories; elsewhere only the slash does, because a
+ * backslash is an ordinary character of a POSIX file name.
+ */
+const baseName = (name: string, os: IdentityOs) => name.slice((os === 'win32' ? Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) : name.lastIndexOf('/')) + 1).toLowerCase();
 const identityError = (code: 'IDENTITY_INVALID_ENTRIES' | 'IDENTITY_DUPLICATE_NAME', message: string) => new WorkspaceError(code, message);
 
 /**
@@ -341,14 +350,14 @@ const identityError = (code: 'IDENTITY_INVALID_ENTRIES' | 'IDENTITY_DUPLICATE_NA
  * the key does not depend on which entry file was picked and changes when any file of the set changes. The length
  * prefix keeps entry boundaries unambiguous.
  */
-export async function boardIdentityKey(entries: ReadonlyArray<IdentityEntry>): Promise<string> {
+export async function boardIdentityKey(entries: ReadonlyArray<IdentityEntry>, os: IdentityOs = 'win32'): Promise<string> {
   if (!Array.isArray(entries) || entries.length === 0 || entries.length > MAX_IDENTITY_ENTRIES) {
     throw identityError('IDENTITY_INVALID_ENTRIES', `A board identity needs between 1 and ${MAX_IDENTITY_ENTRIES} files.`);
   }
   const encoder = new TextEncoder();
   const named = entries.map(entry => {
     if (!entry || typeof entry.name !== 'string' || !ArrayBuffer.isView(entry.data)) throw identityError('IDENTITY_INVALID_ENTRIES', 'Invalid board file entry.');
-    const name = baseName(entry.name);
+    const name = baseName(entry.name, os);
     if (!name) throw identityError('IDENTITY_INVALID_ENTRIES', 'Invalid board file entry name.');
     const { buffer, byteOffset, byteLength } = entry.data;
     return { name, bytes: encoder.encode(name), data: new Uint8Array(buffer as ArrayBuffer, byteOffset, byteLength) };
@@ -394,11 +403,15 @@ function parseAbsolute(path: unknown): AbsolutePath | null {
 }
 
 const WINDOWS_RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
-/** A segment that means the same thing on every platform and can neither escape the directory nor name a device. */
+/**
+ * A segment that can neither escape the directory nor hold a separator of its platform. On win32 a backslash separates the directories
+ * and the Windows-only names are refused; on POSIX a backslash is a character of the name, so a document named a\b.pdf stays one file
+ * (MAC-TEST-20261011-03). The platform is the one of the path: its style is the platform the name belongs to.
+ */
 function portableSegment(segment: string, windows: boolean): boolean {
-  if (segment.length === 0 || segment === '.' || segment === '..' || /[\\/\u0000-\u001f]/.test(segment)) return false;
+  if (segment.length === 0 || segment === '.' || segment === '..' || /[\/\u0000-\u001f]/.test(segment)) return false;
   if (!windows) return true;
-  return !/[<>:"|?*]/.test(segment) && !/[. ]$/.test(segment) && !WINDOWS_RESERVED.test(segment);
+  return !/[\\<>:"|?*]/.test(segment) && !/[. ]$/.test(segment) && !WINDOWS_RESERVED.test(segment);
 }
 /** Every segment portable, and the first one cannot pass for a drive ("C:") on a POSIX board path. */
 const portablePath = (segments: string[], windows: boolean) =>
@@ -740,9 +753,9 @@ export function setCalibration(manifest: WorkspaceManifest, documentId: string, 
 }
 
 export type AliasKind = keyof WorkspaceAliases;
-const aliasText = (value: unknown, what: string): string => {
+const aliasText = (value: unknown, what: 'name' | 'target'): string => {
   const text = typeof value === 'string' ? value.trim() : value;
-  if (!isText(text, LIMITS.alias, 1)) throw argumentError(`Invalid alias ${what}.`);
+  if (!isText(text, LIMITS.alias, 1)) throw new WorkspaceError('INVALID_ARGUMENT', `Invalid alias ${what}.`, what);
   return text;
 };
 
@@ -751,11 +764,11 @@ export function setAlias(manifest: WorkspaceManifest, kind: AliasKind, from: str
   if (kind !== 'refs' && kind !== 'nets') throw argumentError('Invalid alias kind.');
   const source = aliasText(from, 'name');
   const target = aliasText(to, 'target');
-  if (source === '__proto__') throw argumentError('Invalid alias name.');
-  if (source === target) throw argumentError('An alias must map a name to a different name.');
+  if (source === '__proto__') throw new WorkspaceError('INVALID_ARGUMENT', 'Invalid alias name.', 'name');
+  if (source === target) throw new WorkspaceError('INVALID_ARGUMENT', 'An alias must map a name to a different name.', 'same');
   const aliases: WorkspaceAliases = manifest.aliases ?? { refs: {}, nets: {} };
   if (aliases[kind][source] === target && Object.hasOwn(aliases[kind], source)) return manifest;
-  if (!Object.hasOwn(aliases[kind], source) && Object.keys(aliases[kind]).length >= LIMITS.aliases) throw limitError(`${kind} aliases`, LIMITS.aliases);
+  if (!Object.hasOwn(aliases[kind], source) && Object.keys(aliases[kind]).length >= LIMITS.aliases) throw limitError(`${kind} aliases`, LIMITS.aliases, 'limit');
   return { ...manifest, aliases: { ...aliases, [kind]: { ...aliases[kind], [source]: target } } };
 }
 

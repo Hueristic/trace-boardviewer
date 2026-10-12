@@ -12,7 +12,8 @@
 import { version as APP_VERSION } from '../../../package.json';
 import { utf8Input } from '../encoding';
 import type { BoardAdapter, ContainerAdapter } from '../formats/adapter';
-import { MAX_IMPORT_BYTES, vendorDisconnected, type ParseInput } from '../formats/common';
+import { vendorDisconnected, type ParseInput } from '../formats/common';
+import { importLimitFor, mebibytes } from '../formats/import-limits';
 import { fzKeyParityValid, xzzKeyParityValid } from '../formats/crypto';
 import { ambiguousCandidates, rankAdapters, sniffInputOf } from '../formats/dispatch';
 import { BOARD_ADAPTERS, CONTAINER_ADAPTERS } from '../formats/registry';
@@ -56,7 +57,8 @@ export interface DiagnosticEnv {
 const COMPANION_ROLES = new Set(['format.asc', '@format.asc', 'pins.asc', 'nails.asc']);
 const PLACEHOLDER_NETS = [/^N\/?C(?:$|[_\-\d])/i, /^N\$\d+$/, /^Net-\(/, /^unconnected-\(/, /^\$?NET\d+$/i];
 const isPlaceholderNet = (name: string): boolean => vendorDisconnected(name) || PLACEHOLDER_NETS.some(pattern => pattern.test(name));
-const baseName = (name: string): string => (name.split(/[\\/]/).pop() ?? '').toLowerCase();
+/** The lowercase file name of an input. On win32 both separators split the directories; elsewhere only the slash does (a backslash is part of a POSIX name). */
+export const baseName = (name: string, os: OsFamily): string => name.slice((os === 'win32' ? Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) : name.lastIndexOf('/')) + 1).toLowerCase();
 
 /** FNV-1a over the adapter ids, their hook marks, the hook ids and the schema id: which adapter set produced the report, as 8 hex digits. */
 function adapterSet(boards: readonly BoardAdapter[], containers: readonly ContainerAdapter[]): string {
@@ -101,15 +103,17 @@ function keyFacts(options: DiagnosticInput['options'], extension: string): Diagn
  * content; rejects with an AbortError when `env.signal` aborts, and with a RangeError for an input that is not one file within the limit.
  */
 export async function collectDiagnostic(raw: DiagnosticInput, env: DiagnosticEnv): Promise<DiagnosticReport> {
-  if (!(raw.data instanceof Uint8Array) || raw.data.length > MAX_IMPORT_BYTES) throw new RangeError('The diagnostic input must be one file of at most 64 MiB.');
+  if (!(raw.data instanceof Uint8Array)) throw new RangeError('The diagnostic input must be one file of at most 64 MiB.');
+  const limit = importLimitFor(raw.data);
+  if (raw.data.length > limit) throw new RangeError(`The diagnostic input must be one file of at most ${mebibytes(limit)} MiB.`);
   const companions: Record<string, Uint8Array> = {};
   let companionBytes = 0;
   for (const [name, bytes] of Object.entries(raw.companions ?? {})) {
     if (!(bytes instanceof Uint8Array)) throw new TypeError('Companion files must be byte arrays.');
     companionBytes += bytes.length;
-    companions[baseName(name)] = bytes;
+    companions[baseName(name, env.os)] = bytes;
   }
-  if (raw.data.length + companionBytes > MAX_IMPORT_BYTES) throw new RangeError('The diagnostic input must be one file of at most 64 MiB.');
+  if (raw.data.length + companionBytes > limit) throw new RangeError(`The diagnostic input must be one file of at most ${mebibytes(limit)} MiB.`);
   const now = env.now ?? (() => 0), heap = env.heap ?? (() => null);
   const boards = env.boards ?? BOARD_ADAPTERS, containers = env.containers ?? CONTAINER_ADAPTERS;
   let peak = 0, last = 0;
@@ -130,8 +134,8 @@ export async function collectDiagnostic(raw: DiagnosticInput, env: DiagnosticEnv
   /** A sign of life during a long synchronous scan: the same fraction again (the worker decides whether to post it), and a look at the abort signal. */
   const heartbeat = () => { report(last); cancelled(); };
 
-  const extension = extensionClass(raw.name);
-  const input = inputFacts(raw.name, raw.data, companions);
+  const extension = extensionClass(raw.name, env.os);
+  const input = inputFacts(raw.name, raw.data, companions, env.os);
   const parseInput: ParseInput = utf8Input({ name: raw.name, data: raw.data, companions, ...(raw.options ? { options: raw.options } : {}) });
   const ranked = rankAdapters<BoardAdapter | ContainerAdapter>(sniffInputOf(parseInput), [...boards, ...containers]);
   const ambiguous = ambiguousCandidates(ranked);
@@ -170,8 +174,9 @@ export async function collectDiagnostic(raw: DiagnosticInput, env: DiagnosticEnv
   }
   const allMs = Math.max(0, now() - startedAt);
 
-  const role = baseName(raw.name);
+  const role = baseName(raw.name, env.os);
   const structureInput: StructureInput = {
+    platform: env.os,
     data: parseInput.data, companions: parseInput.companions ?? {}, extension, ...(COMPANION_ROLES.has(role) ? { companionRole: role } : {}),
     keys: { ...(raw.options?.fzKey ? { fzKey: raw.options.fzKey } : {}), ...(raw.options?.xzzKey ? { xzzKey: raw.options.xzzKey } : {}) },
   };

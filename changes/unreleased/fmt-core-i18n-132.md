@@ -1,0 +1,3 @@
+- Messages about ZIP archives that cannot be opened, and about files that match more than one format, are now shown in the app language. They were English before.
+- Native Cadence Allegro boards that TRACE cannot read now say which database layout or footprint layer was found, and ask for a text GENCAD 1.4 export from Allegro.
+- ZIP messages now say what is wrong and what to do, in the app language: which record or entry is damaged, how many entries an archive lists, which declared ratio or size is over the limit, and which step to take next.

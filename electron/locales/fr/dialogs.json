@@ -13,16 +13,31 @@
   "help.footer": "Molette : zoom sur le curseur. Glisser : déplacer la carte. Clic : sélectionner un composant ou une broche.",
   "help.diagnosticReport": "Rapport de diagnostic de format…",
   "help.diagnosticHint": "Décrit un fichier qui ne s’ouvre pas, sans son contenu.",
-
+  "help.settings": "Ouvrir les paramètres",
   "recents.title": "Cartes récentes",
   "recents.empty": "Aucun fichier n’a encore été ouvert.",
   "recents.openOther": "Ouvrir un autre fichier",
-
   "info.title": "Informations sur la carte",
   "info.format": "Format",
   "info.size": "Taille de la carte",
   "info.counts": "Composants / broches / réseaux",
   "info.footer": "Les guides montrent la connectivité des réseaux. Ils ne remplacent pas la géométrie des pistes de cuivre du fichier.",
+  "key.skipHelp": "Vous pouvez ignorer cette étape et continuer à utiliser l’application. Ce fichier chiffré restera fermé tant qu’une clé correspondante ne sera pas fournie.",
+  "help.shortcutTabs": "Onglet Carte / Schéma / Documents",
+  "help.shortcutSplit": "Vue scindée activée / désactivée",
+  "help.shortcutResize": "Redimensionner les volets divisés (séparateur sélectionné)",
+  "help.shortcutResults": "Résultats de recherche : déplacer / ouvrir",
+  "help.shortcutClearSearch": "Vider le champ de recherche (un second appui quitte)",
 
-  "key.skipHelp": "Vous pouvez ignorer cette étape et continuer à utiliser l’application. Ce fichier chiffré restera fermé tant qu’une clé correspondante ne sera pas fournie."
+  "dialogs.keyTitleFz": "Clé de chiffrement FZ / CAE",
+  "dialogs.keyTitleXzz": "Clé de chiffrement XZZ",
+  "dialogs.keyLabelFz": "Collez les 44 mots hexadécimaux de 32 bits de la clé du fabricant (0x facultatif ; espaces, virgules ou retours à la ligne entre eux).",
+  "dialogs.keyLabelXzz": "Saisissez les 16 chiffres hexadécimaux de la clé.",
+  "dialogs.keyValid": "Le format de la clé est valide. Elle n'est conservée que pour cette session et n'est jamais enregistrée.",
+  "dialogs.keyUse": "Utiliser la clé",
+  "dialogs.shortcutResizeKeys": "← →  ·  Shift = grands pas  ·  Enter = réinitialiser",
+  "dialogs.keyXzzHexOnly": "Seuls les chiffres hexadécimaux (0-9, a-f) sont autorisés.",
+  "dialogs.keyXzzCount": "Saisissez exactement 16 chiffres hexadécimaux ({count} jusqu'ici).",
+  "dialogs.keyFzWordInvalid": "\"{word}\" n'est pas un mot hexadécimal de 32 bits.",
+  "dialogs.keyFzWordCount": "Saisissez 44 mots hexadécimaux de 32 bits ({count} jusqu'ici)."
 }

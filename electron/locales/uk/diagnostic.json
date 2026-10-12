@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Готово",
   "diagnostic.bugStageUnknown": "Невідомо",
   "diagnostic.bugCleanupTiming": "Ці строки передбачають звичайне заплановане очищення; перебої в роботі хостингу можуть затримати видалення.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} байтів"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} байтів",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} символів",
+  "diagnostic.bugDescriptionLimit": "Опис може містити щонайбільше {max} символів. Скоротіть його, щоб переглянути й надіслати."
 }

@@ -13,6 +13,7 @@
  * down, absolute on the sheet (see model.ts).
  */
 import { boundText } from '../bounded-text';
+import { sourceBaseName, type SourcePlatform } from '../formats/source-name';
 import {
   SCHEMATIC_LIMITS, SchematicError,
   type SchBounds, type SchDiagnostic, type SchField, type SchGraphic, type SchLabel, type SchLabelKind, type SchPin, type SchPinType,
@@ -99,7 +100,7 @@ function tokenize(line: string, where: string): string[] {
 
 /** Text records escape a line break as `\n` and a backslash as `\\`. */
 const unescapeText = (text: string) => text.replace(/\\([\\n])/g, (_, c: string) => (c === 'n' ? '\n' : '\\'));
-const baseName = (name: string) => name.slice(Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\')) + 1);
+const baseName = (name: string, platform?: SourcePlatform) => sourceBaseName(name, platform);
 const stem = (file: string) => (file.lastIndexOf('.') > 0 ? file.slice(0, file.lastIndexOf('.')) : file);
 
 class Diags {
@@ -657,11 +658,11 @@ class Loader {
 
   constructor(private readonly input: SchematicInput) {
     this.companions = input.companions ?? {};
-    this.libs = new Libraries(this.companions, (baseName(input.name) || 'schematic.sch').toLowerCase(), this.diags);
+    this.libs = new Libraries(this.companions, (baseName(input.name, input.platform) || 'schematic.sch').toLowerCase(), this.diags);
   }
 
   run(): Schematic {
-    const file = baseName(this.input.name) || 'schematic.sch';
+    const file = baseName(this.input.name, this.input.platform) || 'schematic.sch';
     const root = this.load(file.toLowerCase(), file, this.input.data, true);
     const instances = this.expand(root);
     return {

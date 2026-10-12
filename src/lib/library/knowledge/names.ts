@@ -6,8 +6,8 @@
  * result the segment it came from. The file name is read as a "name", folders as "folder" and archive names (`.zip`, `.rar`,
  * `.7z`) as "archive"; the extension of the file name is not part of the text but suggests a document type.
  *
- * Bounds: the last `MAX_SEGMENTS` segments of the path are read, each at most `MAX_SEGMENT_LENGTH` units; results are capped
- * by the recognisers. Total and linear in the length of the path.
+ * Bounds: the last `MAX_SEGMENTS` segments of the path are read, each in full (no segment is cut: the path limit of the Library,
+ * shared/library-limits.json, bounds the whole path, TB-068); results are capped by the recognisers. Total and linear in the length of the path.
  */
 import { MAX_TEXT_LENGTH, type WorkMeter } from './chars';
 import { recognizeBoardNumbers, type BoardNumberMatch } from './board-numbers';
@@ -16,7 +16,6 @@ import { deviceTypeHints, documentTypeHints, extensionOf, summarizeHints, vendor
 import type { DeviceType, DocumentType } from './lexicon';
 
 export const MAX_SEGMENTS = 12;
-export const MAX_SEGMENT_LENGTH = 260;
 
 export type NameSource = 'name' | 'folder' | 'archive';
 const ARCHIVE_EXTENSIONS: ReadonlySet<string> = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'tgz']);
@@ -69,7 +68,7 @@ export function pathSegments(path: string): string[] {
     const code = index < text.length ? text.charCodeAt(index) : 47;
     if (code === 47 || code === 92) {
       const part = text.slice(start, index);
-      if (part !== '' && part !== '.' && part !== '..') out.push(part.length > MAX_SEGMENT_LENGTH ? part.slice(0, MAX_SEGMENT_LENGTH) : part);
+      if (part !== '' && part !== '.' && part !== '..') out.push(part);
       start = index + 1;
     }
   }

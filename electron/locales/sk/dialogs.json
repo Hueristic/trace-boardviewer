@@ -13,16 +13,31 @@
   "help.footer": "Koliesko myši: priblíženie v mieste kurzora. Ťahanie: posun dosky. Kliknutie: výber súčiastky alebo pinu.",
   "help.diagnosticReport": "Diagnostická správa o formáte…",
   "help.diagnosticHint": "Opisuje súbor, ktorý sa neotvorí, bez jeho obsahu.",
-
+  "help.settings": "Otvoriť nastavenia",
   "recents.title": "Nedávne dosky",
   "recents.empty": "Zatiaľ nebol otvorený žiadny súbor.",
   "recents.openOther": "Otvoriť iný súbor",
-
   "info.title": "Informácie o doske",
   "info.format": "Formát",
   "info.size": "Rozmery dosky",
   "info.counts": "Súčiastky / piny / siete",
   "info.footer": "Pomocné čiary zobrazujú prepojenie sietí. Nenahrádzajú geometriu medených ciest v súbore.",
+  "key.skipHelp": "Tento krok môžete preskočiť a aplikáciu ďalej používať. Tento šifrovaný súbor zostane zatvorený, kým nezadáte zodpovedajúci kľúč.",
+  "help.shortcutTabs": "Karta / Schéma / Dokumenty",
+  "help.shortcutSplit": "Rozdelené zobrazenie zapnuté / vypnuté",
+  "help.shortcutResize": "Zmena veľkosti rozdelených panelov (delič zameraný)",
+  "help.shortcutResults": "Výsledky hľadania: presun / otvoriť",
+  "help.shortcutClearSearch": "Vymazať pole hľadania (druhé stlačenie opustí)",
 
-  "key.skipHelp": "Tento krok môžete preskočiť a aplikáciu ďalej používať. Tento šifrovaný súbor zostane zatvorený, kým nezadáte zodpovedajúci kľúč."
+  "dialogs.keyTitleFz": "Šifrovací kľúč FZ / CAE",
+  "dialogs.keyTitleXzz": "Šifrovací kľúč XZZ",
+  "dialogs.keyLabelFz": "Vlož 44 hexadecimálnych 32-bitových slov kľúča výrobcu (0x je voliteľné; slová oddeľ medzerou, čiarkou alebo novým riadkom).",
+  "dialogs.keyLabelXzz": "Zadaj 16 hexadecimálnych číslic kľúča.",
+  "dialogs.keyValid": "Formát kľúča je platný. Uchováva sa len pre túto reláciu a nikdy sa neukladá.",
+  "dialogs.keyUse": "Použiť kľúč",
+  "dialogs.shortcutResizeKeys": "← →  ·  Shift = veľké kroky  ·  Enter = obnoviť",
+  "dialogs.keyXzzHexOnly": "Povolené sú iba hexadecimálne číslice (0-9, a-f).",
+  "dialogs.keyXzzCount": "Zadaj presne 16 hexadecimálnych číslic (doteraz: {count}).",
+  "dialogs.keyFzWordInvalid": "\"{word}\" nie je hexadecimálne 32-bitové slovo.",
+  "dialogs.keyFzWordCount": "Zadaj 44 hexadecimálnych 32-bitových slov (doteraz: {count})."
 }

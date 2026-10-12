@@ -164,7 +164,7 @@ export interface MeterFamilyInfo {
   id: MeterFamilyId;
   /** Product names, for the support table. */
   models: readonly string[];
-  /** Every family here is untested on hardware until the owner's checklist run says otherwise. */
+  /** Every family here is untested on hardware until a hardware checklist run says otherwise. */
   status: 'experimental' | 'simulated' | 'tool';
   link: 'serial' | 'hid' | 'ble' | 'file' | 'none';
   /** Titles of the public documents the decoder follows. */

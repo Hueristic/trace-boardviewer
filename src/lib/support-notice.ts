@@ -48,6 +48,27 @@ export function postponeSupportNotice(now = Date.now()): void {
   if (Number.isFinite(now)) claimedAt = now;
 }
 
+/** The reminder record as it stands now, taken before a reminder is shown so that a dialog which yields can put it back. */
+export function supportClaimMark(): number | null {
+  return claimedAt;
+}
+
+/**
+ * Puts a record back to a mark taken before the dialog was shown. A dialog that yields to an open error notice records nothing: the
+ * reminder that was shown is not counted, so the same reminder is due again once the error has closed.
+ */
+export function restoreSupportClaim(mark: number | null): void {
+  claimedAt = mark;
+}
+
+/**
+ * The support dialog yields at once while an error notice is on screen (QA133-20261012-02): the native modal would cover the notice,
+ * whatever order the open requests and the dialog arrived in.
+ */
+export function supportDialogYields(visible: boolean, errorOpen: boolean): boolean {
+  return visible && errorOpen;
+}
+
 /** Forgets the claim. Tests only: a real launch is a fresh page, so the state starts clean by itself. */
 export function resetSupportNoticeLaunch(): void {
   claimedAt = null;
@@ -61,6 +82,15 @@ export function resetSupportNoticeLaunch(): void {
 export const SUPPORT_NOTICE_OPT_OUT = '__TRACE_SUPPORT_NOTICE__';
 export function supportNoticeAllowed(scope: object = globalThis): boolean {
   return (scope as Record<string, unknown>)[SUPPORT_NOTICE_OPT_OUT] !== 'off';
+}
+
+/**
+ * An error notice is on screen: a start-up or external-open refusal (sticky, until the user closes it) or an in-app open refusal (timed).
+ * The support dialog is a native modal (QA133-20261012-02) and would cover it, so the support notice waits while one is open and shows
+ * once it has been closed or has timed out.
+ */
+export function errorNoticeOpen(notices: ReadonlyArray<{ kind: string }>): boolean {
+  return notices.some(notice => notice.kind === 'error');
 }
 
 // ---------------------------------------------------------------------------------------------------------------

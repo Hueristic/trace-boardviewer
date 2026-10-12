@@ -81,3 +81,44 @@ describe('batched display pads', () => {
     expect(rectangle).toMatchObject({ x: 10, y: 20, width: 4, height: 2, rotation: 90 });
   });
 });
+
+describe('pad level of detail: a pad below 1.5 px is a square point, a larger pad is drawn as before', () => {
+  /** The operations a pad appends to a path, as strings. */
+  class Ops {
+    ops: string[] = [];
+    moveTo(x: number, y: number) { this.ops.push(`m${x},${y}`); }
+    lineTo(x: number, y: number) { this.ops.push(`l${x},${y}`); }
+    arc(x: number, y: number, r: number) { this.ops.push(`a${x},${y},${r}`); }
+    closePath() { this.ops.push('z'); }
+  }
+  const round = (radius: number): BoardPin => ({ id: 'r', componentId: 'C', number: '1', name: '1', net: 'N', side: 'top', x: 10, y: 20, radius, shape: 'round' });
+  const rect = (width: number, height: number, radius = 0.1): BoardPin => ({ ...round(radius), shape: 'rect', width, height, rotation: 45 });
+  const opsOf = (pin: BoardPin, scale: number, marker = 1) => { const path = new Ops(); appendPadPath(path, pin, scale, marker); return path.ops; };
+
+  it('draws a small round pad (1 px marker) as a square with the marker circle\'s area, with no curve', () => {
+    // radius 0.2 mm at 4 px/mm is 0.8 px, so the 1 px marker sets the radius to 0.25 mm; the square has the circle's area
+    const half = 0.25 * Math.sqrt(Math.PI) / 2;
+    expect(opsOf(round(0.2), 4)).toEqual([`m${10 - half},${20 - half}`, `l${10 + half},${20 - half}`, `l${10 + half},${20 + half}`, `l${10 - half},${20 + half}`]);
+    expect(4 * half * half).toBeCloseTo(Math.PI * 0.25 * 0.25, 12);
+  });
+
+  it('keeps a round pad of 1.5 px or more exactly as before (moveTo and an arc)', () => {
+    // radius 0.5 mm at 4 px/mm is 2 px: a circle, the same ops as the original renderer
+    expect(opsOf(round(0.5), 4)).toEqual(['m10.5,20', 'a10,20,0.5']);
+    // exactly 1.5 px is no longer a point
+    expect(opsOf(round(0.375), 4)).toEqual(['m10.375,20', 'a10,20,0.375']);
+  });
+
+  it('keeps a larger marker (the selected component, 1.8 px) as a circle even for a tiny pad', () => {
+    expect(opsOf(round(0.01), 4, 1.8)[1]).toMatch(/^a/);
+  });
+
+  it('draws a small rectangular pad as a square of its larger half-size, and a larger one as a rotated rectangle', () => {
+    const small = opsOf(rect(0.2, 0.1), 2);   // 0.2 x 0.1 mm at 2 px/mm: 0.4 x 0.2 px, the 1.5 px floor sets the half-size to 0.75 px = 0.375 mm
+    expect(small).toHaveLength(4);
+    expect(small[0]).toBe('m9.625,19.625');
+    const large = opsOf(rect(2, 1), 2);       // 2 x 1 mm at 2 px/mm: a rotated rectangle with its closing contour
+    expect(large[large.length - 1]).toBe('z');
+    expect(large).toHaveLength(5);
+  });
+});

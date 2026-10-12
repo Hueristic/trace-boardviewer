@@ -13,5 +13,10 @@
   "settings.labelsHint": "Bezeichner, die mit dem Zoom skalieren",
   "settings.connections": "Hilfslinien für Verbindungen",
   "settings.connectionsHint": "Gerade Linien zwischen dem gewählten Pin und den Pads seines Netzes",
-  "settings.autosave": "Einstellungen werden automatisch gespeichert."
+  "settings.autosave": "Einstellungen werden automatisch gespeichert.",
+  "settings.noSandbox.title": "Linux: Start ohne Sandbox",
+  "settings.noSandbox.hint": "Wenn Sie „Nicht mehr fragen” gewählt haben, fragt TRACE nicht erneut. Das Zurücknehmen wirkt beim nächsten Start.",
+  "settings.noSandbox.saved": "Gespeichert: TRACE fragt nicht erneut",
+  "settings.noSandbox.unsaved": "Nicht gespeichert: Die Frage erscheint bei jedem Start ohne Sandbox",
+  "settings.noSandbox.revoke": "Beim nächsten Start wieder fragen"
 }

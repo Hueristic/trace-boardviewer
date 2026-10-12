@@ -66,12 +66,20 @@ const now = () => (typeof performance !== 'undefined' ? performance.now() : Date
 const clampDpi = (dpi: number | undefined) => Math.min(OCR_MAX_DPI, Math.max(OCR_MIN_DPI, Number.isFinite(dpi) ? dpi as number : OCR_DEFAULT_DPI));
 const turnsOf = (rotation: number): QuarterTurn => ((((Math.round(rotation / 90) % 4) + 4) % 4) as QuarterTurn);
 
-/** Words in pixels of a raster at `scale` pixels per point -> recognized TextItems of `page`. */
+// Reference designators are upper-case by convention, and OCR often reads a scanned capital as a small letter ("u10" for "U10",
+// MAC-TEST-20261011-01). A word that is only letters followed by digits is upper-cased; anything else is left exactly as read.
+const DESIGNATOR_WORD = /^[A-Za-z]{1,4}[0-9]{1,4}$/;
+export const designatorWord = (text: string): string => (DESIGNATOR_WORD.test(text) ? text.toUpperCase() : text);
+
+/** Words in pixels of a raster at `scale` pixels per point -> recognized TextItems of `page`. A normalized word keeps its OCR reading in `ocrRaw`. */
 export function wordsToTextItems(words: readonly OcrWord[], scale: number, page: number): TextItem[] {
-  return words.map(word => ({
-    str: word.text, x: word.x / scale, y: word.y / scale, width: word.width / scale, height: word.height / scale, page,
-    source: 'ocr' as const, confidence: Math.floor(word.confidence),
-  }));
+  return words.map(word => {
+    const str = designatorWord(word.text);
+    return {
+      str, ...(str !== word.text ? { ocrRaw: word.text } : {}), x: word.x / scale, y: word.y / scale, width: word.width / scale, height: word.height / scale, page,
+      source: 'ocr' as const, confidence: Math.floor(word.confidence),
+    };
+  });
 }
 
 export function orderPages(pageCount: number, pages?: readonly number[]): number[] {

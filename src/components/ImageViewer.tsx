@@ -10,51 +10,62 @@ import {
   calibrate, cameraToView, clamp, clampCenter, fitViewMode, formatMeasurement, hitTestMarker, ImageError, imageToScreen, isValidCalibration, loadImageDocument,
   nextRotation, panBy, parseKnownDistanceMm, pixelDistance, sameCamera, screenToImage, viewToCamera, visibleImageRect, zoomAt,
 } from '../lib/images';
+import { useUi } from './workspace/ui-context';
+import { isApplePlatform } from './workspace/shortcuts';
 import type { CameraState, ImageDocument, ImageErrorCode, ImageKind, Point, ViewState } from '../lib/images';
 import type { ImageViewerProps } from './viewer-contracts';
+import { LOCALE_TAGS } from '../lib/i18n';
+import type { Language, MessageKey, Translator } from '../lib/i18n';
 import './image-viewer.css';
+import { panelCoversCanvas } from './image-panel-overlay';
 
-// i18n: pending (English constants)
-const TEXT = {
-  region: 'Image viewer',
-  toolbar: 'Image tools',
-  pan: 'Select and pan (V)',
-  calibrate: 'Calibrate scale (C)',
-  measure: 'Measure distance (M)',
-  note: 'Add note (N)',
-  zoomIn: 'Zoom in (+)',
-  zoomOut: 'Zoom out (-)',
-  actualSize: 'Actual size, 100% (0)',
-  fit: 'Fit image to view (F)',
-  fitWidth: 'Fit to width (W)',
-  rotateLeft: 'Rotate counter-clockwise (Shift+R)',
-  rotateRight: 'Rotate clockwise (R)',
-  addBookmark: 'Add bookmark at the view centre (B)',
-  clearCalibration: 'Clear calibration',
-  panel: 'Bookmarks and notes',
-  keys: 'Image. Plus and minus zoom, 0 shows 100 percent, F fits the image, R rotates, arrow keys pan. V, C, M and N choose a tool, Enter picks a point at the cursor or the view centre, Escape cancels the tool.',
-  loading: 'Decoding image',
-  notCalibrated: 'Not calibrated: distances are in image pixels only',
-  outside: 'Pick a point inside the image.',
-  samePoint: 'The two points are less than one image pixel apart. Pick points farther apart.',
-  shortReference: 'Short reference: a longer known distance gives a more accurate scale.',
-  distanceLabel: 'Real distance between the two points',
-  distanceHint: 'Enter the real distance in millimetres, for example 25.4.',
-  noteEmpty: 'Enter some text, or cancel.',
-  limitBookmarks: 'The bookmark limit for this document has been reached.',
-  limitNotes: 'The note limit for this document has been reached.',
-  sanitized: 'Nothing in this file was run or loaded from the network.',
-} as const;
-
-const ERROR_TITLES: Record<ImageErrorCode, string> = {
-  UNSUPPORTED: 'Unsupported image format', LIMIT_EXCEEDED: 'Image too large to open safely', DECODE_FAILED: 'This image could not be decoded',
-  ABORTED: 'Loading was cancelled', INVALID_CALIBRATION: 'Invalid calibration', SVG_REJECTED: 'This SVG was rejected',
+const ERROR_TITLES: Record<ImageErrorCode, MessageKey> = {
+  UNSUPPORTED: 'images.errorUnsupported', LIMIT_EXCEEDED: 'images.errorLimit', DECODE_FAILED: 'images.errorDecode',
+  ABORTED: 'images.errorAborted', INVALID_CALIBRATION: 'images.errorCalibration', SVG_REJECTED: 'images.errorSvg',
 };
 const KIND_LABELS: Record<ImageKind, string> = { png: 'PNG', jpeg: 'JPEG', webp: 'WebP', svg: 'SVG' };
 
 type Tool = 'pan' | 'calibrate' | 'measure' | 'note';
 type Selection = { kind: 'annotation' | 'bookmark'; id: string } | null;
-type Editor = { mode: 'new'; x: number; y: number } | { mode: 'edit'; id: string } | null;
+/** A request to open an editor: a new note at a point, or the existing note with this id. */
+type EditorRequest = { mode: 'new'; x: number; y: number } | { mode: 'edit'; id: string };
+/** The open editor. An edit also keeps the note's point, so an unsaved draft can become a new note there if the note is removed. */
+type Editor = { mode: 'new'; x: number; y: number } | { mode: 'edit'; id: string; x: number; y: number } | null;
+type NoteEditor = NonNullable<Editor>;
+/** Unsaved note text of one document, kept by the parent across remounts. Only a dirty draft is ever stored. */
+export interface ImageDraft { editor: NoteEditor; text: string }
+export interface ImageDraftProps { draft?: ImageDraft | null; onDraftChange?: (draft: ImageDraft | null) => void }
+
+/** The text the open editor's note holds: '' for a new note, the note's text for an edit, null when that note no longer exists. */
+export function savedNoteText(editor: NoteEditor, annotations: readonly DocumentAnnotation[]): string | null {
+  if (editor.mode === 'new') return '';
+  const note = annotations.find(a => a.id === editor.id);
+  return note ? note.text : null;
+}
+/** True when the editor holds text that is not saved yet. A vanished note counts as unsaved while its text is not empty. */
+export function isDraftDirty(editor: Editor, text: string, annotations: readonly DocumentAnnotation[]): boolean {
+  if (!editor) return false;
+  const saved = savedNoteText(editor, annotations);
+  return saved === null ? text !== '' : text !== saved;
+}
+/** Whether a request opens the note the editor already shows. */
+export function isSameNoteTarget(current: NoteEditor, next: EditorRequest): boolean {
+  if (next.mode === 'edit') return current.mode === 'edit' && current.id === next.id;
+  return current.mode === 'new' && current.x === next.x && current.y === next.y;
+}
+/**
+ * What opening `next` does while `current` is open: `keep` the same note (its text is left as it is), `block` a different note
+ * while the draft is unsaved (the text is never replaced or moved), or `allow`.
+ */
+export function editorOpenDecision(current: Editor, dirty: boolean, next: EditorRequest): 'allow' | 'keep' | 'block' {
+  if (!current) return 'allow';
+  if (isSameNoteTarget(current, next)) return 'keep';
+  return dirty ? 'block' : 'allow';
+}
+/** Escape, Cancel and the other close paths: a clean editor closes; an unsaved draft stays open and says so. */
+export function editorCloseDecision(dirty: boolean): 'close' | 'keep' { return dirty ? 'keep' : 'close'; }
+/** The edited note was removed elsewhere: an unsaved draft becomes a new note at the same point; a clean editor closes. */
+export function missingNoteDecision(dirty: boolean): 'close' | 'move' { return dirty ? 'move' : 'close'; }
 type Notice = { tone: 'info' | 'ok' | 'error'; text: string } | null;
 type Segment = { a: Point; b: Point };
 type Phase =
@@ -93,11 +104,39 @@ const ROW_HEIGHT = 44;
 const EDITOR_WIDTH = 272;
 const EDITOR_HEIGHT = 196;
 const round2 = (value: number) => Math.round(value * 100) / 100;
-const formatMm = (mm: number) => (mm >= 100 ? mm.toFixed(1) : mm >= 1 ? mm.toFixed(2) : mm.toFixed(3));
-const formatZoom = (scale: number) => `${(scale * 100).toFixed(scale < 0.1 ? 1 : 0)}%`;
+/** The decimal separator of the interface follows its language (a comma in hu, de, fr, it, sk, pl and uk); the digits are the caller's. */
+const decimalFormats = new Map<string, Intl.NumberFormat>();
+/**
+ * A decimal number with exactly `digits` decimals in the UI language. Grouping is off, so the decimal separator is the only change.
+ * Intl rounds the decimal form of the value; toFixed rounded the binary value, so an exact tie (1.005) can differ in the last digit.
+ */
+export function formatDecimal(value: number, digits: number, language: Language): string {
+  const id = `${language}:${digits}`;
+  let format = decimalFormats.get(id);
+  if (!format) {
+    format = new Intl.NumberFormat(LOCALE_TAGS[language], { minimumFractionDigits: digits, maximumFractionDigits: digits, useGrouping: false });
+    decimalFormats.set(id, format);
+  }
+  return format.format(value);
+}
+/** A measured millimetre value: one decimal from 100 mm, two from 1 mm, three below 1 mm (the digits the display always had). */
+export function formatMillimetres(mm: number, language: Language): string {
+  return formatDecimal(mm, mm >= 100 ? 1 : mm >= 1 ? 2 : 3, language);
+}
+const formatZoom = (scale: number, language: Language) => `${formatDecimal(scale * 100, scale < 0.1 ? 1 : 0, language)}%`;
 const newId = () => (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `id-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`);
 const reducedMotion = () => typeof window !== 'undefined' && (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches || document.documentElement.dataset.motion === 'off');
 const isEditable = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+/**
+ * The default name of a new bookmark: the first `name(n)` after the count that no saved bookmark uses. The saved labels are only read,
+ * so a name a document already has (in any language) is never changed; `name` is the catalog text of the UI language.
+ */
+export function nextBookmarkLabel(savedLabels: readonly string[], count: number, name: (number: number) => string): string {
+  const used = new Set(savedLabels);
+  let n = count + 1;
+  while (used.has(name(n))) n++;
+  return name(n);
+}
 
 function readPalette(element: Element): Palette {
   const style = getComputedStyle(element);
@@ -120,8 +159,11 @@ function useStateRef<T>(initial: T) {
   return [state, set, ref] as const;
 }
 
-export function ImageViewer(props: ImageViewerProps) {
-  const { name, data, calibration, bookmarks, annotations, theme, motion, compact } = props;
+export function ImageViewer(props: ImageViewerProps & ImageDraftProps) {
+  const { name, data, calibration, bookmarks, annotations, theme, motion, compact, draft, onDraftChange } = props;
+  const { t, language } = useUi();
+  // Measured millimetres in the decimal separator of the UI language, with the digits of the display (see formatMillimetres).
+  const formatMm = (mm: number) => formatMillimetres(mm, language);
   // The result is tagged with the bytes it belongs to, so the previous document is never shown (or its banner kept) for even one frame after `data` changes.
   const [result, setResult] = useState<{ data: Uint8Array; phase: Phase }>({ data, phase: LOADING });
   const loaded = result.data === data ? result.phase : LOADING;
@@ -130,11 +172,15 @@ export function ImageViewer(props: ImageViewerProps) {
   const [calibPoints, setCalibPoints, calibPointsRef] = useStateRef<Point[]>([]);
   const [measurement, setMeasurement, measurementRef] = useStateRef<Segment | null>(null);
   const [selection, setSelection, selectionRef] = useStateRef<Selection>(null);
-  const [editor, setEditor, editorRef] = useStateRef<Editor>(null);
+  const [editor, setEditor, editorRef] = useStateRef<Editor>(draft?.editor ?? null);
   const [notice, setNotice] = useState<Notice>(null);
   const [distanceText, setDistanceText] = useState('');
   const [distanceError, setDistanceError] = useState<string | null>(null);
-  const [noteText, setNoteText] = useState('');
+  const [noteText, setNoteText] = useState(draft?.text ?? '');
+  const noteTextRef = useRef(noteText);
+  noteTextRef.current = noteText;
+  const reportDraft = useRef(onDraftChange);
+  reportDraft.current = onDraftChange;
   const [noteError, setNoteError] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(!compact);
   const [bannerOpen, setBannerOpen] = useState(true);
@@ -224,11 +270,11 @@ export function ImageViewer(props: ImageViewerProps) {
       ctx.setTransform(sx, 0, 0, sy, 0, 0);
       paintOverlay(ctx, palette, doc, view);
     }
-    if (zoomTextRef.current) zoomTextRef.current.textContent = formatZoom(view.scale);
+    if (zoomTextRef.current) zoomTextRef.current.textContent = formatZoom(view.scale, language);
     if (rotationTextRef.current) rotationTextRef.current.textContent = `${view.rotation}°`;
     if (cursorTextRef.current) {
       const p = L.hover && doc ? screenToImage(L.hover, view, L.w, L.h) : null;
-      cursorTextRef.current.textContent = p && p.x >= 0 && p.y >= 0 && p.x <= doc!.width && p.y <= doc!.height ? `x ${p.x.toFixed(1)}  y ${p.y.toFixed(1)} px` : '';
+      cursorTextRef.current.textContent = p && p.x >= 0 && p.y >= 0 && p.x <= doc!.width && p.y <= doc!.height ? `x ${formatDecimal(p.x, 1, language)}  y ${formatDecimal(p.y, 1, language)} px` : '';
     }
     positionEditor();
   };
@@ -308,12 +354,12 @@ export function ImageViewer(props: ImageViewerProps) {
     const measured = measurementRef.current;
     if (measured) segment(measured.a, measured.b, palette.net, false, formatMeasurement(pixelDistance(measured.a, measured.b), calibratedNow, formatMm));
     const calibPts = calibPointsRef.current;
-    if (calibPts.length === 2) segment(calibPts[0], calibPts[1], palette.accent, true, `${pixelDistance(calibPts[0], calibPts[1]).toFixed(1)} px`);
+    if (calibPts.length === 2) segment(calibPts[0], calibPts[1], palette.accent, true, `${formatDecimal(pixelDistance(calibPts[0], calibPts[1]), 1, language)} px`);
     const first = toolRef.current === 'calibrate' ? calibPts[0] : toolRef.current === 'measure' ? pendingRef.current[0] : undefined;
     if (first && (toolRef.current === 'measure' ? pendingRef.current.length === 1 : calibPts.length === 1)) {
       const colour = toolRef.current === 'calibrate' ? palette.accent : palette.net;
       const target = L.hover ? screenToImage(L.hover, view, L.w, L.h) : null;
-      if (target) segment(first, target, colour, true, toolRef.current === 'measure' ? formatMeasurement(pixelDistance(first, target), calibratedNow, formatMm) : `${pixelDistance(first, target).toFixed(1)} px`);
+      if (target) segment(first, target, colour, true, toolRef.current === 'measure' ? formatMeasurement(pixelDistance(first, target), calibratedNow, formatMm) : `${formatDecimal(pixelDistance(first, target), 1, language)} px`);
       else segment(first, first, colour, false, '');
     }
     // Keyboard users pick points at the view centre, so show where that is while a tool is active and the pointer is away.
@@ -430,6 +476,8 @@ export function ImageViewer(props: ImageViewerProps) {
   const chooseTool = (next: Tool) => {
     stopTool();
     setNotice(null);
+    // A drawing tool needs the canvas: a panel laid over it (narrow viewer) would take the clicks, so it is closed for that tool.
+    if ((next === 'calibrate' || next === 'measure' || next === 'note') && panelCoversCanvas(rootRef.current?.clientWidth ?? Number.POSITIVE_INFINITY)) setPanelOpen(false);
     if (next !== 'pan') setSelection(null);
     if (next === 'measure') setMeasurement(null);
     setTool(next);
@@ -437,6 +485,15 @@ export function ImageViewer(props: ImageViewerProps) {
     surfaceRef.current?.focus({ preventScroll: true });
   };
   const closeEditor = () => { setEditor(null); setNoteError(null); setNoteText(''); schedulePaint(); surfaceRef.current?.focus({ preventScroll: true }); };
+  // Escape, Cancel and the surface Escape: an unsaved draft stays and says so, instead of being thrown away silently.
+  const requestCloseEditor = () => {
+    if (editorCloseDecision(isDraftDirty(editorRef.current, noteTextRef.current, latest.current.annotations)) === 'keep') {
+      setNoteError(t('notes.draftKept'));
+      noteInputRef.current?.focus();
+      return;
+    }
+    closeEditor();
+  };
 
   // ---------------------------------------------------------------------------------------------
   // Clicks: calibration, measurement, notes
@@ -457,23 +514,22 @@ export function ImageViewer(props: ImageViewerProps) {
       const hit = hitTestMarker(markers(), screen, L.view, L.w, L.h, MARKER_RADIUS + 3);
       if (hit) {
         const id = hit.slice(2), isNote = hit.startsWith('a:');
-        setSelection({ kind: isNote ? 'annotation' : 'bookmark', id });
-        if (isNote) openEditor({ mode: 'edit', id });
+        if (!isNote || openEditor({ mode: 'edit', id })) setSelection({ kind: isNote ? 'annotation' : 'bookmark', id });
         schedulePaint();
         return;
       }
       if (current === 'pan') { setSelection(null); setNotice(null); schedulePaint(); return; }
-      if (!inside) { setNotice({ tone: 'error', text: TEXT.outside }); return; }
+      if (!inside) { setNotice({ tone: 'error', text: t('images.outside') }); return; }
       setNotice(null);
       openEditor({ mode: 'new', x: round2(point.x), y: round2(point.y) });
       return;
     }
-    if (!inside) { setNotice({ tone: 'error', text: TEXT.outside }); return; }
+    if (!inside) { setNotice({ tone: 'error', text: t('images.outside') }); return; }
     setNotice(null);
     if (current === 'calibrate') {
       const points = calibPointsRef.current;
       if (points.length === 1) {
-        if (pixelDistance(points[0], point) < 1) { setNotice({ tone: 'error', text: TEXT.samePoint }); return; }
+        if (pixelDistance(points[0], point) < 1) { setNotice({ tone: 'error', text: t('images.samePoint') }); return; }
         setCalibPoints([points[0], point]);
         setDistanceText(''); setDistanceError(null);
       } else {
@@ -492,11 +548,28 @@ export function ImageViewer(props: ImageViewerProps) {
     schedulePaint();
   };
 
-  const openEditor = (next: NonNullable<Editor>) => {
-    setEditor(next);
+  /** Opens a note editor unless an unsaved draft of another note is pending; then the draft stays and the editor says so. */
+  const openEditor = (next: EditorRequest): boolean => {
+    const current = editorRef.current;
+    const decision = editorOpenDecision(current, isDraftDirty(current, noteTextRef.current, latest.current.annotations), next);
+    if (decision === 'block') {
+      setNoteError(t('notes.draftBlocked'));
+      noteInputRef.current?.focus();
+      return false;
+    }
+    if (decision === 'keep') return true;
+    if (next.mode === 'edit') {
+      const note = latest.current.annotations.find(a => a.id === next.id);
+      if (!note) return false;
+      setEditor({ mode: 'edit', id: note.id, x: note.x, y: note.y });
+      setNoteText(note.text);
+    } else {
+      setEditor(next);
+      setNoteText('');
+    }
     setNoteError(null);
-    setNoteText(next.mode === 'edit' ? latest.current.annotations.find(a => a.id === next.id)?.text ?? '' : '');
     schedulePaint();
+    return true;
   };
 
   const applyCalibration = () => {
@@ -507,12 +580,12 @@ export function ImageViewer(props: ImageViewerProps) {
     try {
       const result = calibrate(points[0], points[1], parsed.value);
       latest.current.onCalibrationChange({ pixelsPerMm: result.pixelsPerMm, confirmed: true });
-      setNotice({ tone: 'ok', text: `Calibrated: ${result.pixelsPerMm.toFixed(3)} px per mm (1 mm = ${result.pixelsPerMm.toFixed(2)} px). Measurements now report millimetres.` });
+      setNotice({ tone: 'ok', text: t('images.calibrated', { ratio: formatDecimal(result.pixelsPerMm, 3, language), pixels: formatDecimal(result.pixelsPerMm, 2, language) }) });
       stopTool();
       setTool('pan');
       surfaceRef.current?.focus({ preventScroll: true });
     } catch (error) {
-      setDistanceError(error instanceof ImageError ? error.message : 'The calibration could not be computed.');
+      setDistanceError(error instanceof ImageError ? error.message : t('images.calibrationFailed'));
       distanceInputRef.current?.focus();
     }
     schedulePaint();
@@ -520,7 +593,7 @@ export function ImageViewer(props: ImageViewerProps) {
 
   const clearCalibration = () => {
     latest.current.onCalibrationChange(undefined);
-    setNotice({ tone: 'info', text: 'Calibration cleared. Distances are reported in image pixels only.' });
+    setNotice({ tone: 'info', text: t('images.calibrationCleared') });
     schedulePaint();
   };
 
@@ -531,11 +604,9 @@ export function ImageViewer(props: ImageViewerProps) {
   const addBookmark = () => {
     const L = live.current;
     if (!L.doc) return;
-    if (latest.current.bookmarks.length >= WORKSPACE_LIMITS.bookmarks) { setNotice({ tone: 'error', text: TEXT.limitBookmarks }); return; }
-    const used = new Set(latest.current.bookmarks.map(b => b.label));
-    let n = latest.current.bookmarks.length + 1;
-    while (used.has(`Bookmark ${n}`)) n++;
-    const bookmark: DocumentBookmark = { id: newId(), page: 1, label: `Bookmark ${n}`, x: round2(L.view.center.x), y: round2(L.view.center.y) };
+    if (latest.current.bookmarks.length >= WORKSPACE_LIMITS.bookmarks) { setNotice({ tone: 'error', text: t('images.limitBookmarks') }); return; }
+    const label = nextBookmarkLabel(latest.current.bookmarks.map(b => b.label), latest.current.bookmarks.length, number => t('images.bookmarkName', { number: String(number) }));
+    const bookmark: DocumentBookmark = { id: newId(), page: 1, label, x: round2(L.view.center.x), y: round2(L.view.center.y) };
     latest.current.onBookmarksChange([...latest.current.bookmarks, bookmark]);
     setSelection({ kind: 'bookmark', id: bookmark.id });
     setPanelOpen(true);
@@ -558,10 +629,10 @@ export function ImageViewer(props: ImageViewerProps) {
     const current = editorRef.current;
     if (!current) return;
     const text = noteText.trim();
-    if (!text) { setNoteError(TEXT.noteEmpty); noteInputRef.current?.focus(); return; }
+    if (!text) { setNoteError(t('images.noteEmpty')); noteInputRef.current?.focus(); return; }
     const now = new Date().toISOString();
     if (current.mode === 'new') {
-      if (latest.current.annotations.length >= WORKSPACE_LIMITS.annotations) { setNoteError(TEXT.limitNotes); return; }
+      if (latest.current.annotations.length >= WORKSPACE_LIMITS.annotations) { setNoteError(t('images.limitNotes')); return; }
       const note: DocumentAnnotation = { id: newId(), page: 1, x: current.x, y: current.y, text, updatedAt: now };
       latest.current.onAnnotationsChange([...latest.current.annotations, note]);
       setSelection({ kind: 'annotation', id: note.id });
@@ -641,7 +712,7 @@ export function ImageViewer(props: ImageViewerProps) {
         if (toolRef.current === 'pan') handled = false; else handleClick(L.hover ?? { x: L.w / 2, y: L.h / 2 });
         break;
       case 'Escape':
-        if (editorRef.current) closeEditor();
+        if (editorRef.current) requestCloseEditor();
         else if (pendingRef.current.length || calibPointsRef.current.length) { stopTool(); schedulePaint(); }
         else if (toolRef.current !== 'pan') chooseTool('pan');
         else if (measurementRef.current || selectionRef.current) { setMeasurement(null); setSelection(null); setNotice(null); schedulePaint(); }
@@ -661,7 +732,7 @@ export function ImageViewer(props: ImageViewerProps) {
     const L = live.current;
     L.doc = null; L.initialized = false; L.emitted = [];
     setResult({ data, phase: LOADING });
-    setTool('pan'); setPending([]); setCalibPoints([]); setMeasurement(null); setSelection(null); setEditor(null); setNotice(null); setRenamingId(null); setBannerOpen(true); setShowAllRemoved(false);
+    setTool('pan'); setPending([]); setCalibPoints([]); setMeasurement(null); setSelection(null); if (editorCloseDecision(isDraftDirty(editorRef.current, noteTextRef.current, latest.current.annotations)) === 'close') setEditor(null); setNotice(null); setRenamingId(null); setBannerOpen(true); setShowAllRemoved(false);
     schedulePaint();
     let current: ImageDocument | null = null;
     loadImageDocument(data, controller.signal).then(loadedDoc => {
@@ -672,7 +743,7 @@ export function ImageViewer(props: ImageViewerProps) {
     }, (error: unknown) => {
       if (controller.signal.aborted || (error instanceof ImageError && error.code === 'ABORTED')) return;
       const known = error instanceof ImageError;
-      setResult({ data, phase: { phase: 'error', code: known ? error.code : 'DECODE_FAILED', message: known ? error.message : 'The image could not be opened.' } });
+      setResult({ data, phase: { phase: 'error', code: known ? error.code : 'DECODE_FAILED', message: known ? error.message : t('images.openFailed') } });
     });
     return () => {
       controller.abort();
@@ -750,9 +821,25 @@ export function ImageViewer(props: ImageViewerProps) {
     return () => clearTimeout(timer);
   }, [notice]);
   useEffect(() => {
-    if (editor?.mode === 'edit' && !annotations.some(a => a.id === editor.id)) closeEditor();
+    if (editor?.mode === 'edit' && !annotations.some(a => a.id === editor.id)) {
+      // The note was removed elsewhere: its unsaved text moves to a new note at the same point, never to another note.
+      if (missingNoteDecision(isDraftDirty(editor, noteText, annotations)) === 'move') {
+        setEditor({ mode: 'new', x: editor.x, y: editor.y });
+        setNoteError(t('notes.draftMoved'));
+      } else {
+        closeEditor();
+      }
+    }
     if (selection && !(selection.kind === 'annotation' ? annotations : bookmarks).some(item => item.id === selection.id)) setSelection(null);
   }, [annotations, bookmarks]);
+  // The unsaved draft is reported to the parent after every change, so a remount (document or tab switch) can hand it back.
+  useEffect(() => {
+    reportDraft.current?.(editor && isDraftDirty(editor, noteText, annotations) ? { editor, text: noteText } : null);
+  }, [editor, noteText, annotations]);
+  // A draft restored on mount says so once. Only the draft present at mount is announced.
+  useEffect(() => {
+    if (draft) setNotice({ tone: 'info', text: t('notes.draftRestored') });
+  }, []);
 
   // ---------------------------------------------------------------------------------------------
   // Render
@@ -775,40 +862,40 @@ export function ImageViewer(props: ImageViewerProps) {
 
   const hint = (() => {
     if (!ready) return null;
-    if (tool === 'calibrate') return calibPoints.length === 0 ? 'Calibrate: click the first end of a distance you know, for example a ruler in the photo.' : calibPoints.length === 1 ? 'Click the second end of the known distance.' : null;
+    if (tool === 'calibrate') return calibPoints.length === 0 ? t('images.hintCalibrateFirst') : calibPoints.length === 1 ? t('images.hintCalibrateSecond') : null;
     if (tool === 'measure') {
-      if (pending.length === 0 && !measurement) return activeCalibration ? 'Measure: click the first point.' : 'Measure: click the first point. Not calibrated, so distances are in pixels only.';
-      if (pending.length === 1) return 'Click the second point.';
+      if (pending.length === 0 && !measurement) return activeCalibration ? t('images.hintMeasureFirst') : t('images.hintMeasureFirstUncalibrated');
+      if (pending.length === 1) return t('images.hintMeasureSecond');
       return null;
     }
-    if (tool === 'note') return 'Add note: click the image where the note belongs.';
+    if (tool === 'note') return t('images.hintNote');
     return null;
   })();
   const measuredText = measurement ? formatMeasurement(pixelDistance(measurement.a, measurement.b), activeCalibration, formatMm) : null;
   const measuredPixels = measurement ? pixelDistance(measurement.a, measurement.b) : 0;
 
   return (
-    <section ref={rootRef} className="imgv" data-theme-mode={theme} data-motion={motion ? 'on' : 'off'} data-compact={compact ? 'true' : 'false'} data-phase={loaded.phase} aria-label={`${TEXT.region}: ${name}`}>
-      <div className="imgv-toolbar" role="toolbar" aria-label={TEXT.toolbar}>
+    <section ref={rootRef} className="imgv" data-theme-mode={theme} data-motion={motion ? 'on' : 'off'} data-compact={compact ? 'true' : 'false'} data-phase={loaded.phase} aria-label={t('images.regionNamed', { name })}>
+      <div className="imgv-toolbar" role="toolbar" aria-label={t('images.toolbar')}>
         <div className="imgv-group">
-          {toolButton('pan', TEXT.pan, <Hand size={16} aria-hidden />, 'Select')}
-          {toolButton('calibrate', TEXT.calibrate, <RulerDimensionLine size={16} aria-hidden />, 'Calibrate')}
-          {toolButton('measure', TEXT.measure, <Ruler size={16} aria-hidden />, 'Measure')}
-          {toolButton('note', TEXT.note, <MapPin size={16} aria-hidden />, 'Note')}
+          {toolButton('pan', t('images.pan'), <Hand size={16} aria-hidden />, t('images.selectTool'))}
+          {toolButton('calibrate', t('images.calibrate'), <RulerDimensionLine size={16} aria-hidden />, t('images.calibrateTool'))}
+          {toolButton('measure', t('images.measure'), <Ruler size={16} aria-hidden />, t('images.measureTool'))}
+          {toolButton('note', t('notes.addNote'), <MapPin size={16} aria-hidden />, t('common.note'))}
         </div>
         <div className="imgv-group">
-          {iconButton(TEXT.zoomOut, <ZoomOut size={16} aria-hidden />, () => zoomTo(live.current.view.scale / ZOOM_STEP))}
-          {iconButton(TEXT.actualSize, <span className="imgv-glyph" aria-hidden>1:1</span>, () => zoomTo(1))}
-          {iconButton(TEXT.zoomIn, <ZoomIn size={16} aria-hidden />, () => zoomTo(live.current.view.scale * ZOOM_STEP))}
-          {iconButton(TEXT.fit, <Maximize2 size={16} aria-hidden />, () => fitTo('page'))}
-          {iconButton(TEXT.fitWidth, <MoveHorizontal size={16} aria-hidden />, () => fitTo('width'))}
-          {iconButton(TEXT.rotateLeft, <RotateCcw size={16} aria-hidden />, () => rotate(-90))}
-          {iconButton(TEXT.rotateRight, <RotateCw size={16} aria-hidden />, () => rotate(90))}
+          {iconButton(t('images.zoomOut'), <ZoomOut size={16} aria-hidden />, () => zoomTo(live.current.view.scale / ZOOM_STEP))}
+          {iconButton(t('images.actualSize'), <span className="imgv-glyph" aria-hidden>1:1</span>, () => zoomTo(1))}
+          {iconButton(t('images.zoomIn'), <ZoomIn size={16} aria-hidden />, () => zoomTo(live.current.view.scale * ZOOM_STEP))}
+          {iconButton(t('images.fit'), <Maximize2 size={16} aria-hidden />, () => fitTo('page'))}
+          {iconButton(t('images.fitWidth'), <MoveHorizontal size={16} aria-hidden />, () => fitTo('width'))}
+          {iconButton(t('images.rotateLeft'), <RotateCcw size={16} aria-hidden />, () => rotate(-90))}
+          {iconButton(t('images.rotateRight'), <RotateCw size={16} aria-hidden />, () => rotate(90))}
         </div>
         <div className="imgv-group imgv-group--end">
-          {iconButton(TEXT.addBookmark, <BookmarkIcon size={16} aria-hidden />, addBookmark, { text: 'Bookmark' })}
-          {activeCalibration ? iconButton(TEXT.clearCalibration, <Eraser size={16} aria-hidden />, clearCalibration, { text: 'Clear scale' }) : null}
-          {iconButton(TEXT.panel, <PanelRight size={16} aria-hidden />, () => setPanelOpen(open => !open), { pressed: panelOpen, controls: panelId, disabled: false, count: bookmarks.length + annotations.length })}
+          {iconButton(t('images.addBookmark'), <BookmarkIcon size={16} aria-hidden />, addBookmark, { text: t('images.bookmark') })}
+          {activeCalibration ? iconButton(t('images.clearCalibration'), <Eraser size={16} aria-hidden />, clearCalibration, { text: t('images.clearScale') }) : null}
+          {iconButton(t('notes.bookmarksAndNotes'), <PanelRight size={16} aria-hidden />, () => setPanelOpen(open => !open), { pressed: panelOpen, controls: panelId, disabled: false, count: bookmarks.length + annotations.length })}
         </div>
       </div>
 
@@ -820,8 +907,8 @@ export function ImageViewer(props: ImageViewerProps) {
             data-tool={tool}
             tabIndex={0}
             role="application"
-            aria-roledescription="image viewer"
-            aria-label={`${name}. ${view ? `${view.width} by ${view.height} pixels` : 'not loaded'}`}
+            aria-roledescription={t('images.roleDescription')}
+            aria-label={view ? t('images.surfaceLabel', { name, width: String(view.width), height: String(view.height) }) : t('images.surfaceLabelEmpty', { name })}
             aria-describedby={hintId}
             aria-keyshortcuts="+ - 0 F W R V C M N B"
             onPointerDown={onPointerDown}
@@ -834,15 +921,15 @@ export function ImageViewer(props: ImageViewerProps) {
           >
             <canvas ref={canvasRef} className="imgv-canvas" aria-hidden />
           </div>
-          <span id={hintId} className="imgv-sr">{TEXT.keys}</span>
+          <span id={hintId} className="imgv-sr">{t('images.keys')}</span>
 
-          {loaded.phase === 'loading' ? <div className="imgv-state" role="status"><LoaderCircle className="imgv-spin" size={22} aria-hidden /><span>{TEXT.loading}…</span></div> : null}
+          {loaded.phase === 'loading' ? <div className="imgv-state" role="status"><LoaderCircle className="imgv-spin" size={22} aria-hidden /><span>{t('images.loading')}…</span></div> : null}
           {loaded.phase === 'error' ? (
             <div className="imgv-state imgv-state--error" role="alert">
               {loaded.code === 'LIMIT_EXCEEDED' || loaded.code === 'SVG_REJECTED' ? <ShieldAlert size={26} aria-hidden /> : <ImageOff size={26} aria-hidden />}
-              <strong>{ERROR_TITLES[loaded.code]}</strong>
+              <strong>{t(ERROR_TITLES[loaded.code])}</strong>
               <span className="imgv-state__detail">{loaded.message}</span>
-              <span className="imgv-state__file mono">{name} · {data.byteLength.toLocaleString('en')} bytes</span>
+              <span className="imgv-state__file mono">{name} · {t('images.fileBytes', { size: data.byteLength.toLocaleString('en') })}</span>
             </div>
           ) : null}
 
@@ -851,18 +938,18 @@ export function ImageViewer(props: ImageViewerProps) {
               <div className="imgv-banner" role="status">
                 <ShieldAlert size={16} aria-hidden />
                 <div className="imgv-banner__body">
-                  <strong>{view.removed.length} unsafe {view.removed.length === 1 ? 'item was' : 'items were'} removed from this SVG.</strong>{' '}
-                  <span>{TEXT.sanitized}</span>
-                  <ul className="imgv-removed" aria-label="Removed SVG content">
-                    {(showAllRemoved ? view.removed : view.removed.slice(0, REMOVED_PREVIEW)).map(item => <li key={item}>{describeRemoval(item)}</li>)}
+                  <strong>{t('images.removedSummary', { count: String(view.removed.length) })}</strong>{' '}
+                  <span>{t('images.sanitized')}</span>
+                  <ul className="imgv-removed" aria-label={t('images.removedList')}>
+                    {(showAllRemoved ? view.removed : view.removed.slice(0, REMOVED_PREVIEW)).map(item => <li key={item}>{describeRemoval(item, t)}</li>)}
                   </ul>
                   {view.removed.length > REMOVED_PREVIEW ? (
                     <button type="button" className="imgv-status__link" aria-expanded={showAllRemoved} onClick={() => setShowAllRemoved(open => !open)}>
-                      {showAllRemoved ? 'Show fewer' : `Show all ${view.removed.length}`}
+                      {showAllRemoved ? t('images.showFewer') : t('images.showAll', { count: String(view.removed.length) })}
                     </button>
                   ) : null}
                 </div>
-                <button type="button" className="imgv-btn imgv-btn--small" aria-label="Hide the removed-content notice" title="Hide" onClick={() => setBannerOpen(false)}><X size={14} aria-hidden /></button>
+                <button type="button" className="imgv-btn imgv-btn--small" aria-label={t('images.hideNotice')} title={t('images.hide')} onClick={() => setBannerOpen(false)}><X size={14} aria-hidden /></button>
               </div>
             ) : null}
             {hint || notice || measuredText ? (
@@ -871,7 +958,7 @@ export function ImageViewer(props: ImageViewerProps) {
                 {!hint && measuredText && measurement ? (
                   <span className="imgv-dock__result">
                     <span className="mono imgv-dock__value">{measuredText}</span>
-                    {activeCalibration ? <span className="muted"> ({Math.round(measuredPixels)} px)</span> : <span className="muted"> — {TEXT.notCalibrated}. Use Calibrate to measure in millimetres.</span>}
+                    {activeCalibration ? <span className="muted"> ({Math.round(measuredPixels)} px)</span> : <span className="muted"> — {t('images.notCalibrated')}</span>}
                   </span>
                 ) : null}
                 {notice ? <span className="imgv-dock__notice">{notice.text}</span> : null}
@@ -879,7 +966,7 @@ export function ImageViewer(props: ImageViewerProps) {
             ) : null}
             {tool === 'calibrate' && calibPoints.length === 2 ? (
               <form className="imgv-dock imgv-form" onSubmit={event => { event.preventDefault(); applyCalibration(); }} onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); stopTool(); schedulePaint(); surfaceRef.current?.focus({ preventScroll: true }); } }}>
-                <label htmlFor={`${panelId}-distance`}>{TEXT.distanceLabel}</label>
+                <label htmlFor={`${panelId}-distance`}>{t('images.distanceLabel')}</label>
                 <span className="imgv-form__field">
                   <input
                     id={`${panelId}-distance`} ref={distanceInputRef} className="imgv-input mono" inputMode="decimal" autoComplete="off" spellCheck={false} placeholder="25.4"
@@ -888,60 +975,60 @@ export function ImageViewer(props: ImageViewerProps) {
                   />
                   <span className="muted">mm</span>
                 </span>
-                <button type="submit" className="imgv-btn imgv-btn--primary"><Check size={15} aria-hidden /><span>Set scale</span></button>
-                <button type="button" className="imgv-btn" onClick={() => { stopTool(); schedulePaint(); surfaceRef.current?.focus({ preventScroll: true }); }}><X size={15} aria-hidden /><span>Cancel</span></button>
+                <button type="submit" className="imgv-btn imgv-btn--primary"><Check size={15} aria-hidden /><span>{t('images.setScale')}</span></button>
+                <button type="button" className="imgv-btn" onClick={() => { stopTool(); schedulePaint(); surfaceRef.current?.focus({ preventScroll: true }); }}><X size={15} aria-hidden /><span>{t('common.cancel')}</span></button>
                 <span id={`${panelId}-distance-help`} className={distanceError ? 'imgv-form__help imgv-form__help--error' : 'imgv-form__help'} role={distanceError ? 'alert' : undefined}>
-                  {distanceError ?? `${pixelDistance(calibPoints[0], calibPoints[1]).toFixed(1)} px between the points. ${TEXT.distanceHint}${pixelDistance(calibPoints[0], calibPoints[1]) < 50 ? ` ${TEXT.shortReference}` : ''}`}
+                  {distanceError ?? `${t('images.distanceBetween', { distance: formatDecimal(pixelDistance(calibPoints[0], calibPoints[1]), 1, language) })} ${t('images.distanceHint')}${pixelDistance(calibPoints[0], calibPoints[1]) < 50 ? ` ${t('images.shortReference')}` : ''}`}
                 </span>
               </form>
             ) : null}
           </div>
 
           {editor ? (
-            <div ref={editorBoxRef} className="imgv-editor" role="dialog" aria-label={editor.mode === 'new' ? 'New note' : 'Edit note'} style={{ width: EDITOR_WIDTH }}
-              onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); closeEditor(); } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveNote(); } }}>
-              <label htmlFor={`${panelId}-note`} className="imgv-editor__title">{editor.mode === 'new' ? 'New note' : 'Edit note'}</label>
-              <textarea id={`${panelId}-note`} ref={noteInputRef} className="imgv-input imgv-input--area" rows={4} maxLength={WORKSPACE_LIMITS.text} value={noteText} placeholder="Describe what is at this point"
+            <div ref={editorBoxRef} className="imgv-editor" role="dialog" aria-label={editor.mode === 'new' ? t('notes.newNote') : t('notes.editNote')} style={{ width: EDITOR_WIDTH }}
+              onKeyDown={event => { if (event.key === 'Escape') { event.stopPropagation(); requestCloseEditor(); } else if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) { event.preventDefault(); saveNote(); } }}>
+              <label htmlFor={`${panelId}-note`} className="imgv-editor__title">{editor.mode === 'new' ? t('notes.newNote') : t('notes.editNote')}</label>
+              <textarea id={`${panelId}-note`} ref={noteInputRef} className="imgv-input imgv-input--area" rows={4} maxLength={WORKSPACE_LIMITS.text} value={noteText} placeholder={t('images.notePlaceholder')}
                 aria-invalid={noteError ? true : undefined} onChange={event => { setNoteText(event.target.value); setNoteError(null); }} />
               {noteError ? <span className="imgv-form__help imgv-form__help--error" role="alert">{noteError}</span> : null}
               <div className="imgv-editor__actions">
-                {editor.mode === 'edit' ? <button type="button" className="imgv-btn" onClick={() => removeNote(editor.id)}><Trash2 size={15} aria-hidden /><span>Delete</span></button> : <span />}
+                {editor.mode === 'edit' ? <button type="button" className="imgv-btn" onClick={() => removeNote(editor.id)}><Trash2 size={15} aria-hidden /><span>{t('common.delete')}</span></button> : <span />}
                 <span className="imgv-editor__spacer" />
-                <button type="button" className="imgv-btn" onClick={closeEditor}><X size={15} aria-hidden /><span>Cancel</span></button>
-                <button type="button" className="imgv-btn imgv-btn--primary" onClick={saveNote} title="Save (Ctrl+Enter)"><Check size={15} aria-hidden /><span>Save</span></button>
+                <button type="button" className="imgv-btn" onClick={requestCloseEditor}><X size={15} aria-hidden /><span>{t('common.cancel')}</span></button>
+                <button type="button" className="imgv-btn imgv-btn--primary" onClick={saveNote} title={isApplePlatform() ? t('images.saveWithCmd') : t('notes.saveWithShortcut')}><Check size={15} aria-hidden /><span>{t('common.save')}</span></button>
               </div>
             </div>
           ) : null}
         </div>
 
         {panelOpen ? (
-          <aside id={panelId} className="imgv-panel" aria-label={TEXT.panel}>
-            <h3 className="imgv-panel__title">Bookmarks <span className="muted">{bookmarks.length}</span></h3>
-            {bookmarks.length === 0 ? <p className="imgv-empty">No bookmarks yet. Press B to save the current view centre.</p> : (
-              <VirtualList items={bookmarks} label="Bookmarks" selectedId={selection?.kind === 'bookmark' ? selection.id : null} render={bookmark => (
+          <aside id={panelId} className="imgv-panel" aria-label={t('notes.bookmarksAndNotes')}>
+            <h3 className="imgv-panel__title">{t('images.bookmarksTitle')} <span className="muted">{bookmarks.length}</span></h3>
+            {bookmarks.length === 0 ? <p className="imgv-empty">{t('images.noBookmarks')}</p> : (
+              <VirtualList items={bookmarks} label={t('images.bookmarksTitle')} selectedId={selection?.kind === 'bookmark' ? selection.id : null} render={bookmark => (
                 renamingId === bookmark.id ? (
-                  <input className="imgv-input" autoFocus aria-label={`Rename ${bookmark.label}`} maxLength={120} value={renameText} onChange={event => setRenameText(event.target.value)}
+                  <input className="imgv-input" autoFocus aria-label={t('images.renameBookmark', { label: bookmark.label })} maxLength={120} value={renameText} onChange={event => setRenameText(event.target.value)}
                     onBlur={commitRename} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitRename(); } else if (event.key === 'Escape') { event.stopPropagation(); setRenamingId(null); } }} />
                 ) : (
                   <>
-                    <button type="button" className="imgv-row__main" title={`Go to ${bookmark.label}`} onClick={() => { setSelection({ kind: 'bookmark', id: bookmark.id }); if (bookmark.x !== undefined && bookmark.y !== undefined) goTo(bookmark.x, bookmark.y); else fitTo('page'); schedulePaint(); }}>
+                    <button type="button" className="imgv-row__main" title={t('images.goTo', { label: bookmark.label })} onClick={() => { setSelection({ kind: 'bookmark', id: bookmark.id }); if (bookmark.x !== undefined && bookmark.y !== undefined) goTo(bookmark.x, bookmark.y); else fitTo('page'); schedulePaint(); }}>
                       <BookmarkIcon size={14} aria-hidden /><span className="imgv-row__text">{bookmark.label}</span>
                       {bookmark.x !== undefined && bookmark.y !== undefined ? <span className="imgv-row__meta mono">{Math.round(bookmark.x)}, {Math.round(bookmark.y)}</span> : null}
                     </button>
-                    <button type="button" className="imgv-btn imgv-btn--small" aria-label={`Rename ${bookmark.label}`} title="Rename" onClick={() => { setRenamingId(bookmark.id); setRenameText(bookmark.label); }}><Pencil size={13} aria-hidden /></button>
-                    <button type="button" className="imgv-btn imgv-btn--small" aria-label={`Delete ${bookmark.label}`} title="Delete" onClick={() => removeBookmark(bookmark.id)}><Trash2 size={13} aria-hidden /></button>
+                    <button type="button" className="imgv-btn imgv-btn--small" aria-label={t('images.renameBookmark', { label: bookmark.label })} title={t('images.rename')} onClick={() => { setRenamingId(bookmark.id); setRenameText(bookmark.label); }}><Pencil size={13} aria-hidden /></button>
+                    <button type="button" className="imgv-btn imgv-btn--small" aria-label={t('images.deleteBookmark', { label: bookmark.label })} title={t('common.delete')} onClick={() => removeBookmark(bookmark.id)}><Trash2 size={13} aria-hidden /></button>
                   </>
                 )
               )} />
             )}
-            <h3 className="imgv-panel__title">Notes <span className="muted">{annotations.length}</span></h3>
-            {annotations.length === 0 ? <p className="imgv-empty">No notes yet. Choose the note tool (N) and click the image.</p> : (
-              <VirtualList items={annotations} label="Notes" selectedId={selection?.kind === 'annotation' ? selection.id : null} render={(note, index) => (
+            <h3 className="imgv-panel__title">{t('images.notesTitle')} <span className="muted">{annotations.length}</span></h3>
+            {annotations.length === 0 ? <p className="imgv-empty">{t('images.noNotes')}</p> : (
+              <VirtualList items={annotations} label={t('images.notesTitle')} selectedId={selection?.kind === 'annotation' ? selection.id : null} render={(note, index) => (
                 <>
                   <button type="button" className="imgv-row__main" title={note.text} onClick={() => { setSelection({ kind: 'annotation', id: note.id }); goTo(note.x, note.y); openEditor({ mode: 'edit', id: note.id }); }}>
                     <span className="imgv-badge" aria-hidden>{index + 1}</span><span className="imgv-row__text">{note.text}</span>
                   </button>
-                  <button type="button" className="imgv-btn imgv-btn--small" aria-label={`Delete note ${index + 1}`} title="Delete" onClick={() => removeNote(note.id)}><Trash2 size={13} aria-hidden /></button>
+                  <button type="button" className="imgv-btn imgv-btn--small" aria-label={t('images.deleteNote', { number: String(index + 1) })} title={t('common.delete')} onClick={() => removeNote(note.id)}><Trash2 size={13} aria-hidden /></button>
                 </>
               )} />
             )}
@@ -949,15 +1036,15 @@ export function ImageViewer(props: ImageViewerProps) {
         ) : null}
       </div>
 
-      <div className="imgv-status mono" role="group" aria-label="Image status">
-        <span>Zoom <span ref={zoomTextRef}>100%</span></span>
-        <span>Rotation <span ref={rotationTextRef}>0°</span></span>
-        {view ? <span>{view.width} × {view.height} px · {KIND_LABELS[view.kind]}</span> : <span>{loaded.phase === 'loading' ? 'Loading' : 'No image'}</span>}
+      <div className="imgv-status mono" role="group" aria-label={t('images.statusGroup')}>
+        <span>{t('images.zoom')} <span ref={zoomTextRef}>100%</span></span>
+        <span>{t('images.rotation')} <span ref={rotationTextRef}>0°</span></span>
+        {view ? <span>{view.width} × {view.height} px · {KIND_LABELS[view.kind]}</span> : <span>{loaded.phase === 'loading' ? t('images.statusLoading') : t('images.statusNoImage')}</span>}
         <span className={activeCalibration ? 'imgv-status__cal imgv-status__cal--on' : 'imgv-status__cal'}>
-          {activeCalibration ? `Calibrated ${activeCalibration.pixelsPerMm.toFixed(2)} px/mm (set by you)` : 'Not calibrated: pixels only'}
+          {activeCalibration ? t('images.statusCalibrated', { ratio: formatDecimal(activeCalibration.pixelsPerMm, 2, language) }) : t('images.statusNotCalibrated')}
         </span>
         {view && view.kind === 'svg' && view.removed.length > 0 ? (
-          <button type="button" className="imgv-status__link" aria-expanded={bannerOpen} onClick={() => setBannerOpen(open => !open)}>{view.removed.length} removed</button>
+          <button type="button" className="imgv-status__link" aria-expanded={bannerOpen} onClick={() => setBannerOpen(open => !open)}>{t('images.removedCount', { count: String(view.removed.length) })}</button>
         ) : null}
         <span className="imgv-status__cursor" ref={cursorTextRef} aria-hidden />
       </div>
@@ -966,11 +1053,12 @@ export function ImageViewer(props: ImageViewerProps) {
 }
 
 /** `svg onload` becomes `onload on <svg>`, `script` becomes `<script> element`; the sanitizer's own text, never the file's markup, is shown. */
-function describeRemoval(item: string): ReactNode {
-  if (/^\d+ more$/.test(item)) return `and ${item}`;
+function describeRemoval(item: string, t: Translator): ReactNode {
+  const more = /^(\d+) more$/.exec(item);
+  if (more) return t('images.removedMore', { count: more[1] });
   const space = item.indexOf(' ');
-  if (space > 0) return <><code>{item.slice(space + 1)}</code> on <code>&lt;{item.slice(0, space)}&gt;</code></>;
-  return <><code>&lt;{item}&gt;</code> element</>;
+  if (space > 0) return <><code>{item.slice(space + 1)}</code> {t('images.removedOn')} <code>{'<'}{item.slice(0, space)}{'>'}</code></>;
+  return <><code>{'<'}{item}{'>'}</code> {t('images.removedElement')}</>;
 }
 
 function VirtualList<T extends { id: string }>({ items, label, selectedId, render }: { items: readonly T[]; label: string; selectedId: string | null; render: (item: T, index: number) => ReactNode }) {

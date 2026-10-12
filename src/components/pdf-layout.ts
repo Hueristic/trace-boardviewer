@@ -137,12 +137,14 @@ export function expandRange(range: IndexRange, by: number, count: number): Index
 export const sameRange = (a: IndexRange, b: IndexRange) => a.first === b.first && a.last === b.last;
 
 /**
- * The page "being read": the one under a reference line 40% down the viewport. At the very bottom of the
- * scroll range it is the last page, which could otherwise never reach the line.
+ * The page "being read": the one under a reference line 40% down the viewport. At the top of the document it is
+ * the first page, and at the very bottom of the scroll range the last page, which could otherwise never reach the
+ * line. A short document that fits the viewport never scrolls, so its reader stays on the first page.
  */
 export function currentPageIndex(layout: PageLayout, scrollTop: number, viewportHeight: number): number {
   if (layout.count === 0) return 0;
-  if (scrollTop > 0 && scrollTop + viewportHeight >= layout.total - 1) return layout.count - 1;
+  if (scrollTop <= 0) return 0;
+  if (scrollTop + viewportHeight >= layout.total - 1) return layout.count - 1;
   return pageIndexAt(layout, scrollTop + viewportHeight * 0.4);
 }
 

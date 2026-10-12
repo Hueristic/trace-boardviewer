@@ -13,5 +13,10 @@
   "settings.labelsHint": "Riferimenti che si adattano allo zoom",
   "settings.connections": "Linee ausiliarie di connessione",
   "settings.connectionsHint": "Linee rette tra il pin selezionato e i pad del suo net",
-  "settings.autosave": "Le impostazioni vengono salvate automaticamente."
+  "settings.autosave": "Le impostazioni vengono salvate automaticamente.",
+  "settings.noSandbox.title": "Linux: avvio senza sandbox",
+  "settings.noSandbox.hint": "Se hai scelto «Non chiedere più», TRACE non lo chiederà più. La revoca ha effetto al prossimo avvio.",
+  "settings.noSandbox.saved": "Salvato: TRACE non chiede più",
+  "settings.noSandbox.unsaved": "Non salvato: la domanda appare a ogni avvio senza sandbox",
+  "settings.noSandbox.revoke": "Chiedi di nuovo al prossimo avvio"
 }

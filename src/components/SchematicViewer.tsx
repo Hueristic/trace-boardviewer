@@ -1,45 +1,22 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { ChevronDown, ChevronLeft, ChevronRight, CornerLeftUp, Maximize2, Minus, PanelLeft, Plus } from 'lucide-react';
 import { pinKey, symbolRef, wireKey } from '../lib/schematic/model';
-import type { SchSheetInstance, Schematic } from '../lib/schematic/model';
+import type { SchLabelKind, SchSheetInstance, Schematic } from '../lib/schematic/model';
 import type { SchematicViewerProps, ViewerCamera } from './viewer-contracts';
 import { useSchematicOverlay } from './SchematicOverlay';
 import {
   BASE_SCALE, FALLBACK_TOKENS, K, SheetCache, buildNavRows, buildNetHighlight, buildPalette, cameraToView, clampView, drawOverlay, drawSheet,
   fitView, hitTest, instanceChain, netIndex, panBy, queryData, resolveChildPath, resolveSelection, sameCamera, screenToSheet, segmentDistance, viewToCamera, zoomAt,
 } from './schematic-render';
-import type { FitMode, NavRow, ResolvedSelection, SchHit, SchPalette, SchTokens, SchView, SheetData } from './schematic-render';
+import type { CanvasLabels, FitMode, NavRow, ResolvedSelection, SchHit, SchPalette, SchTokens, SchView, SheetData } from './schematic-render';
+import { createTranslator } from '../lib/i18n';
+import type { MessageKey, Translator } from '../lib/i18n';
+import { UiContext } from './workspace/ui-context';
 import './schematic-viewer.css';
 
-// i18n: pending (English constants)
-const T = {
-  sheets: 'Sheets',
-  sheetList: 'Schematic sheets',
-  toolbar: 'Schematic sheet navigation',
-  path: 'Sheet path',
-  parent: 'Parent sheet (Backspace)',
-  previous: 'Previous sheet (Page Up)',
-  next: 'Next sheet (Page Down)',
-  view: 'Schematic view',
-  fit: 'Fit sheet to window (0)',
-  zoomIn: 'Zoom in (+)',
-  zoomOut: 'Zoom out (-)',
-  expand: 'Expand',
-  collapse: 'Collapse',
-  repeated: 'repeated sheet',
-  current: 'current sheet',
-  fileMissing: 'file missing',
-  openHint: 'Double-click or press Enter to open',
-  noInstance: 'This sheet instance is not part of the schematic.',
-  noDef: 'The definition of this sheet is not available.',
-  gotoRoot: 'Go to the root sheet',
-  keys: 'Arrow keys pan, plus and minus zoom, 0 fits the sheet, S cycles the sub-sheets, Enter opens the focused sub-sheet, Backspace goes to the parent sheet, Page Up and Page Down switch sheets, Escape clears the selection.',
-  noNet: 'No net',
-  wire: 'Wire',
-  bus: 'Bus',
-  sheetPin: 'Sheet pin',
-};
+/** Catalog key of the sub-line of a label in the hover tip, by label kind. */
+const LABEL_KEYS: Record<SchLabelKind, MessageKey> = { local: 'schematic.labelLocal', global: 'schematic.labelGlobal', hierarchical: 'schematic.labelHierarchical' };
 
 const NARROW_PX = 640;
 const ROW_H = 40;
@@ -97,10 +74,11 @@ interface NavigatorProps {
   onToggle(path: string): void;
   onNavigate(path: string): void;
   onClose(): void;
+  t: Translator;
 }
 
 const SheetNavigator = memo(function SheetNavigator(props: NavigatorProps) {
-  const { instances, current, collapsed, onToggle, onNavigate } = props;
+  const { instances, current, collapsed, onToggle, onNavigate, t } = props;
   const rows = useMemo(() => buildNavRows(instances, collapsed), [instances, collapsed]);
   const listRef = useRef<HTMLDivElement>(null);
   const pendingFocus = useRef<number | null>(null);
@@ -178,8 +156,8 @@ const SheetNavigator = memo(function SheetNavigator(props: NavigatorProps) {
   const last = Math.min(rows.length, Math.ceil((scrollTop + height) / ROW_H) + OVERSCAN);
   const visible: NavRow[] = rows.slice(first, last);
   return (
-    <nav className={`schv-nav${props.popover ? ' schv-nav-popover' : ''}`} id={props.id} aria-label={T.sheetList}>
-      <div className="schv-nav-head"><span>{T.sheets}</span><span className="mono schv-nav-count">{instances.length}</span></div>
+    <nav className={`schv-nav${props.popover ? ' schv-nav-popover' : ''}`} id={props.id} aria-label={t('schematic.sheetList')}>
+      <div className="schv-nav-head"><span>{t('schematic.sheets')}</span><span className="mono schv-nav-count">{instances.length}</span></div>
       <div className="schv-nav-list" ref={listRef} onScroll={event => setScrollTop(event.currentTarget.scrollTop)} onKeyDown={onKeyDown}>
         <ul className="schv-rows" style={{ height: rows.length * ROW_H }}>
           {visible.map((row, offset) => {
@@ -189,16 +167,16 @@ const SheetNavigator = memo(function SheetNavigator(props: NavigatorProps) {
               <li key={instance.path || '(root)'} className={`schv-row${active ? ' active' : ''}`} style={{ top: i * ROW_H, height: ROW_H, paddingLeft: 6 + Math.min(instance.depth, 8) * 12 }}
                 aria-setsize={rows.length} aria-posinset={i + 1}>
                 {row.hasChildren
-                  ? <button type="button" className="schv-twisty" tabIndex={-1} aria-expanded={!row.collapsed} aria-label={`${row.collapsed ? T.expand : T.collapse} ${instance.name}`} onClick={() => onToggle(instance.path)}>
+                  ? <button type="button" className="schv-twisty" tabIndex={-1} aria-expanded={!row.collapsed} aria-label={row.collapsed ? t('schematic.expandSheet', { name: instance.name }) : t('schematic.collapseSheet', { name: instance.name })} onClick={() => onToggle(instance.path)}>
                     {row.collapsed ? <ChevronRight size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
                   </button>
                   : <span className="schv-twisty-gap" aria-hidden="true" />}
                 <button type="button" className="schv-row-main" data-row={i} tabIndex={i === rover ? 0 : -1} aria-current={active ? 'page' : undefined}
-                  aria-label={`Page ${instance.page}, ${instance.name}, ${props.defFile(instance.defId)}${repeat > 1 ? `, ${T.repeated}` : ''}${active ? `, ${T.current}` : ''}`}
+                  aria-label={`${t('schematic.rowLabel', { page: instance.page, name: instance.name, file: props.defFile(instance.defId) })}${repeat > 1 ? `, ${t('schematic.repeated')}` : ''}${active ? `, ${t('schematic.current')}` : ''}`}
                   onFocus={() => setFocusIndex(i)} onClick={() => onNavigate(instance.path)} title={`${instance.name} (${props.defFile(instance.defId)})`}>
                   <span className="schv-page mono" aria-hidden="true">{instance.page}</span>
                   <span className="schv-row-text" aria-hidden="true">
-                    <span className="schv-row-name">{instance.name || '(unnamed)'}</span>
+                    <span className="schv-row-name">{instance.name || t('schematic.unnamed')}</span>
                     <span className="schv-row-file mono">{props.defFile(instance.defId)}{repeat > 1 ? ` ×${repeat}` : ''}</span>
                   </span>
                 </button>
@@ -223,6 +201,7 @@ interface Scene {
   sheetResolved: readonly boolean[];
   selection: ResolvedSelection;
   netHighlight: ReturnType<typeof buildNetHighlight>;
+  labels?: CanvasLabels;
   highlights: Array<{ kind: 'search' | 'probe' | 'selection'; rect: { x: number; y: number; width: number; height: number }; label?: string; active?: boolean }>;
 }
 const emptyScene: Scene = { sheet: null, instancePath: '', page: '', refs: [], sheetResolved: [], selection: EMPTY_SELECTION, netHighlight: null, highlights: [] };
@@ -268,13 +247,20 @@ function SchematicViewer(props: SchematicViewerProps) {
   const listId = useRef(`schv-nav-${Math.random().toString(36).slice(2, 8)}`).current;
   const hintId = `${listId}-hint`;
   const hostOverlay = useSchematicOverlay();
+  const language = useContext(UiContext)?.language ?? 'en';
+  const t = useMemo(() => createTranslator(language), [language]);
+  // The texts the sheet paints on the canvas; a new language is a new set, so the sheet data is built again for it (see SheetCache).
+  const canvasLabels = useMemo((): CanvasLabels => ({
+    language, title: t('schematic.canvasTitle'), company: t('schematic.canvasCompany'), revDate: t('schematic.canvasRevDate'),
+    fileSheet: t('schematic.canvasFileSheet'), page: t('schematic.canvasPage'), file: t('schematic.canvasFile'), fileMissing: t('schematic.fileMissing'),
+  }), [language, t]);
 
   // ---- derived, memoized data (rebuilt only when its inputs change; never on pointer events) ----
   const model = useMemo(() => buildModel(schematic), [schematic]);
   const instance = model.byPath.get(instancePath);
   const def = instance ? model.defs.get(instance.defId) : undefined;
   if (!cacheRef.current) cacheRef.current = new SheetCache(6);
-  const sheet = useMemo(() => (def ? cacheRef.current!.get(def) : null), [def]);
+  const sheet = useMemo(() => (def ? cacheRef.current!.get(def, canvasLabels) : null), [def, canvasLabels]);
   const refs = useMemo(() => (sheet ? sheet.def.symbols.map(symbol => symbolRef(symbol, instancePath)) : []), [sheet, instancePath]);
   const sheetResolved = useMemo(() => (sheet ? sheet.def.sheetRefs.map(ref => ref.defId !== null && model.defs.has(ref.defId)) : []), [sheet, model]);
   const { symbolKey: selSymbolKey, pinKey: selPinKey, netId: selNetId } = props.selection;
@@ -284,7 +270,7 @@ function SchematicViewer(props: SchematicViewerProps) {
     () => (props.highlights ?? []).filter(h => h.instancePath === instancePath).map(h => ({ kind: h.kind, rect: h.rect, label: h.label, active: h.active })),
     [props.highlights, instancePath],
   );
-  sceneRef.current = { sheet, instancePath, page: instance?.page ?? '', refs, sheetResolved, selection, netHighlight, highlights };
+  sceneRef.current = { sheet, instancePath, page: instance?.page ?? '', refs, sheetResolved, selection, netHighlight, highlights, labels: canvasLabels };
 
   const chain = useMemo(() => instanceChain(schematic.instances, instancePath), [schematic.instances, instancePath]);
   const position = model.index.get(instancePath) ?? -1;
@@ -296,18 +282,21 @@ function SchematicViewer(props: SchematicViewerProps) {
   const defFile = (defId: string) => model.defs.get(defId)?.file ?? '';
 
   const summary = useMemo(() => {
-    if (!sheet) return 'Schematic sheet is not available';
+    if (!sheet) return t('schematic.sheetUnavailable');
     const d = sheet.def;
-    return `Schematic sheet “${instance?.name ?? d.name}”, page ${instance?.page ?? '?'} of ${schematic.instances.length}: ${d.symbols.length} symbols, ${d.wires.length} wires, ${d.labels.length} labels, ${d.sheetRefs.length} sub-sheets.`;
-  }, [sheet, instance, schematic.instances.length]);
+    return t('schematic.summary', {
+      name: instance?.name ?? d.name, page: instance?.page ?? '?', total: String(schematic.instances.length),
+      symbols: String(d.symbols.length), wires: String(d.wires.length), labels: String(d.labels.length), sheets: String(d.sheetRefs.length),
+    });
+  }, [sheet, instance, schematic.instances.length, t]);
   const announcement = useMemo(() => {
     const parts: string[] = [];
-    if (instance) parts.push(`Sheet ${instance.name}, page ${instance.page}`);
-    if (sheet && selection.pin) parts.push(`Pin ${refs[selection.pin.symbol]} ${sheet.def.symbols[selection.pin.symbol].pins[selection.pin.pin].number} selected`);
-    else if (sheet && selection.symbol >= 0) parts.push(`${refs[selection.symbol]} selected`);
-    if (netHighlight) parts.push(`Net ${netHighlight.name} highlighted`);
+    if (instance) parts.push(t('schematic.announceSheet', { name: instance.name, page: instance.page }));
+    if (sheet && selection.pin) parts.push(t('schematic.announcePin', { ref: refs[selection.pin.symbol], pin: sheet.def.symbols[selection.pin.symbol].pins[selection.pin.pin].number }));
+    else if (sheet && selection.symbol >= 0) parts.push(t('schematic.announceSymbol', { ref: refs[selection.symbol] }));
+    if (netHighlight) parts.push(t('schematic.announceNet', { name: netHighlight.name }));
     return parts.join('. ');
-  }, [instance, sheet, selection, refs, netHighlight]);
+  }, [instance, sheet, selection, refs, netHighlight, t]);
 
   // ---- scheduling ----
   const schedule = () => {
@@ -386,17 +375,17 @@ function SchematicViewer(props: SchematicViewerProps) {
     switch (hit.kind) {
       case 'pin': {
         const symbol = d.symbols[hit.symbol], pin = symbol.pins[hit.pin];
-        return { title: `${scene.refs[hit.symbol]} · ${pin.number}${pin.name && pin.name !== '~' ? ` · ${pin.name}` : ''}`, sub: netName(c.pinNet[pinKey(scene.instancePath, symbol.id, pin.id)]) ?? T.noNet, tone: 'net' };
+        return { title: `${scene.refs[hit.symbol]} · ${pin.number}${pin.name && pin.name !== '~' ? ` · ${pin.name}` : ''}`, sub: netName(c.pinNet[pinKey(scene.instancePath, symbol.id, pin.id)]) ?? t('schematic.noNet'), tone: 'net' };
       }
       case 'symbol': {
         const symbol = d.symbols[hit.symbol];
         return { title: scene.refs[hit.symbol] || symbol.libId, sub: [symbol.value, symbol.libId, symbol.dnp ? 'DNP' : ''].filter(Boolean).join(' · '), tone: 'accent' };
       }
-      case 'wire': return { title: netName(c.wireNet[wireKey(scene.instancePath, d.wires[hit.wire].id)]) ?? T.wire, sub: T.wire, tone: 'net' };
-      case 'bus': return { title: T.bus, sub: '', tone: 'muted' };
-      case 'label': { const label = d.labels[hit.label]; return { title: label.text, sub: `${label.kind} label`, tone: 'net' }; }
-      case 'sheetPin': { const ref = d.sheetRefs[hit.ref]; return { title: `${ref.name} · ${ref.pins[hit.pin].name}`, sub: T.sheetPin, tone: 'net' }; }
-      case 'sheet': { const ref = d.sheetRefs[hit.ref]; return { title: ref.name, sub: scene.sheetResolved[hit.ref] ? `${ref.file} · ${T.openHint}` : `${ref.file} · ${T.fileMissing}`, tone: 'muted' }; }
+      case 'wire': return { title: netName(c.wireNet[wireKey(scene.instancePath, d.wires[hit.wire].id)]) ?? t('schematic.wire'), sub: t('schematic.wire'), tone: 'net' };
+      case 'bus': return { title: t('schematic.bus'), sub: '', tone: 'muted' };
+      case 'label': { const label = d.labels[hit.label]; return { title: label.text, sub: t(LABEL_KEYS[label.kind]), tone: 'net' }; }
+      case 'sheetPin': { const ref = d.sheetRefs[hit.ref]; return { title: `${ref.name} · ${ref.pins[hit.pin].name}`, sub: t('schematic.sheetPin'), tone: 'net' }; }
+      case 'sheet': { const ref = d.sheetRefs[hit.ref]; return { title: ref.name, sub: scene.sheetResolved[hit.ref] ? `${ref.file} · ${t('schematic.openHint')}` : `${ref.file} · ${t('schematic.fileMissing')}`, tone: 'muted' }; }
     }
   };
   const hitAt = (screen: { x: number; y: number }): SchHit | null => {
@@ -465,7 +454,7 @@ function SchematicViewer(props: SchematicViewerProps) {
       dirty.base = false;
       const stats = drawSheet(base, {
         data: sheetData, instancePath: scene.instancePath, view, width, height, dpr, palette, refs: scene.refs,
-        sheetResolved: scene.sheetResolved, netHighlight: scene.netHighlight, page: scene.page,
+        sheetResolved: scene.sheetResolved, netHighlight: scene.netHighlight, page: scene.page, labels: scene.labels,
       });
       root.dataset.drawMs = stats.ms.toFixed(2);
       root.dataset.drawn = `${stats.symbols}/${stats.wires}/${stats.labels}`;
@@ -586,7 +575,7 @@ function SchematicViewer(props: SchematicViewerProps) {
     if (first) restoreCamera(); else fitSheet('page');
     markDirty({ base: true, overlay: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sheet, instancePath]);
+  }, [def, instancePath]); // keyed by the definition: a language change rebuilds the sheet data but keeps the camera
 
   // The shell changed the camera (restored a bookmark, reset the view...): follow it unless it is our own echo.
   const { zoom: camZoom, x: camX, y: camY, fit: camFit } = props.camera;
@@ -600,7 +589,7 @@ function SchematicViewer(props: SchematicViewerProps) {
   useLayoutEffect(() => {
     markDirty({ base: true, overlay: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selection, netHighlight, highlights, refs, sheetResolved, theme]);
+  }, [selection, netHighlight, highlights, refs, sheetResolved, theme, canvasLabels]);
   useEffect(() => { if (paletteRef.current) paletteRef.current.stale = true; markDirty({ base: true }); }, [theme]);
 
   // ---- pointer interaction (refs only: no React state is touched at pointer rate) ----
@@ -771,15 +760,15 @@ function SchematicViewer(props: SchematicViewerProps) {
 
   return (
     <div ref={rootRef} className={`schv${compact || narrow ? ' schv-compact' : ''}`}>
-      <div className="schv-toolbar" role="toolbar" aria-label={T.toolbar}>
-        <button type="button" ref={toggleRef} className={`schv-btn${navOpen ? ' on' : ''}`} aria-label={T.sheets} aria-expanded={navOpen} aria-controls={listId} onClick={() => setNavPreference(!navOpen)} title={T.sheets}>
-          <PanelLeft size={16} aria-hidden="true" /><span className="schv-btn-text">{T.sheets}</span>
+      <div className="schv-toolbar" role="toolbar" aria-label={t('schematic.toolbar')}>
+        <button type="button" ref={toggleRef} className={`schv-btn${navOpen ? ' on' : ''}`} aria-label={t('schematic.sheets')} aria-expanded={navOpen} aria-controls={listId} onClick={() => setNavPreference(!navOpen)} title={t('schematic.sheets')}>
+          <PanelLeft size={16} aria-hidden="true" /><span className="schv-btn-text">{t('schematic.sheets')}</span>
         </button>
         <span className="schv-sep" aria-hidden="true" />
-        <button type="button" className="schv-btn schv-icon" aria-label={T.parent} title={T.parent} disabled={parentPath === null} onClick={() => navigate(parentPath)}><CornerLeftUp size={16} aria-hidden="true" /></button>
-        <button type="button" className="schv-btn schv-icon" aria-label={T.previous} title={T.previous} disabled={!previous} onClick={() => navigate(previous?.path)}><ChevronLeft size={16} aria-hidden="true" /></button>
-        <button type="button" className="schv-btn schv-icon" aria-label={T.next} title={T.next} disabled={!next} onClick={() => navigate(next?.path)}><ChevronRight size={16} aria-hidden="true" /></button>
-        <nav className="schv-crumbs" aria-label={T.path}>
+        <button type="button" className="schv-btn schv-icon" aria-label={t('schematic.parent')} title={t('schematic.parent')} disabled={parentPath === null} onClick={() => navigate(parentPath)}><CornerLeftUp size={16} aria-hidden="true" /></button>
+        <button type="button" className="schv-btn schv-icon" aria-label={t('schematic.previous')} title={t('schematic.previous')} disabled={!previous} onClick={() => navigate(previous?.path)}><ChevronLeft size={16} aria-hidden="true" /></button>
+        <button type="button" className="schv-btn schv-icon" aria-label={t('schematic.next')} title={t('schematic.next')} disabled={!next} onClick={() => navigate(next?.path)}><ChevronRight size={16} aria-hidden="true" /></button>
+        <nav className="schv-crumbs" aria-label={t('schematic.path')}>
           <ol>
             {popover && chain.length > 2 && <li aria-hidden="true" className="schv-crumb-gap">{'…'}</li>}
             {crumbs.map((item, i) => {
@@ -787,8 +776,8 @@ function SchematicViewer(props: SchematicViewerProps) {
               return (
                 <li key={item.path || '(root)'}>
                   {last
-                    ? <span className="schv-crumb-current" aria-current="page" title={item.name}>{item.name || '(unnamed)'}</span>
-                    : <button type="button" className="schv-crumb" onClick={() => navigate(item.path)} title={item.name}>{item.name || '(unnamed)'}</button>}
+                    ? <span className="schv-crumb-current" aria-current="page" title={item.name}>{item.name || t('schematic.unnamed')}</span>
+                    : <button type="button" className="schv-crumb" onClick={() => navigate(item.path)} title={item.name}>{item.name || t('schematic.unnamed')}</button>}
                   {!last && <ChevronRight size={12} className="schv-crumb-sep" aria-hidden="true" />}
                 </li>
               );
@@ -800,32 +789,32 @@ function SchematicViewer(props: SchematicViewerProps) {
       <div className="schv-body">
         {navOpen && (
           <SheetNavigator id={listId} instances={schematic.instances} defFile={defFile} repeats={model.repeats} current={instancePath} collapsed={collapsed}
-            popover={popover} onToggle={toggleCollapsed} onNavigate={choose} onClose={closeNav} />
+            popover={popover} onToggle={toggleCollapsed} onNavigate={choose} onClose={closeNav} t={t} />
         )}
         {navOpen && popover && <div className="schv-scrim" aria-hidden="true" onClick={closeNav} />}
         <div className="schv-stage" ref={stageRef}>
           <canvas
-            ref={canvasRef} className="schv-canvas" role="img" tabIndex={0} aria-label={summary} aria-describedby={hintId}
+            ref={canvasRef} className="schv-canvas" role="application" tabIndex={0} aria-label={summary} aria-describedby={hintId}
             onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel} onPointerLeave={onPointerLeave}
             onDoubleClick={onDoubleClick} onKeyDown={onKeyDown}
           />
           <canvas ref={overlayRef} className="schv-overlay" aria-hidden="true" />
           <div className="schv-tip" ref={tipRef} hidden aria-hidden="true"><strong className="mono" /><span /></div>
           {hostOverlay ? <div className="schv-host-overlay" data-testid="schematic-overlay">{hostOverlay}</div> : null}
-          <div className="schv-tools" role="group" aria-label={T.view}>
-            <button type="button" className="schv-btn schv-icon" aria-label={T.zoomOut} title={T.zoomOut} onClick={() => zoomBy(1 / 1.35)}><Minus size={16} aria-hidden="true" /></button>
+          <div className="schv-tools" role="group" aria-label={t('schematic.view')}>
+            <button type="button" className="schv-btn schv-icon" aria-label={t('schematic.zoomOut')} title={t('schematic.zoomOut')} onClick={() => zoomBy(1 / 1.35)}><Minus size={16} aria-hidden="true" /></button>
             <span className="schv-zoom mono" ref={zoomLabelRef} aria-hidden="true">100%</span>
-            <button type="button" className="schv-btn schv-icon" aria-label={T.zoomIn} title={T.zoomIn} onClick={() => zoomBy(1.35)}><Plus size={16} aria-hidden="true" /></button>
+            <button type="button" className="schv-btn schv-icon" aria-label={t('schematic.zoomIn')} title={t('schematic.zoomIn')} onClick={() => zoomBy(1.35)}><Plus size={16} aria-hidden="true" /></button>
             <span className="schv-sep" aria-hidden="true" />
-            <button type="button" className="schv-btn schv-icon" aria-label={T.fit} title={T.fit} onClick={() => fitSheet('page', true)}><Maximize2 size={15} aria-hidden="true" /></button>
+            <button type="button" className="schv-btn schv-icon" aria-label={t('schematic.fit')} title={t('schematic.fit')} onClick={() => fitSheet('page', true)}><Maximize2 size={15} aria-hidden="true" /></button>
           </div>
           {state && (
             <div className="schv-empty" role="alert">
-              <p>{state === 'noInstance' ? T.noInstance : T.noDef}</p>
-              <button type="button" className="schv-action" onClick={() => props.onInstanceChange(rootPath)}>{T.gotoRoot}</button>
+              <p>{state === 'noInstance' ? t('schematic.noInstance') : t('schematic.noDef')}</p>
+              <button type="button" className="schv-action" onClick={() => props.onInstanceChange(rootPath)}>{t('schematic.gotoRoot')}</button>
             </div>
           )}
-          <p id={hintId} className="schv-sr">{T.keys}</p>
+          <p id={hintId} className="schv-sr">{t('schematic.keys')}</p>
           <div className="schv-sr" role="status" aria-live="polite">{announcement}</div>
         </div>
       </div>

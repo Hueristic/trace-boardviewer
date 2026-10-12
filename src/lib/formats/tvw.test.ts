@@ -218,14 +218,52 @@ describe('original TVW reader', () => {
       expect(isAppleDouble(appleDouble)).toBe(true);
       expect(isAppleDouble(syntheticTvw())).toBe(false);
       expect(isAppleDouble(appleDouble.subarray(0, 7))).toBe(false);
-      for (const name of ['._board.tvw', 'board.tvw']) {
+      for (const name of ['._board.tvw', 'board.tvw', 'board.cad', 'board', 'diagnostic.cad']) {
         expect(() => parseTvw({ name, data: appleDouble })).toThrow(/AppleDouble companion file/);
         expect(() => parseBoardDetailed({ name, data: appleDouble })).toThrow(/AppleDouble companion file/);
       }
       expect(tvwAdapter.sniff({ head: appleDouble, name: '._board.tvw', size: appleDouble.length }).confidence).toBeGreaterThanOrEqual(50);
-      expect(tvwAdapter.sniff({ head: appleDouble, name: 'notes.txt', size: appleDouble.length }).confidence).toBe(0);
+      // The header decides: a renamed copy and the diagnostic's neutral name are claimed too, below FZ's name claim (40) and below LIKELY.
+      expect(tvwAdapter.sniff({ head: appleDouble, name: 'notes.txt', size: appleDouble.length }).confidence).toBe(35);
+      expect(tvwAdapter.sniff({ head: appleDouble, name: 'diagnostic.cad', size: appleDouble.length }).confidence).toBe(35);
       expect(parseBoardDetailed({ name: '._board.tvw', data: syntheticTvw() }).board.pins).toHaveLength(4);
     });
+  });
+  it('names an out-of-range physical coordinate as the reason for refusing the file', () => {
+    let error: unknown;
+    try { read(syntheticTvw({ masterPoints: [{ x: 3_000_000, y: 0 }, { x: -3_000_000, y: 0 }, { x: -3_000_000, y: 1000 }, { x: 3_000_000, y: 1000 }] })); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(BoardFormatError);
+    expect((error as BoardFormatError).code).toBe('INVALID_FORMAT');
+    expect((error as BoardFormatError).message).toMatch(/coordinate or dimension outside the supported range/);
+    expect((error as BoardFormatError).issue).toEqual({ key: 'parse.error.tvwLayerRange' });
+  });
+  it('names an export whose layer headers hold no top or bottom physical layer', () => {
+    let error: unknown;
+    try { read(syntheticTvw({ layerList: [3, 4] })); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(BoardFormatError);
+    expect((error as BoardFormatError).code).toBe('UNSUPPORTED_VARIANT');
+    expect((error as BoardFormatError).message).toMatch(/2 layer headers precede the net table, but none is a top or bottom physical layer/);
+    expect((error as BoardFormatError).issue).toEqual({ key: 'parse.error.tvwNoPhysicalLayer', params: { headers: 2 } });
+  });
+  it('names a missing net table through the dispatcher, and keeps the generic refusal for other inputs', () => {
+    let error: unknown;
+    try { parseBoardDetailed({ name: 'no-table.tvw', data: syntheticTvw({ probeOrigin: { x: 3_000_000, y: 0 } }) }); }
+    catch (caught) { error = caught; }
+    expect(error).toBeInstanceOf(BoardFormatError);
+    expect((error as BoardFormatError).code).toBe('UNRECOGNIZED');
+    expect((error as BoardFormatError).message).toBe('The content of "no-table.tvw" (.tvw) matched none of the supported boardview formats. TVW boardview: no complete net table was found, so the file is not opened.');
+    expect((error as BoardFormatError).issue).toEqual({ key: 'parse.error.tvwNoNetTable' });
+    expect(() => parseBoardDetailed({ name: 'empty.tvw', data: new Uint8Array(256) })).toThrow(/no complete net table/);
+    let other: unknown;
+    try { parseBoardDetailed({ name: 'no-table.bin', data: Uint8Array.from({ length: 512 }, (_, i) => (i * 37) & 0xff) }); }
+    catch (caught) { other = caught; }
+    expect(other).toBeInstanceOf(BoardFormatError);
+    expect((other as BoardFormatError).message).toBe('The content of "no-table.bin" (.bin) matched none of the supported boardview formats.');
+    // The generic refusal carries the localized, name-based issue (HUNT-WIN-20261011-10); `message` stays the English diagnostic text.
+    expect((other as BoardFormatError).issue?.key).toBe('parse.error.unrecognized');
+    expect((other as BoardFormatError).issue?.params?.name).toBe('no-table.bin');
   });
   it('supports Uint8Array subviews and rejects incomplete table markers', () => {
     const original = syntheticTvw(), padded = new Uint8Array(original.length + 11); padded.set(original, 7);

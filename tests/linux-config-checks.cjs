@@ -19,7 +19,7 @@ const rel = (...parts) => path.join(ROOT, ...parts);
 const CONFIG_FILE = 'config/electron-builder.linux.yml';
 const SELF_FILE = 'tests/linux-config-checks.cjs';
 // The only negation the Linux "files" list may add to the package.json list; see the header of the config file.
-const ALLOWED_NEGATIONS = ['!node_modules/@napi-rs/**'];
+const ALLOWED_NEGATIONS = ['!node_modules/@napi-rs/**', '!node_modules/!(fflate)/**/*'];
 const MAINTAINER = 'TRACE Boardviewer <noreply@trace-boardviewer.invalid>';
 const SANDBOX_SWITCH = /--(?:no|disable)[-a-z]*sandbox|ELECTRON_DISABLE_SANDBOX/i;
 
@@ -207,7 +207,7 @@ test('static: drift guard - appId, productName, asar and files match package.jso
 // equal so that one list stays valid everywhere. A fuse not listed keeps Electron's default, so the lists are compared whole.
 test('static: Electron fuses - package.json "build" and the Linux file flip the same fuses and the pinned builder maps every name', async () => {
   const expected = {
-    runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: true,
+    runAsNode: false, enableNodeOptionsEnvironmentVariable: false, enableNodeCliInspectArguments: false,
     onlyLoadAppFromAsar: true, enableEmbeddedAsarIntegrityValidation: true, enableCookieEncryption: true, grantFileProtocolExtraPrivileges: true,
   };
   assert.deepEqual(packageJson.build.electronFuses, expected, 'the Windows build block');
@@ -237,7 +237,9 @@ test('static: the @napi-rs exclusion is safe - no shipped runtime code can requi
     }
   }
   assert.ok(packageJson.dependencies.fflate, 'fflate (required by electron/documents.cjs) is a production dependency and is not excluded');
-  assert.ok(!linuxConfig.files.some((pattern) => /fflate/.test(pattern)));
+  // The packaged code needs exactly one package from node_modules (electron/documents.cjs requires fflate); every other package is cut
+  // by the negation, and fflate is included by its own name before the negations.
+  assert.deepEqual(linuxConfig.files.filter((pattern) => !pattern.startsWith('!') && /fflate/.test(pattern)), ['node_modules/fflate/**/*'], 'fflate is the one node_modules package included, by name');
 });
 
 // The pinned builder generates the desktop entries from the config. They are produced here by the builder's own code with a minimal

@@ -1,7 +1,7 @@
-import { Bug, CircuitBoard, SquareSplitHorizontal, Copy, FileBox, FolderOpen, Heart, Languages, Maximize2, Minus, PanelLeft, PanelRight, Settings2, Square, X } from 'lucide-react';
+import { Bug, CircuitBoard, Database, SquareSplitHorizontal, Copy, FileBox, FolderOpen, Heart, Languages, Maximize2, Minus, PanelLeft, PanelRight, Settings2, Square, X } from 'lucide-react';
 import { memo, useRef, type KeyboardEvent } from 'react';
 import type { WorkspaceTab } from '../../lib/documents';
-import type { Translator } from '../../lib/i18n';
+import type { MessageKey, Translator } from '../../lib/i18n';
 import type { TraceDesktop } from '../../lib/types';
 import { SUPPORT_BUTTON_KEY } from '../../lib/support-notice';
 import { modifierLabels } from './shortcuts';
@@ -9,11 +9,7 @@ import { Tool } from './ui';
 import './workspace.css';
 import './support-button.css';
 
-// i18n: pending
-const T = {
-  tabs: 'Workspace tabs', board: 'Board', schematic: 'Schematic', documents: 'Documents', split: 'Split view', splitOff: 'Split view (off)', panels: 'Search panel', inspector: 'Inspector panel',
-};
-const TABS: ReadonlyArray<{ id: WorkspaceTab; label: string }> = [{ id: 'board', label: T.board }, { id: 'schematic', label: T.schematic }, { id: 'documents', label: T.documents }];
+const TABS: ReadonlyArray<{ id: WorkspaceTab; key: MessageKey }> = [{ id: 'board', key: 'workspace.tabBoard' }, { id: 'schematic', key: 'workspace.tabSchematic' }, { id: 'documents', key: 'workspace.tabDocuments' }];
 
 export interface TopBarProps {
   t: Translator;
@@ -27,6 +23,8 @@ export interface TopBarProps {
   /** Opens the skippable support dialog (the heart button). */
   onSupport(): void;
   supportHidden?: boolean;
+  /** Opens the device database dialog (the Library entry). Optional: a host without it shows no button. */
+  onDevices?(): void;
 }
 
 /** Short badge form of a format label: its first word ("GENCAD 1.4" → GENCAD, "Landrex / TestLink BRD" → LANDREX). */
@@ -46,15 +44,16 @@ export const TopBar = memo(function TopBar(p: TopBarProps) {
   return <header className="app-titlebar">
     <button type="button" className="brand" onClick={p.onHome} title={t('brand.home')}><span className="brand-mark"><CircuitBoard size={20} /></span><span><strong>TRACE</strong><small>BOARDVIEWER</small></span></button>
     {p.hasBoard ? <div className="project-heading" title={p.filePath || p.fileName}><FileBox size={17} /><div><span className="project-name" data-testid="project-name">{p.boardName}</span><span className="project-subtitle">{p.fileName ? `${p.fileName} · ` : ''}{t('unit.components', { count: p.componentCount })} · {p.layoutName}</span></div><span className="format-badge" title={p.format} data-testid="format-badge">{formatBadge(p.format)}</span></div> : <div className="titlebar-caption">{t('header.tagline')}</div>}
-    {p.hasBoard && <div className="wsp-tabs" role="tablist" aria-label={T.tabs} data-testid="tabs">
+    {p.hasBoard && <div className="wsp-tabs" role="tablist" aria-label={t('workspace.tabList')} data-testid="tabs">
       {TABS.map((tab, index) => <button key={tab.id} ref={node => { tabRefs.current[index] = node; }} type="button" role="tab" id={`wsp-tab-${tab.id}`} aria-selected={p.activeTab === tab.id} aria-controls="wsp-tabpanel" tabIndex={p.activeTab === tab.id ? 0 : -1} data-testid={`tab-${tab.id}`}
         className={'wsp-tab-button' + (p.activeTab === tab.id ? ' active' : '')} onClick={() => p.onTab(tab.id)} onKeyDown={e => onTabKey(e, index)}>
-        {tab.label}{tab.id === 'documents' && p.documentCount > 0 && <span className="wsp-tab-count mono">{p.documentCount}</span>}{tab.id === 'schematic' && p.schematicCount > 0 && <span className="wsp-tab-count mono">{p.schematicCount}</span>}</button>)}
+        {t(tab.key)}{tab.id === 'documents' && p.documentCount > 0 && <span className="wsp-tab-count mono">{p.documentCount}</span>}{tab.id === 'schematic' && p.schematicCount > 0 && <span className="wsp-tab-count mono">{p.schematicCount}</span>}</button>)}
     </div>}
     <div className="header-actions">
-      {p.hasBoard && <><Tool label={T.split} shortcut={`${mod} + \\`} testId="split-toggle" active={p.splitEnabled} onClick={p.onSplit}><SquareSplitHorizontal size={18} /></Tool>
-        {!p.focusLayout && <Tool label={T.panels} testId="toggle-left" active={p.leftOpen} onClick={() => p.onPanels('left')} className="wsp-panel-toggle"><PanelLeft size={17} /></Tool>}
-        <Tool label={T.inspector} testId="toggle-right" active={p.rightOpen} onClick={() => p.onPanels('right')} className="wsp-panel-toggle"><PanelRight size={17} /></Tool></>}
+      {p.hasBoard && <><Tool label={t('workspace.splitView')} shortcut={`${mod} + \\`} testId="split-toggle" active={p.splitEnabled} onClick={p.onSplit}><SquareSplitHorizontal size={18} /></Tool>
+        {!p.focusLayout && <Tool label={t('workspace.searchPanel')} testId="toggle-left" active={p.leftOpen} onClick={() => p.onPanels('left')} className="wsp-panel-toggle"><PanelLeft size={17} /></Tool>}
+        <Tool label={t('workspace.inspectorPanel')} testId="toggle-right" active={p.rightOpen} onClick={() => p.onPanels('right')} className="wsp-panel-toggle"><PanelRight size={17} /></Tool></>}
+      {p.onDevices && <Tool label={t('libraryDevices.title')} testId="devices-button" onClick={p.onDevices}><Database size={17} /></Tool>}
       <button type="button" className="open-button" data-testid="open-board" onClick={p.onOpen} title={`${t('header.openTitle')} · ${mod} + O`}><FolderOpen size={16} /><span>{t('header.open')}</span></button>
       {p.hasBoard && <Tool label={t(p.focusLayout ? 'header.workshopMode' : 'header.focusMode')} shortcut={`${mod} + ${p.focusLayout ? '1' : '2'}`} testId="focus-toggle" active={p.focusLayout} onClick={p.onToggleFocus}>{p.focusLayout ? <PanelLeft size={18} /> : <Maximize2 size={18} />}</Tool>}
       {!p.supportHidden && <Tool label={t(SUPPORT_BUTTON_KEY)} testId="support-button" className="support-heart" onClick={p.onSupport}><Heart size={17} /></Tool>}

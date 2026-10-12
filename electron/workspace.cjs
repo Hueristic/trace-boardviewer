@@ -3,7 +3,7 @@
 // Native twin of the manifest and notes validators in src/lib/workspace.ts. main.cjs cannot import
 // TypeScript, so the renderer-side rules are duplicated here with the same bounds, field order,
 // error codes and messages; src/lib/workspace.test.ts verifies parity on shared fixtures.
-// Texts are English with a stable `code` (// i18n: pending): the catalogs are frozen.
+// Texts are English with a stable `code` (// i18n: pending): the texts are not in the catalogs yet.
 
 const LIMITS = Object.freeze({
   documents: 200, bookmarks: 2000, annotations: 2000, cameras: 256, notes: 500, aliases: 1000, alias: 256,

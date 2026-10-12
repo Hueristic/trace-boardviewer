@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } fro
 import { BugReportSession, discardBugReportDraft, hasBugReportSendCapability, leaveBugReportWithoutPersistence, requestBugReportClose } from '../app/bug-report-session';
 import type { BugReportInput, BugReportError, BugReportLastImport, TraceDesktop } from '../lib/types';
 import type { Translator } from '../lib/i18n';
-import { findSensitiveDescriptionDetails, removeSensitiveDescriptionDetails } from '../lib/bug-report-description';
+import { countDescriptionCodePoints, findSensitiveDescriptionDetails, isDescriptionOverLimit, isDescriptionTooLargeToSave, MAX_DESCRIPTION_CODE_POINTS, removeSensitiveDescriptionDetails } from '../lib/bug-report-description';
 import './bug-report-dialog.css';
 
 export const BUG_REPORT_SEND_ENABLED = true;
@@ -79,6 +79,9 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
   const matches = useMemo(() => {
     try { return findSensitiveDescriptionDetails(input.description); } catch { return []; }
   }, [input.description]);
+  const characterCount = countDescriptionCodePoints(input.description);
+  const overLimit = isDescriptionOverLimit(input.description);
+  const draftTooLarge = isDescriptionTooLargeToSave(input.description);
 
   useEffect(() => {
     const node = dialog.current;
@@ -114,7 +117,8 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
     else if (promptInvoker.current?.isConnected) { promptInvoker.current.focus({ preventScroll: true }); promptInvoker.current = null; }
   }, [closePrompt]);
 
-  const dismissClosePrompt = () => setClosePrompt(false);
+  // Continue editing returns a reviewed draft to the form (the description stays), so the user can keep editing it.
+  const dismissClosePrompt = () => { setClosePrompt(false); if (session.getSnapshot().phase === 'review') session.back(); };
 
   const requestClose = () => {
     void requestBugReportClose(session, onClose, () => {
@@ -123,10 +127,11 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
     });
   };
   const saveDraft = async (): Promise<boolean> => {
+    if (draftTooLarge) { setMessage(t('diagnostic.bugDescriptionLimit', { max: MAX_DESCRIPTION_CODE_POINTS })); return false; }
     if (!desktop?.saveBugReportDraft) { setMessage(t('diagnostic.bugBridgeUnavailable')); return false; }
     try {
       const result = await desktop.saveBugReportDraft(input);
-      if (result.status === 'saved') { setDraft(input); setJournalUnknown(false); setMessage(t('diagnostic.bugDraftSaved')); return true; }
+      if (result.status === 'saved') { setDraft(input); session.markSaved(input); setJournalUnknown(false); setMessage(t('diagnostic.bugDraftSaved')); return true; }
       setJournalUnknown(true);
       setMessage(t(snapshot.attempted || editedAfterAttempt ? 'diagnostic.bugUnconfirmed' : 'diagnostic.bugStorageUnavailable')); return false;
     } catch { setJournalUnknown(true); setMessage(t(snapshot.attempted || editedAfterAttempt ? 'diagnostic.bugUnconfirmed' : 'diagnostic.bugStorageUnavailable')); return false; }
@@ -134,7 +139,7 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
   const discardDraft = async (): Promise<boolean> => {
     const closeAfterDiscard = closePrompt;
     const error = await discardBugReportDraft(desktop?.discardBugReportDraft, () => {
-      setDraft(null); setJournalUnknown(false); setClosePrompt(false);
+      setDraft(null); session.markDiscarded(); setJournalUnknown(false); setClosePrompt(false);
       if (closeAfterDiscard) { promptInvoker.current = null; onClose(); }
       else if (description.current?.isConnected) description.current.focus({ preventScroll: true });
     });
@@ -146,7 +151,7 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
     if (result?.status === 'prepared') { setMessage(''); setShowJson(true); }
     else if (result?.status === 'error') setMessage(t(errorKey(result.error)));
   };
-  const send = async () => { const result = await session.send(); if (result?.status === 'error') setMessage(t(errorKey(result.error))); else if (result?.status === 'received') setMessage(t('diagnostic.bugReceived')); };
+  const send = async () => { const result = await session.send(); if (result?.status === 'received') setMessage(t('diagnostic.bugReceived')); else if (result) setMessage(t(errorKey(result.status === 'error' ? result.error : 'cancelled'))); };
   const retry = async () => { await makePreview(); if (canSend) await send(); };
   const removeDetails = () => {
     try { session.setDescription(removeSensitiveDescriptionDetails(input.description, REPLACEMENT)); }
@@ -165,8 +170,10 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
       <div className="bug-report-content" inert={closePrompt || undefined} aria-hidden={closePrompt || undefined}>
       <header className="bug-report-heading"><h2 id={titleId}>{t('diagnostic.bugTitle')}</h2><button type="button" className="bug-report-close" data-testid={BUG_REPORT_CLOSE_TEST_IDS.header} aria-label={t('common.close')} onClick={requestClose}>×</button></header>
       {snapshot.phase === 'editing' && <>
-        <label className="bug-report-field"><span>{t('diagnostic.bugWhatHappened')}</span><textarea ref={description} data-testid="bug-report-description" value={input.description} maxLength={8192} onChange={event => { if (snapshot.attempted) setEditedAfterAttempt(true); session.setDescription(event.target.value); }} aria-describedby="bug-report-hint" /></label>
+        <label className="bug-report-field"><span>{t('diagnostic.bugWhatHappened')}</span><textarea ref={description} data-testid="bug-report-description" value={input.description} onChange={event => { if (snapshot.attempted) setEditedAfterAttempt(true); session.setDescription(event.target.value); }} aria-describedby="bug-report-hint bug-report-counter" /></label>
         <p id="bug-report-hint" className="bug-report-hint">{t('diagnostic.bugDescriptionHint')}</p>
+        <p id="bug-report-counter" className="bug-report-hint" data-testid="bug-report-counter">{t('diagnostic.bugDescriptionCounter', { count: characterCount, max: MAX_DESCRIPTION_CODE_POINTS })}</p>
+        {overLimit && <p className="bug-report-status" role="status">{t('diagnostic.bugDescriptionLimit', { max: MAX_DESCRIPTION_CODE_POINTS })}</p>}
         {editedAfterAttempt && <p className="bug-report-status" role="status">{t('diagnostic.bugEditedAfterAttempt')}</p>}
         {matches.length > 0 && <section className="bug-report-privacy-review" aria-live="polite"><p>{t('diagnostic.bugDetectedCount', { count: matches.length })}</p><p>{t('diagnostic.bugReviewReplacement')}</p><button type="button" className="outline-button" onClick={removeDetails}>{t('diagnostic.bugRemoveDetected')}</button></section>}
         <label className="bug-report-check"><input type="checkbox" data-testid="bug-report-diagnostics" checked={input.includeDiagnostics} onChange={event => { if (snapshot.attempted) setEditedAfterAttempt(true); session.setDiagnostics(event.target.checked); }} />{t('diagnostic.bugIncludeTechnical')}</label>
@@ -180,7 +187,7 @@ export default function BugReportDialog({ t, surface, lastImport, desktop, onClo
           <button type="button" className="outline-button" data-testid="bug-report-save-draft" disabled={!draftReady || !input.description.trim()} onClick={() => void saveDraft()}>{t('diagnostic.bugSaveDraft')}</button>
           {draft && !journalUnknown && desktop?.discardBugReportDraft && <button type="button" className="outline-button" data-testid="bug-report-discard-draft" onClick={() => void discardDraft()}>{t('diagnostic.bugDiscardDraft')}</button>}
           <button type="button" className="outline-button" data-testid="bug-report-copy" onClick={() => void copyDescription()}>{t('diagnostic.copy')}</button>
-          <button type="button" className="primary-button" data-testid="bug-report-review" disabled={!draftReady || !input.description.trim() || snapshot.busy} onClick={() => void makePreview()}>{t('diagnostic.bugReview')}</button>
+          <button type="button" className="primary-button" data-testid="bug-report-review" disabled={!draftReady || !input.description.trim() || snapshot.busy || overLimit} onClick={() => void makePreview()}>{t('diagnostic.bugReview')}</button>
         </div>}
       </>}
       {snapshot.phase === 'review' && preview && <>

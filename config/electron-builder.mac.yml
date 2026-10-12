@@ -25,13 +25,16 @@ files:
   - dist/**/*
   - electron/**/*
   - shared/bug-report-contract.cjs
+  - shared/import-limits.json
   - package.json
   - assets/**/*
   - LICENSE
   - THIRD_PARTY_NOTICES.md
   # Not required at runtime: only pdfjs-dist's Node-only canvas path refers to it and the renderer is sandboxed.
   # Without this line the HOST's prebuilt .node binary is bundled and unpacked (reproduced on Linux).
+  - node_modules/fflate/**/*
   - '!node_modules/@napi-rs/**'
+  - '!node_modules/!(fflate)/**/*'
 asar: true
 # Electron fuses, flipped in the binary right before signing (app-builder-lib platformPackager.doAddElectronFuses). The same set
 # as the "build" block of package.json (tests/mac-config-checks.cjs keeps them equal) plus the ad-hoc signature reset at the end.
@@ -41,9 +44,9 @@ electronFuses:
   runAsNode: false
   # NODE_OPTIONS and NODE_EXTRA_CA_CERTS from the environment are ignored.
   enableNodeOptionsEnvironmentVariable: false
-  # --inspect stays available: scripts/mac-smoke.cjs, like every Playwright launch of a packaged build, attaches to the main
-  # process through it and waits for the inspector before it does anything else.
-  enableNodeCliInspectArguments: true
+  # --inspect is OFF in the release build (FUSE-INSPECT, D-42). scripts/mac-smoke.cjs and Playwright launches of a packaged build need a QA
+  # flavour that keeps it on: root decision, see the proposal.
+  enableNodeCliInspectArguments: false
   # Application code only from app.asar, checked against the hash the builder embeds in the binary.
   onlyLoadAppFromAsar: true
   enableEmbeddedAsarIntegrityValidation: true
@@ -61,11 +64,14 @@ mac:
   icon: assets/icon.png
   # Always contains the arch: with the default pattern the builder drops it for x64.
   artifactName: 'TRACE-Boardviewer-${version}-mac-${arch}.${ext}'
+  # Declared minimum macOS (LSMinimumSystemVersion in Info.plist). 13.0 is the value the native report recorded for the 1.2.0
+  # arm64 builds; the 1.3.2 artifact is not read yet. The Mac session confirms it against that artifact before publication.
+  minimumSystemVersion: '13.0'
   # Ad-hoc signature ("-"), an explicit opt-in: no Apple identity, no certificate, no secret. Packaging modifies the
   # downloaded Electron bundle, and Apple silicon requires arm64 code to carry at least an ad-hoc signature.
   # Caveat: the builder still lists the keychain (security find-identity) and matches "-" as a substring of
-  # identity names, so build on a runner or account without code signing identities; the workflow verifies the
-  # result (Signature=adhoc, TeamIdentifier not set).
+  # identity names, so build on a runner or account without code signing identities; the smoke script records
+  # the codesign identity and requires codesign --verify to pass (ad-hoc is recorded for this build, not required).
   identity: '-'
   # Hardened runtime plus ad-hoc signing makes library validation reject the bundled frameworks.
   hardenedRuntime: false

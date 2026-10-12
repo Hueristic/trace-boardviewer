@@ -1,0 +1,1 @@
+- On macOS the window's close button ("Alkalmazás bezárása") now quits the application, the same way Cmd+Q does. Before, closing the last window left the app running with nothing on screen. Pending changes are written before the application exits.

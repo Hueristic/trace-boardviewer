@@ -69,4 +69,12 @@ describe('BV2 CSV boardview tables', () => {
   it('refuses oversized fields rather than silently cutting source identities', () => {
     rejects(syntheticBv2({ name: 'N'.repeat(8193) }), /oversized CSV/, 'LIMIT_EXCEEDED');
   });
+  it('attaches a catalog issue to the refusals, numeric cells and the record limit included', () => {
+    const issueOf = (text: string) => { try { parse(text); } catch (error) { return (error as BoardFormatError).issue; } return undefined; };
+    expect(issueOf('#Layout#\n')).toEqual({ key: 'parse.error.csvMissingHeader' });
+    expect(issueOf(syntheticBv2().replace('#Nail#', '#Unknown#'))).toEqual({ key: 'parse.error.csvUnknownSection' });
+    expect(issueOf(syntheticBv2().replace('U1,(T),17,A1,', 'U1,(T),17,A"1,'))).toEqual({ key: 'parse.error.csvStrayQuote' });
+    expect(issueOf(syntheticBv2().replace('0.25,-0.125', '0x10,-0.125'))).toEqual({ key: 'parse.error.csvInvalidValue', params: { column: 'Pin X', value: '0x10' } });
+    expect(issueOf(syntheticBv2({ name: 'N'.repeat(8193) }))).toMatchObject({ key: 'parse.error.csvRecord' });
+  });
 });

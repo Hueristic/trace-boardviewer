@@ -11,7 +11,8 @@
 //   { schema: 'trace-payload-manifest/1', fileCount, totalBytes,
 //     files: [{ path, size, sha256 }],            relative POSIX paths, sorted by plain code-unit order
 //     manifestDigest,                              SHA-256 over the canonical (path, size, sha256) lines, see digestFileList
-//     exeSha256, asarSha256 }                      the root file "TRACE Boardviewer.exe" / "resources/app.asar", else null
+//     exeSha256, asarSha256 }                      the root main executable ("TRACE Boardviewer.exe"; "TRACE Boardviewer QA.exe"
+//                                                  with --flavour qa) / "resources/app.asar", else null
 //
 // Exit codes: 0 manifest written; 1 the directory is missing/empty or a file could not be read (nothing is written);
 // 2 usage error. A manifest that silently skipped an unreadable file would prove nothing, so any unreadable entry
@@ -23,15 +24,19 @@ const fs = require('node:fs');
 const fsp = require('node:fs/promises');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const qaFlavour = require('./qa-flavour.cjs');
 
 const SCHEMA = 'trace-payload-manifest/1';
 const LISTING_DOMAIN = 'trace-dir-listing/1'; // size-only listings (no content hashes), e.g. the per-instance preservation manifests
-const MAIN_EXE_PATH = 'TRACE Boardviewer.exe';
+// The main executable is named after the product of the flavour the build was made with: "TRACE Boardviewer.exe" (release, the default)
+// or "TRACE Boardviewer QA.exe" (qa, with --flavour qa). Anything else is refused by qa-flavour.cjs, never guessed.
+const mainExePathFor = (flavourId = 'release') => `${qaFlavour.flavour(flavourId).productName}.exe`;
+const MAIN_EXE_PATH = mainExePathFor('release');
 const APP_ASAR_PATH = 'resources/app.asar';
 const DIFF_LIMIT = 10;
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const EXIT = Object.freeze({ OK: 0, FAIL: 1, USAGE: 2 });
-const USAGE = 'Usage: node scripts/payload-manifest.cjs --dir <directory> --out <manifest.json>';
+const USAGE = 'Usage: node scripts/payload-manifest.cjs --dir <directory> --out <manifest.json> [--flavour release|qa]';
 
 class UsageError extends Error {
   constructor(message) { super(message); this.name = 'UsageError'; }
@@ -85,7 +90,7 @@ function hashOfPath(files, wanted) {
 }
 
 /** Builds the manifest object from hashed files (any order). Throws ManifestError for duplicate paths. */
-function finalizeManifest(files) {
+function finalizeManifest(files, mainExe = MAIN_EXE_PATH) {
   const sorted = sortByPath(files).map(({ path: filePath, size, sha256 }) => ({ path: filePath, size, sha256 }));
   for (let index = 1; index < sorted.length; index++) {
     if (sorted[index].path === sorted[index - 1].path) throw new ManifestError(`duplicate path in the file list: ${sorted[index].path}`);
@@ -96,7 +101,7 @@ function finalizeManifest(files) {
     totalBytes: sumBytes(sorted),
     files: sorted,
     manifestDigest: digestFileList(sorted, { withHash: true }),
-    exeSha256: hashOfPath(sorted, MAIN_EXE_PATH),
+    exeSha256: hashOfPath(sorted, mainExe),
     asarSha256: hashOfPath(sorted, APP_ASAR_PATH),
   };
 }
@@ -108,7 +113,7 @@ function isRelativePosixPath(value) {
 }
 
 /** Everything that is wrong with a manifest object (empty list = valid and internally consistent). Never throws. */
-function validateManifest(manifest) {
+function validateManifest(manifest, mainExe = MAIN_EXE_PATH) {
   const problems = [];
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) return ['the manifest is not a JSON object'];
   if (manifest.schema !== SCHEMA) problems.push(`schema is ${JSON.stringify(manifest.schema)}, expected "${SCHEMA}"`);
@@ -131,7 +136,7 @@ function validateManifest(manifest) {
     if (manifest.fileCount !== manifest.files.length) problems.push(`fileCount ${manifest.fileCount} does not match the ${manifest.files.length} listed files`);
     if (manifest.totalBytes !== sumBytes(manifest.files)) problems.push(`totalBytes ${manifest.totalBytes} does not match the sum of the listed sizes ${sumBytes(manifest.files)}`);
     if (manifest.manifestDigest !== digestFileList(manifest.files, { withHash: true })) problems.push('manifestDigest does not match the listed files');
-    if (manifest.exeSha256 !== hashOfPath(manifest.files, MAIN_EXE_PATH)) problems.push(`exeSha256 does not match the listed "${MAIN_EXE_PATH}"`);
+    if (manifest.exeSha256 !== hashOfPath(manifest.files, mainExe)) problems.push(`exeSha256 does not match the listed "${mainExe}"`);
     if (manifest.asarSha256 !== hashOfPath(manifest.files, APP_ASAR_PATH)) problems.push(`asarSha256 does not match the listed "${APP_ASAR_PATH}"`);
   } else if (typeof manifest.manifestDigest !== 'string') problems.push('manifestDigest is missing');
   return problems;
@@ -260,7 +265,7 @@ async function hashDirectory(dir, { api = defaultApi, skip = null } = {}) {
 }
 
 /** Manifest of `dir`; throws ManifestError when the directory is missing/empty or any entry could not be hashed. */
-async function buildManifest(dir, { api = defaultApi } = {}) {
+async function buildManifest(dir, { api = defaultApi, mainExe = MAIN_EXE_PATH } = {}) {
   const result = await hashDirectory(dir, { api });
   if (!result.exists) throw new ManifestError(`directory not found: ${dir}`);
   if (result.unreadable.length) {
@@ -268,7 +273,7 @@ async function buildManifest(dir, { api = defaultApi } = {}) {
     throw new ManifestError(`${result.unreadable.length} entries could not be hashed, so the manifest would be incomplete: ${shown}`);
   }
   if (!result.files.length) throw new ManifestError(`directory contains no files: ${dir}`);
-  return finalizeManifest(result.files);
+  return finalizeManifest(result.files, mainExe);
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -276,7 +281,7 @@ async function buildManifest(dir, { api = defaultApi } = {}) {
 // ---------------------------------------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const options = { dir: null, out: null, help: false };
+  const options = { dir: null, out: null, flavour: 'release', help: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     const equals = arg.startsWith('--') ? arg.indexOf('=') : -1;
@@ -289,11 +294,13 @@ function parseArgs(argv) {
     switch (flag) {
       case '--dir': options.dir = take(); break;
       case '--out': options.out = take(); break;
+      case '--flavour': options.flavour = take(); break;
       case '--help': case '-h': options.help = true; break;
       default: throw new UsageError(`Unknown argument: ${arg}`);
     }
   }
   if (options.help) return options;
+  try { mainExePathFor(options.flavour); } catch (problem) { throw new UsageError(problem.message); }
   if (!options.dir) throw new UsageError('--dir <directory> is required.');
   if (!options.out) throw new UsageError('--out <manifest.json> is required.');
   const dir = path.resolve(options.dir);
@@ -313,8 +320,9 @@ async function main(argv = process.argv.slice(2), deps = {}) {
     return EXIT.USAGE;
   }
   if (options.help) { log(USAGE); return EXIT.OK; }
+  const mainExe = mainExePathFor(options.flavour);
   let manifest;
-  try { manifest = await buildManifest(options.dir, { api: deps.api || defaultApi }); } catch (problem) {
+  try { manifest = await buildManifest(options.dir, { api: deps.api || defaultApi, mainExe }); } catch (problem) {
     error(`Payload manifest failed: ${problem.message}`);
     return EXIT.FAIL;
   }
@@ -327,14 +335,14 @@ async function main(argv = process.argv.slice(2), deps = {}) {
     return EXIT.FAIL;
   }
   log(`payload manifest: ${manifest.fileCount} files, ${manifest.totalBytes} bytes, digest ${manifest.manifestDigest}`);
-  log(`  ${MAIN_EXE_PATH} sha256 ${manifest.exeSha256 || 'n/a (not found)'}`);
+  log(`  ${mainExe} sha256 ${manifest.exeSha256 || 'n/a (not found)'}`);
   log(`  ${APP_ASAR_PATH} sha256 ${manifest.asarSha256 || 'n/a (not found)'}`);
   log(`  written to ${path.resolve(options.out)}`);
   return EXIT.OK;
 }
 
 module.exports = {
-  SCHEMA, LISTING_DOMAIN, MAIN_EXE_PATH, APP_ASAR_PATH, DIFF_LIMIT, EXIT, USAGE, UsageError, ManifestError,
+  SCHEMA, LISTING_DOMAIN, MAIN_EXE_PATH, mainExePathFor, APP_ASAR_PATH, DIFF_LIMIT, EXIT, USAGE, UsageError, ManifestError,
   compareCodeUnits, sortByPath, digestFileList, summarizeListing, finalizeManifest, validateManifest, isRelativePosixPath, diffFileLists,
   walkDirectory, listDirectory, hashStream, hashDirectory, buildManifest, parseArgs, main,
 };

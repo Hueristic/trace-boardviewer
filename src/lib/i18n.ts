@@ -170,6 +170,8 @@ export interface Formatters {
   /** Millimetre value with exactly two decimals; the unit stays "mm" in every language. */
   mm(value: number): string;
   count(value: number): string;
+  /** A number in the UI language with a fixed count of decimals (the decimal comma follows the language); `digits` omitted means the language's default. */
+  number(value: number, digits?: number): string;
   date(iso: string): string;
 }
 const formatters = new Map<Language, Formatters>();
@@ -181,6 +183,7 @@ export function createFormatters(language: Language): Formatters {
     value = {
       mm: n => numberFormat(lang, 2).format(n),
       count: n => numberFormat(lang).format(n),
+      number: (n, digits) => numberFormat(lang, digits).format(n),
       date: iso => { const time = Date.parse(iso); return Number.isFinite(time) ? dates.format(time) : '—'; },
     };
     formatters.set(lang, value);

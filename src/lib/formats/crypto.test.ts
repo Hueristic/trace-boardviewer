@@ -106,6 +106,10 @@ describe('boardview legacy crypto', () => {
   });
   it('rejects malformed keys and incomplete DES blocks', () => {
     expect(() => createDes('1234')).toThrow(/16 hexadecimal/);
+    let failure: unknown;
+    try { createDes('1234'); } catch (error) { failure = error; }
+    // The refusal carries its catalog issue, so the key dialog shows it in the active language.
+    expect(failure).toMatchObject({ code: 'INVALID_KEY', keyKind: 'xzz', issue: { key: 'parse.error.xzzKeyFormat' } });
     expect(() => createDes('133457799BBCDFF1')(new Uint8Array(7))).toThrow(/Truncated/);
     expect(() => rc6Feedback(new Uint8Array(1), Array(43).fill(0))).toThrow(/44/);
     expect(() => rc6Feedback(new Uint8Array(1), Array(44).fill(-1))).toThrow(/unsigned/);

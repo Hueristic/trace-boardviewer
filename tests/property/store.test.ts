@@ -47,8 +47,17 @@ class MemoryFs {
     if (found === 'partial' && kind !== 'write') return 'io';
     return found;
   }
-  async open(file: string) {
+  async open(file: string, flag = 'r') {
     await this.tick();
+    if (flag === 'wx') {
+      // The temporary file of a write: created exclusively, written through the handle, synced (a no-op here), closed.
+      if (this.files.has(file)) throw codeError('EEXIST');
+      return {
+        writeFile: async (body: string) => { await this.writeFile(file, body); },
+        sync: async () => { await this.tick(); },
+        close: async () => undefined,
+      };
+    }
     const text = this.files.get(file);
     if (text === undefined) throw codeError('ENOENT');
     const bytes = Buffer.from(text, 'utf8');

@@ -2,7 +2,7 @@ import { Bug } from 'lucide-react';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { Translator } from '../lib/i18n';
 import {
-  SUPPORT_NOTICE_KEYS, claimSupportNotice, closesOnBackdrop, createSupportLinkRequester, postponeSupportNotice, resolveSupportLinkOpener, supportNoticeAllowed,
+  SUPPORT_NOTICE_KEYS, claimSupportNotice, closesOnBackdrop, createSupportLinkRequester, postponeSupportNotice, resolveSupportLinkOpener, restoreSupportClaim, supportClaimMark, supportDialogYields, supportNoticeAllowed,
 } from '../lib/support-notice';
 import type { SupportLinkId, SupportLinkOpener } from '../lib/support-notice';
 import './support-notice.css';
@@ -18,30 +18,47 @@ import type { SupportStatus } from '../lib/types';
  * Opening a link sends an id ('stripe' | 'kofi') to the main process (window.traceDesktop.openSupportLink); the URLs are constants
  * in electron/main.cjs. The pure logic (allow-list, hourly claim, request flow) is in src/lib/support-notice.ts.
  */
-export default function SupportNotice({ ready, blocked = false, suppressed = false, requested = 0, t, open, onShown, onSettled, onVerified, onReportBug }: { ready: boolean; blocked?: boolean; suppressed?: boolean; requested?: number; t: Translator; open?: SupportLinkOpener; onShown?: () => void; onSettled?: () => void; onVerified?: (value: SupportStatus) => void; onReportBug?: () => void }) {
+export default function SupportNotice({ ready, blocked = false, errorOpen = false, suppressed = false, requested = 0, t, open, onShown, onSettled, onVerified, onReportBug }: { ready: boolean; blocked?: boolean; errorOpen?: boolean; suppressed?: boolean; requested?: number; t: Translator; open?: SupportLinkOpener; onShown?: () => void; onSettled?: () => void; onVerified?: (value: SupportStatus) => void; onReportBug?: () => void }) {
   const [visible, setVisible] = useState(false);
   const settled = useRef(onSettled);
   settled.current = onSettled;
   const shown = useRef(onShown); shown.current = onShown;
   const handledRequest = useRef(0);
+  // What showing the dialog changed, so that a yield can put it back: a dialog that yields to an error records nothing.
+  const claimMark = useRef<{ claimedAt: number | null } | null>(null);
+  const requestMark = useRef<number | null>(null);
   useEffect(() => {
     if (suppressed) { setVisible(false); settled.current?.(); return; }
-    if (ready && !blocked && requested > handledRequest.current) { handledRequest.current = requested; shown.current?.(); setVisible(true); }
-  }, [ready, blocked, suppressed, requested]);
+    if (ready && !blocked && !errorOpen && requested > handledRequest.current) {
+      requestMark.current = handledRequest.current; handledRequest.current = requested; shown.current?.(); setVisible(true);
+    }
+  }, [ready, blocked, errorOpen, suppressed, requested]);
   useEffect(() => {
     if (!ready || visible || suppressed) return;
     const tick = () => {
-      // Reminders wait for active work and other dialogs; returning to the app produces at most one reminder, never a backlog.
-      if (supportNoticeAllowed() && !blocked && document.visibilityState === 'visible' && document.hasFocus() && claimSupportNotice()) {
-        shown.current?.(); setVisible(true);
-      } else settled.current?.();
+      // Reminders wait for active work, other dialogs and open error notices; returning to the app produces at most one reminder, never a backlog.
+      if (supportNoticeAllowed() && !blocked && !errorOpen && document.visibilityState === 'visible' && document.hasFocus()) {
+        const mark = supportClaimMark();
+        if (claimSupportNotice()) { claimMark.current = { claimedAt: mark }; shown.current?.(); setVisible(true); return; }
+      }
+      settled.current?.();
     };
     tick();
     const timer = setInterval(tick, 60_000);
     return () => clearInterval(timer);
-  }, [ready, blocked, visible, suppressed]);
-  // `onSettled` tells the shell that the notice is out of the way (closed, or never shown): the update strip waits for it, so the two never compete.
-  const close = () => { postponeSupportNotice(); setVisible(false); settled.current?.(); };
+  }, [ready, blocked, errorOpen, visible, suppressed]);
+  // An error notice arrived while the dialog is open: it yields at once and records nothing. The record goes back to what it was before the
+  // dialog was shown, so the same reminder is due again when the error closes (the effects above run again then).
+  useEffect(() => {
+    if (!supportDialogYields(visible, errorOpen)) return;
+    if (claimMark.current) restoreSupportClaim(claimMark.current.claimedAt);
+    if (requestMark.current !== null) handledRequest.current = requestMark.current;
+    claimMark.current = null; requestMark.current = null;
+    setVisible(false);
+    settled.current?.();
+  }, [visible, errorOpen]);
+  // `onSettled` tells the shell that the notice is out of the way (closed, yielded, or never shown): the update strip waits for it, so the two never compete.
+  const close = () => { claimMark.current = null; requestMark.current = null; postponeSupportNotice(); setVisible(false); settled.current?.(); };
   return visible && !suppressed ? <SupportDialog t={t} open={open} onVerified={value => { onVerified?.(value); close(); }} onReportBug={onReportBug} onClose={close} /> : null;
 }
 

@@ -8,14 +8,19 @@
   "header.settings": "Nastavenia",
   "layout.workshop": "Dielňa",
   "layout.focus": "Zameranie",
-
   "window.minimize": "Minimalizovať okno",
   "window.restore": "Obnoviť okno",
   "window.maximize": "Maximalizovať okno",
   "window.close": "Zavrieť aplikáciu",
-
   "status.fileInfo": "Informácie o súbore",
   "status.shortcuts": "Klávesové skratky",
+  "status.saved": "Uložené",
+  "status.saving": "Ukladá sa…",
+  "status.unsaved": "Neuložené zmeny",
+  "status.failed": "Ukladanie zlyhalo: {message}",
+  "status.notSaved": "Neuložené (režim prehliadača)",
+  "status.region": "Stavový riadok",
+  "status.zoom": "Priblíženie",
 
   "welcome.eyebrow": "SPOJENIA ZA POVRCHOM DOSKY",
   "welcome.title1": "Pozri sa pod povrch.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Dosky, ktoré otvoríš, sa zobrazia tu.",
   "welcome.footerLocal": "Lokálny pracovný priestor · funguje offline",
   "welcome.shortcuts": "Klávesové skratky",
-
   "toast.close": "Zavrieť oznámenie",
   "toast.settingsSaveFailed": "Nastavenia sa nepodarilo uložiť.",
   "toast.settingsReadFailed": "Nastavenia sa nepodarilo prečítať.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Aplikáciu sa nepodarilo spustiť.",
   "toast.importCancelled": "Otváranie súboru bolo zrušené.",
   "toast.importStopped": "Otváranie súboru bolo zastavené po {seconds} sekundách bez pokroku. Súbor môže byť poškodený alebo nezvyčajne zložitý.",
-
+  "toast.companionOnlineOnly": "Súvisiaci súbor je dostupný iba online. Otvor ho alebo ho pripoj ručne.",
+  "toast.companionOnlineOnlyNames": "Dotknuté súvisiace súbory: {names}.",
+  "toast.noSandboxRevokeFailed": "Nastavenie sa nepodarilo zmeniť.",
   "loading.processing": "Spracovanie dosky…",
   "loading.reading": "Čítanie súboru…",
   "loading.hint": "Ešte okamih a obraz sa poskladá.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Tento súbor trvá nezvyčajne dlho. Môžete ešte počkať alebo zrušiť.",
   "loading.cancel": "Zrušiť",
   "drop.title": "Pusti dosku",
-  "fileInput.aria": "Súbor boardview"
+  "fileInput.aria": "Súbor boardview",
+  "toast.componentMissing": "Súčiastka nie je na tejto doske.",
+  "toast.documentsAfterBoard": "Dokumenty pretiahnuté spolu s doskou sa pripoja po jej otvorení. Pretiahnite ich potom znova.",
+  "toast.attachedOne": "Pripojené: „{name}“.",
+  "toast.attachedMany": "Pripojených dokumentov: {count}.",
+
+  "config.locked": "Nastavenia sa nedajú načítať, pretože súbor zamkol iný program; nebudú prepísané.",
+  "config.readOnly": "Súbor s nastaveniami je len na čítanie: zmeny platia len pre túto reláciu a súbor sa nenahrádza.",
+  "config.unreadable": "Súbor s nastaveniami je poškodený alebo ho zapísala iná verzia: program sa spustil s predvolenými nastaveniami; starý súbor sa zachová pred prvým uložením."
 }

@@ -1,6 +1,10 @@
 /* Original bounded framing reader. The private checked CAD exports store a complete
  * GenCAD text after a fixed 32-byte header; source length is uint32LE at offset 16. */
+import { GenCadParseError } from '../gencad';
 import { BoardFormatError, MAX_IMPORT_BYTES } from './common';
+
+/** Storage padding is zero. A control byte (such as the 0x07 bell) after the text, other than tab or a line break, is not padding. */
+const isNonZeroPaddingByte = (byte: number): boolean => byte === 0x7f || (byte < 0x20 && byte !== 9 && byte !== 10 && byte !== 13);
 
 export function hasGenCadStorageHeader(data: Uint8Array): boolean {
   if (data.length < 47 || data[0] !== 0x9c || data[1] !== 0 || data[4] !== 0 || data[31] !== 4) return false;
@@ -25,6 +29,9 @@ export function genCadStorageText(data: Uint8Array): Uint8Array | null {
   // padding can be removed; all other payload bytes reach the strict GenCAD parser.
   let end = data.length;
   while (end > 32 && data[end - 1] === 0) end--;
+  // A control byte where zero padding belongs (for example 0x07) means the text end cannot be verified. The version is
+  // not guessed; the refusal asks for an explicit GenCAD 1.4 text export from the source tool.
+  if (end > 32 && isNonZeroPaddingByte(data[end - 1])) throw new GenCadParseError({ key: 'parse.error.gencadStorageTrailingBytes' });
   if (end === data.length || (data[end - 1] !== 10 && data[end - 1] !== 13)) fail('text must end at a complete line followed by zero storage padding.');
   return data.subarray(32, end);
 }

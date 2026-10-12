@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_SEGMENTS, MAX_SEGMENT_LENGTH, analyzeName, analyzePath, pathSegments } from './names';
+import { MAX_SEGMENTS, analyzeName, analyzePath, pathSegments } from './names';
 
 describe('path segments', () => {
   const rows: Array<[string, string[]]> = [
@@ -9,11 +9,12 @@ describe('path segments', () => {
   it.each(rows)('%j', (path, expected) => {
     expect(pathSegments(path)).toEqual(expected);
   });
-  it('keeps the last segments of a deep path and cuts long segments', () => {
+  it('keeps the last segments of a deep path; a long segment is kept whole, never cut (TB-068)', () => {
     const deep = Array.from({ length: 40 }, (_value, index) => `d${index}`).join('/');
     expect(pathSegments(deep)).toHaveLength(MAX_SEGMENTS);
     expect(pathSegments(deep)[MAX_SEGMENTS - 1]).toBe('d39');
-    expect(pathSegments('x'.repeat(1000))[0]).toHaveLength(MAX_SEGMENT_LENGTH);
+    expect(pathSegments('x'.repeat(1000))[0]).toHaveLength(1000);
+    expect(pathSegments(`a/${'y'.repeat(300)}/b`)[1]).toBe('y'.repeat(300));
     expect(pathSegments(5 as unknown as string)).toEqual([]);
   });
 });

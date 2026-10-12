@@ -13,5 +13,10 @@
   "settings.labelsHint": "Oznaczenia skalowane wraz z powiększeniem",
   "settings.connections": "Linie pomocnicze połączeń",
   "settings.connectionsHint": "Proste linie od wybranego pinu do padów jego sieci",
-  "settings.autosave": "Ustawienia zapisują się automatycznie."
+  "settings.autosave": "Ustawienia zapisują się automatycznie.",
+  "settings.noSandbox.title": "Linux: uruchomienie bez piaskownicy",
+  "settings.noSandbox.hint": "Jeśli wybrano „Nie pytaj ponownie”, TRACE nie będzie pytać ponownie. Cofnięcie działa od następnego uruchomienia.",
+  "settings.noSandbox.saved": "Zapisano: TRACE nie pyta ponownie",
+  "settings.noSandbox.unsaved": "Niezapisane: pytanie pojawia się przy każdym uruchomieniu bez piaskownicy",
+  "settings.noSandbox.revoke": "Pytaj ponownie przy następnym uruchomieniu"
 }

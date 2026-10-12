@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Hotovo",
   "diagnostic.bugStageUnknown": "Neznáme",
   "diagnostic.bugCleanupTiming": "Tieto lehoty predpokladajú bežné plánované čistenie; výpadky hostingu môžu odstránenie oneskoriť.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bajtov"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bajtov",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} znakov",
+  "diagnostic.bugDescriptionLimit": "Opis môže mať najviac {max} znakov. Skráť ho, aby ho bolo možné skontrolovať a odoslať."
 }

@@ -1,1 +1,0 @@
-- Fixed-name companion boards can be opened from extensionless entry files. The file chooser offers a translated all-files choice for these formats, while combined input limits and content recognition still apply.

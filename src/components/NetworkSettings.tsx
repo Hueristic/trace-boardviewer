@@ -73,7 +73,9 @@ export default function NetworkSettings({ t, language, settings, actions: provid
             {text && <small>{t(text.hint)}</small>}
             <small className="mono">{t(NETWORK_KEYS.hosts, { hosts: feature.hosts.join(', ') })}</small>
           </span>
-          <span className="network-state" data-state={on ? 'on' : 'off'}>{on ? t(NETWORK_KEYS.stateOn) : t(NETWORK_KEYS.stateOff)}</span>
+          {text?.onDemand
+            ? <span className="network-state" data-state="on-demand">{t(NETWORK_KEYS.stateOnDemand)}</span>
+            : <span className="network-state" data-state={on ? 'on' : 'off'}>{on ? t(NETWORK_KEYS.stateOn) : t(NETWORK_KEYS.stateOff)}</span>}
         </li>;
       })}
     </ul>}

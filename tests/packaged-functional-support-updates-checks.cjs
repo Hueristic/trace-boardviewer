@@ -11,11 +11,13 @@ const vm = require('node:vm');
 const supportUpdates = require('../scripts/packaged-functional/support-updates.cjs');
 const updates = require('../electron/updates.cjs');
 const support = require('../electron/support.cjs');
+const { appVersion, feedReleaseVersion } = require('../scripts/packaged-functional/update-version.cjs');
 
 function reviveMainCallback(callback, electron, globals = {}) {
   const nativeRequire = Module.createRequire(path.join(__dirname, '..', 'package.json'));
   const mainRequire = request => request === 'electron' ? electron : nativeRequire(request);
-  Object.assign(globals, { require: mainRequire, Buffer, Response, URL, Date });
+  // The Electron main process has `process` too: the packaged callbacks read process.mainModule and process.getBuiltinModule.
+  Object.assign(globals, { process, require: mainRequire, Buffer, Response, URL, Date });
   const context = vm.createContext(globals);
   const revived = vm.runInContext(`(${callback.toString()})`, context, { filename: 'serialized-electron-main-callback.cjs' });
   return revived;
@@ -29,28 +31,34 @@ test('packaged update helper executes main callbacks with Electron context first
   let cachedAnswer;
   let restarts = 0;
   const startupCalls = [];
-  const electronAPI = { kind: 'synthetic-electron-context' };
-  const fakeElectron = { app: { getAppPath: () => path.resolve(__dirname, '..') }, session: { fromPartition: () => (partition = {}) } };
+  // The main callbacks get the Electron module as their first argument, as Playwright passes it in the packaged app.
+  const fakeElectron = { app: { getAppPath: () => path.resolve(__dirname, '..'), getVersion: () => appVersion() }, session: { fromPartition: () => (partition = {}) } };
   const mainGlobals = {};
   const page = { evaluate: async callback => {
     if (callback.toString().includes('requestAnimationFrame')) { startupCalls.push('committed-render'); return; }
+    // The committed-render poll reads the page state; ready on its first poll, which is the app-and-board-ready gate.
+    if (callback.toString().includes('[data-testid=app]')) {
+      startupCalls.push('app-and-board-ready');
+      return { url: 'file:///packaged/index.html', app: true, visibility: 'visible', canvas: true, welcome: false, ready: true };
+    }
     pageCalls++;
     if (pageCalls === 1) {
       cachedAnswer = await updates.checkForUpdate({ currentVersion: '1.3.1-rc.2', fetchImpl: (url, init) => partition.fetch(url, init) });
       return cachedAnswer.status === 'available' ? { status: 'available', version: cachedAnswer.version } : cachedAnswer;
     }
     if (pageCalls === 2) return cachedAnswer.status === 'available' ? { status: 'available', version: cachedAnswer.version } : cachedAnswer;
-    return reviveMainCallback(() => {
-      globalThis.__traceQaExternalUrls = ['https://github.com/trace-boardviewer/trace-boardviewer/releases/tag/v1.3.2'];
-    }, fakeElectron, mainGlobals)();
-  }, waitForFunction: async () => { startupCalls.push('app-and-board-ready'); },
+    // The release is passed in: a serialized callback cannot read this closure. It is the fixture's feed release (the next patch).
+    return reviveMainCallback(release => {
+      globalThis.__traceQaExternalUrls = [`https://github.com/trace-boardviewer/trace-boardviewer/releases/tag/v${release}`];
+    }, fakeElectron, mainGlobals)(feedReleaseVersion());
+  },
   locator: selector => ({
     waitFor: async ({ state }) => startupCalls.push(`${selector}:${state}`),
     click: async () => startupCalls.push(`${selector}:click`),
   }) };
   const calls = [];
   const ctx = {
-    main: async (callback, payload) => { calls.push(payload); return reviveMainCallback(callback, fakeElectron, mainGlobals)(electronAPI, payload); },
+    main: async (callback, payload) => { calls.push(payload); return reviveMainCallback(callback, fakeElectron, mainGlobals)(fakeElectron, payload); },
     getPage: () => page,
     restart: async () => { restarts++; Date.now = originalNow; delete mainGlobals.__traceQaUpdateReplies; },
     screenshot: async () => {},
@@ -61,11 +69,13 @@ test('packaged update helper executes main callbacks with Electron context first
   };
   try {
     const result = await supportUpdates.testSuccessfulPackagedUpdate(ctx, page);
-    assert.equal(calls.length, 3);
-    assert.deepEqual(calls[0], { body: { tag_name: 'v1.3.2', prerelease: false, draft: false, html_url: 'https://invalid.example/ignored' } });
-    assert.equal(calls[1], undefined);
-    assert.equal(calls[2], undefined);
-    assert.equal(result.releasePage, `${updates.RELEASE_PAGE_BASE}v1.3.2`);
+    // Four main-process calls in order: the installed version, the transport, the cached check and the external-link check.
+    assert.equal(calls.length, 4);
+    assert.equal(calls[0], undefined, 'the installed version is read first, with no payload');
+    assert.deepEqual(calls[1], { body: { tag_name: `v${feedReleaseVersion()}`, prerelease: false, draft: false, html_url: 'https://invalid.example/ignored' } });
+    assert.equal(calls[2], undefined, 'the cached check takes no payload');
+    assert.deepEqual(calls[3], { releaseBase: updates.RELEASE_PAGE_BASE });
+    assert.equal(result.releasePage, `${updates.RELEASE_PAGE_BASE}v${feedReleaseVersion()}`);
     assert.equal(result.externalTraffic, 'none; session fetch and shell handoff were intercepted locally');
     assert.equal(pageCalls, 3, 'the packaged flow checks successfully, immediately checks again, then opens the validated page');
     assert.equal(restarts, 1);
@@ -84,9 +94,16 @@ test('packaged update helper executes main callbacks with Electron context first
 
 test('inactive startup notice is skipped only after app readiness and detaches before manual interactions', async () => {
   const calls = [];
+  // The committed-render wait polls a predicate that returns the page state. The first poll is not ready yet, so the wait must poll again.
+  let polls = 0;
   const page = {
-    waitForFunction: async (_predicate, _argument, options) => { calls.push(['ready', options.timeout]); },
-    evaluate: async callback => { calls.push([callback.toString().includes('requestAnimationFrame') ? 'committed' : 'evaluate']); },
+    evaluate: async callback => {
+      if (callback.toString().includes('requestAnimationFrame')) { calls.push(['committed']); return; }
+      polls++;
+      calls.push(['predicate']);
+      const ready = polls > 1;
+      return { url: 'file:///packaged/index.html', app: true, visibility: ready ? 'visible' : 'hidden', canvas: ready, welcome: false, ready };
+    },
     locator: selector => ({
       waitFor: async ({ state, timeout }) => calls.push([selector, state, timeout]),
       click: async () => calls.push([selector, 'click']),
@@ -95,7 +112,7 @@ test('inactive startup notice is skipped only after app readiness and detaches b
   const result = await supportUpdates.settleInactivePackagedStartup(page);
   assert.deepEqual(result, { ready: true, supportHeartVisible: true, startupNotice: 'shown and skipped' });
   assert.deepEqual(calls, [
-    ['ready', 20_000], ['committed'],
+    ['predicate'], ['predicate'], ['committed'],
     ['[data-testid=support-button]', 'visible', 10_000],
     ['[data-testid=support-notice]', 'visible', 10_000],
     ['[data-testid=support-not-now]', 'click'],
@@ -112,11 +129,10 @@ test('packaged receipt helper executes its callback against the real verifier an
   const receipt = { payload, signature: crypto.sign('sha256', Buffer.from(payload), { key: privateKey, dsaEncoding: 'ieee-p1363' }).toString('base64url') };
   const fixture = { claim, now, publicKey: publicKey.export({ format: 'jwk' }), receipt };
   let registered;
-  const electronAPI = { kind: 'synthetic-electron-context' };
   const mainGlobals = {};
   const ipcMain = { removeHandler: () => {}, handle: (name, callback) => { registered = { name, callback }; } };
   const fakeElectron = { app: { getAppPath: () => path.resolve(__dirname, '..'), getPath: () => directory }, ipcMain };
-  const ctx = { main: (callback, payloadValue) => reviveMainCallback(callback, fakeElectron, mainGlobals)(electronAPI, payloadValue) };
+  const ctx = { main: (callback, payloadValue) => reviveMainCallback(callback, fakeElectron, mainGlobals)(fakeElectron, payloadValue) };
   const previousLoad = Module._load;
   Module._load = function(request, parent, isMain) {
     if (request === 'electron') return { app: { getAppPath: () => path.resolve(__dirname, '..'), getPath: () => directory }, ipcMain };

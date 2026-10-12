@@ -1,0 +1,3 @@
+- The document filters of the open dialog ("PDF documents", "Images", "Schematics", "All supported documents") and the family filters are shown in the chosen language.
+- The messages for an unreadable saved workspace, an export without a saved workspace, a board file that changed before the export, invalid export or document requests, and the closing notices are shown in the chosen language.
+- The messages for documents that cannot be read, are empty, unsupported or do not match their content, for the selection limits, for documents that cannot be located or exported, and for a failed export write are shown in the chosen language.

@@ -7,7 +7,7 @@ import type { Language } from '../lib/i18n';
 import type { AppSettings } from '../lib/types';
 import { UPDATE_KEYS, UPDATE_OPEN_FAILED_KEY } from '../lib/update-check';
 import type { CheckNowState } from '../lib/update-check';
-import { CheckNow, UpdateSettings, UpdateStrip } from './UpdateNotice';
+import UpdateNotice, { CheckNow, UpdateQuestion, UpdateSettings, UpdateStrip } from './UpdateNotice';
 import { SettingsDialog } from './workspace/Dialogs';
 import { UiContext } from './workspace/ui-context';
 import type { UiContextValue } from './workspace/ui-context';
@@ -56,6 +56,30 @@ describe('UpdateStrip markup', () => {
     expect(html).not.toContain('<img');
     expect(html).toContain('&lt;img');
     expect(strip('en')).toContain('aria-hidden="true"');
+  });
+});
+
+describe('UpdateQuestion markup (the first-start question)', () => {
+  const question = (lang: Language): string => renderToStaticMarkup(createElement(UpdateQuestion, { t: createTranslator(lang), onAnswer: () => undefined }));
+  it.each(LANGUAGES)('%s: a group labelled with the question, the question text, then Yes, No and Skip, in the catalog language', (lang) => {
+    const html = question(lang);
+    const strings = catalogs[lang] as Record<string, string>;
+    expect(html).toMatch(/^<div class="update-strip update-question" role="group" aria-label="[^"]+" data-testid="update-question">/);
+    expect(decode(html)).toContain(`>${strings['update.askText']}</span>`);
+    expect(decode(html)).toContain(`>${strings['update.askYes']}</button>`);
+    expect(decode(html)).toContain(`>${strings['update.askNo']}</button>`);
+    expect(decode(html)).toContain(`>${strings['update.askSkip']}</button>`);
+  });
+
+  it('the order is: the text, Yes, No, then Skip; the markup names no URL and has no input', () => {
+    const html = question('en');
+    expect([...html.matchAll(/data-testid="(update-question[a-z-]*)"/g)].map(match => match[1])).toEqual(['update-question', 'update-question-text', 'update-question-yes', 'update-question-no', 'update-question-skip']);
+    expect(html).not.toMatch(/<input|<a /);
+  });
+
+  it('without the desktop bridge (browser development mode) the notice renders nothing, not even the question', () => {
+    const notice = renderToStaticMarkup(createElement(UpdateNotice, { enabled: false, asked: false, ready: true, after: true, t: createTranslator('en'), onAnswer: () => undefined }));
+    expect(notice).toBe('');
   });
 });
 

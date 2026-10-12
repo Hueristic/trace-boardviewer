@@ -7,7 +7,7 @@ Small, focused contributions are welcome. Describe the observable problem and th
 1. Install Node.js 24+ and the pnpm version declared in `package.json`.
 2. Run `pnpm install --frozen-lockfile` and `pnpm setup:electron`.
 3. Start the desktop UI with `pnpm dev:desktop`. Use `--user-data-dir=<absolute-path>` for an isolated development profile.
-4. Run `pnpm test`, `pnpm test:desktop` and `pnpm build` before submitting a change.
+4. Run `pnpm test`, `pnpm test:desktop` and `pnpm build` before submitting a change. The build type-checks the application source (`src/**/*.ts` and `*.tsx`, not the `*.test.ts` files); the test code is not type-checked on purpose: `tests/*.cjs` are plain Node test files that `node --test` runs, and the `*.test.ts` files run under Vitest, which compiles them on each run. A separate typed test configuration would be a change of its own.
 5. For renderer work, check top/bottom selection, labels, net highlighting, pan/zoom, both layouts and both themes. Use `pnpm qa:races` for async UI regressions; real-board QA is described in the README.
 
 Keep formatting and naming consistent with adjacent code. Add tests for geometry, parsing, persistence and meaningful regressions. Keep UI work responsive on boards with thousands of components and on nets with thousands of pins.

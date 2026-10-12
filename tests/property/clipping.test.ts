@@ -126,15 +126,38 @@ describe('appendPadPath (display pads)', () => {
     width: fc.option(real(0, 20), { nil: undefined }), height: fc.option(real(0, 20), { nil: undefined }), rotation: fc.option(rotation, { nil: undefined }),
   }).map(({ at, ...rest }): BoardPin => ({ id: 'p', componentId: 'c', number: '1', name: '1', net: '', side: 'top', x: at.x, y: at.y, ...rest }));
 
-  it('draws a circle at the pad for round or unsized pads and a closed rectangle around it otherwise, never smaller than the marker', () => {
+  /** A square point centred on (x, y) with half-size h: a moveTo and three lineTo, no closing (a fill closes it). */
+  const expectSquare = (ops: Op[], x: number, y: number, h: number) => {
+    expect(ops.map(op => op.kind)).toEqual(['move', 'line', 'line', 'line']);
+    expect(ops[0].values).toEqual([x - h, y - h]);
+    expect(ops[1].values).toEqual([x + h, y - h]);
+    expect(ops[2].values).toEqual([x + h, y + h]);
+    expect(ops[3].values).toEqual([x - h, y + h]);
+  };
+
+  it('draws a circle at the pad for round or unsized pads and a closed rectangle around it otherwise, never smaller than the marker; a pad under 1.5 px is an area-matched square point', () => {
     fc.assert(fc.property(pin, real(0.1, 1000), real(0, 8), (p, scale, marker) => {
       const { ops, path } = record();
       appendPadPath(path, p, scale, marker);
+      const size = Math.max(p.radius, marker / scale);
       if (p.shape === 'round' || !(p.width || p.height)) {
+        if (size * scale < 1.5) {
+          // Level of detail: the square has the area of the circle it replaces (side 2 r sqrt(pi) / 2 each way).
+          const h = size * Math.sqrt(Math.PI) / 2;
+          expectSquare(ops, p.x, p.y, h);
+          expect(Math.abs((2 * h) * (2 * h) - Math.PI * size * size)).toBeLessThanOrEqual(1e-9 * Math.PI * size * size);
+          return;
+        }
         expect(ops.map(op => op.kind)).toEqual(['move', 'arc']);
         const [x, y, radius] = ops[1].values;
         expect(x).toBe(p.x); expect(y).toBe(p.y);
-        expect(radius).toBe(Math.max(p.radius, marker / scale));
+        expect(radius).toBe(size);
+        return;
+      }
+      const halfWidth = Math.max(p.width ?? size * 2, 1.5 / scale) / 2;
+      const halfHeight = Math.max(p.height ?? size * 2, 1.5 / scale) / 2;
+      if (Math.max(halfWidth, halfHeight) * scale < 1.5) {
+        expectSquare(ops, p.x, p.y, Math.sqrt(halfWidth * halfHeight));
         return;
       }
       expect(ops.map(op => op.kind)).toEqual(['move', 'line', 'line', 'line', 'close']);

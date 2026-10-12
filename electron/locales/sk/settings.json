@@ -13,5 +13,10 @@
   "settings.labelsHint": "Označenia súčiastok, ktoré sa prispôsobujú priblíženiu",
   "settings.connections": "Pomocné čiary spojení",
   "settings.connectionsHint": "Priame čiary medzi vybraným pinom a padmi jeho siete",
-  "settings.autosave": "Nastavenia sa ukladajú automaticky."
+  "settings.autosave": "Nastavenia sa ukladajú automaticky.",
+  "settings.noSandbox.title": "Linux: spustenie bez sandboxu",
+  "settings.noSandbox.hint": "Ak ste zvolili „Už nepýtať”, TRACE sa znova nepýta. Zrušenie platí od ďalšieho spustenia.",
+  "settings.noSandbox.saved": "Uložené: TRACE sa znova nepýta",
+  "settings.noSandbox.unsaved": "Neuložené: otázka sa zobrazí pri každom spustení bez sandboxu",
+  "settings.noSandbox.revoke": "Pýtať sa znova pri ďalšom spustení"
 }

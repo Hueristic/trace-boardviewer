@@ -38,8 +38,7 @@ const RETRY_MAX_MS = 60 * 60 * 1000;
  * The update check as a network feature. Exactly the headers Accept and X-GitHub-Api-Version here, plus the fixed Accept-Language (en) and
  * User-Agent (TRACE-Boardviewer/<version>) of egress: the fixed language keeps the system language private, the User-Agent carries only the app
  * version (no Electron, Chrome or operating-system tokens), the API version pins the shape of the answer. Nothing about the user or the machine is sent.
- * Opt-in: the `updateCheck` setting (on by default, switchable in Settings). The explicit Check now button is a user action and goes through
- * with the setting off; the start-up check is the renderer's to skip (src/lib/update-check.ts), because the two share one channel.
+ * Opt-in: the `updateCheck` setting (off by default; the first start asks once, and Settings switches it). Main enforces it for startup checks; the explicit Check now action is allowed while it is off.
  */
 const FEATURE = Object.freeze({
   id: 'update-check',
@@ -80,11 +79,11 @@ function retryAfterMs(headers, now = Date.now()) {
   return RETRY_MIN_MS;
 }
 
-async function request({ currentVersion, egress, timeoutMs, maxBytes }) {
+async function request({ currentVersion, egress, timeoutMs, maxBytes, userAction }) {
   const current = VERSION_PATTERN.exec(currentVersion);
   if (!current || !egress || typeof egress.request !== 'function') return unavailable();
   // One GET to the fixed URL; the deadline and the size cap cover the whole exchange, body included (a caller's limit can only be smaller than the feature's).
-  const answer = await egress.request(FEATURE.id, RELEASES_API, { userAction: true, timeoutMs, maxBytes });
+  const answer = await egress.request(FEATURE.id, RELEASES_API, { userAction: userAction === true, timeoutMs, maxBytes });
   if (!answer || !answer.ok) return unavailable();
   // Rate limited or refused: only the waiting time is read from the answer, as a number.
   if (answer.status === 403 || answer.status === 429) return { status: 'unavailable', retryAfterMs: retryAfterMs(answer.headers ?? {}) };
@@ -109,7 +108,7 @@ async function request({ currentVersion, egress, timeoutMs, maxBytes }) {
  * after a 403 or 429, { status: 'unavailable', retryAfterMs }; it never rejects. The whole exchange, body included, is limited to timeoutMs and maxBytes.
  * `egress` is the shared layer of main.cjs with FEATURE registered; without it a private layer is built around `fetchImpl` (tests, standalone use).
  */
-async function checkForUpdate({ currentVersion, fetchImpl, egress, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes = DEFAULT_MAX_BYTES } = {}) {
+async function checkForUpdate({ currentVersion, fetchImpl, egress, timeoutMs = DEFAULT_TIMEOUT_MS, maxBytes = DEFAULT_MAX_BYTES, userAction = false } = {}) {
   const limit = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_TIMEOUT_MS;
   const cap = Number.isSafeInteger(maxBytes) && maxBytes > 0 ? maxBytes : DEFAULT_MAX_BYTES;
   try {
@@ -119,7 +118,7 @@ async function checkForUpdate({ currentVersion, fetchImpl, egress, timeoutMs = D
       layer = createEgress({ fetchImpl, version: currentVersion, isEnabled: () => true });
       layer.register(FEATURE);
     }
-    return await request({ currentVersion, egress: layer, timeoutMs: limit, maxBytes: cap });
+    return await request({ currentVersion, egress: layer, timeoutMs: limit, maxBytes: cap, userAction });
   } catch {
     return unavailable();
   }

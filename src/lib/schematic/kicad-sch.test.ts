@@ -934,3 +934,19 @@ describe('repeated ids', () => {
     expect(symbolsOf(s)[0]!.pins.map((p) => p.id)).toEqual([`${U(41)}#1`, `${U(41)}#1@1`, `${U(41)}#1@1~2`, `${U(41)}#1@1~3`, `${U(41)}#2`]);
   });
 });
+
+describe('the names of a KiCad schematic follow the platform of the file name', () => {
+  it('the root name keeps a POSIX backslash; on win32 the folders of the name are dropped', () => {
+    const data = enc(file(''));
+    expect(parseKicadSch({ name: 'dir\\main.kicad_sch', data, platform: 'linux' })!.name).toBe('dir\\main');
+    expect(parseKicadSch({ name: 'dir\\main.kicad_sch', data, platform: 'win32' })!.name).toBe('main');
+    expect(parseKicadSch({ name: 'dir\\main.kicad_sch', data })!.name).toBe('main');
+  });
+
+  it('a sheet names its companion by the platform: sub\\c0.kicad_sch is c0.kicad_sch on win32 only', () => {
+    const data = enc(file(sheet({ uuid: U(3000), name: 'N0', file: 'sub\\c0.kicad_sch' })));
+    const companions = { 'c0.kicad_sch': enc(file('', { uuid: U(3001) })) };
+    expect(parseKicadSch({ name: 'main.kicad_sch', data, companions, platform: 'win32' })!.defs).toHaveLength(2);
+    expect(parseKicadSch({ name: 'main.kicad_sch', data, companions, platform: 'linux' })!.defs).toHaveLength(1);
+  });
+});

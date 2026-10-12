@@ -13,14 +13,35 @@ const documents = require('./documents.cjs');
 const diagnostics = require('./diagnostics.cjs');
 const updates = require('./updates.cjs');
 const support = require('./support.cjs');
+const navigation = require('./navigation.cjs');
+// The paths the renderer may read (electron/path-grants.cjs): filled as the user chooses files, the system names one, or a recent board is loaded.
+const grants = require('./path-grants.cjs').createPathGrants({ platform: process.platform });
 const { createEgress, createElectronFetch } = require('./net/egress.cjs');
 const bugReports = require('./bug-reports.cjs');
 const { createJsonStore, createByteBudget, readBounded, hasStreamSeparator, renameWithRetry } = require('./store.cjs');
 const readingsFormat = require('./readings.cjs');
+const deviceSwitch = require('./device-switch.cjs');
 const { createRepairStore } = require('./repair-store.cjs');
+const { createDeviceBridge } = require('./library/devices-bridge.cjs');
+const deviceCore = require('./library/devices-core.cjs');
+const { createBoardStore } = require('./library/board-store.cjs');
+const { DIRECTORY_SEGMENTS: LIBRARY_DEVICE_SEGMENTS } = require('./library/corrections-store.cjs');
+const { createExportTemporaries } = require('./export-temporaries.cjs');
+const { applicationMenuTemplate } = require('./app-menu.cjs');
 
-// Bound for the primary file alone and for the primary plus every companion sidecar together.
-const MAX_BOARD_BYTES = 64 * 1024 * 1024;
+// Bounds for one board file (the primary and every companion sidecar together). The general bound is shared with the formats
+// code through shared/import-limits.json; the native Allegro bound applies only to a file whose header carries the Allegro marker.
+const importLimits = require('../shared/import-limits.json');
+const MAX_BOARD_BYTES = importLimits.maxImportBytes;
+const MAX_NATIVE_BOARD_BYTES = importLimits.maxNativeAllegroImportBytes;
+/** The byte limit of one board file: the native bound only when the header carries the Allegro database marker ("all" at 0xF8). */
+async function boardByteLimit(handle, size) {
+  if (size <= MAX_BOARD_BYTES) return MAX_BOARD_BYTES;
+  const head = Buffer.alloc(0x100);
+  const { bytesRead } = await handle.read(head, 0, head.length, 0);
+  const marked = bytesRead === head.length && head[0xf8] === 0x61 && head[0xf9] === 0x6c && head[0xfa] === 0x6c;
+  return marked ? MAX_NATIVE_BOARD_BYTES : MAX_BOARD_BYTES;
+}
 const MAX_NOTES_BYTES = 8 * 1024 * 1024;
 const MAX_CONFIG_BYTES = 2 * 1024 * 1024;
 const MAX_WORKSPACE_BYTES = 32 * 1024 * 1024;
@@ -32,7 +53,7 @@ const MAX_INFLIGHT_READ_BYTES = 2 * MAX_BOARD_BYTES;
 const MAX_RECENTS = 12;
 const MAX_READ_CANDIDATES = 64;
 const DEFAULT_SETTINGS = Object.freeze({
-  theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: true,
+  theme: 'dark', layout: 'workshop', motion: true, showLabels: true, showConnections: true, updateCheck: false, updateCheckAsked: false,
 });
 // Support notice (shown on every start, see src/components/SupportNotice.tsx) and the heart button of the top bar. The links (Stripe, Ko-fi and
 // the support page of the project website) live HERE and nowhere else in the desktop app: the renderer sends an id over
@@ -42,7 +63,7 @@ const SUPPORT_LINKS = Object.freeze({
   kofi: 'https://ko-fi.com/tracerboardview',
   support: 'https://trace-boardviewer.github.io/support.html',
 });
-// Update notification (see electron/updates.cjs and src/components/UpdateNotice.tsx): the renderer asks 'trace:check-for-updates' and gets a bare result; it never
+// Update notification (see electron/updates.cjs and src/components/UpdateNotice.tsx): the renderer uses separate startup/manual channels and gets a bare result; it never
 // sends a URL or a tag. The validated tag of the last check that found a newer release is kept HERE, and 'trace:open-update-page' opens the release page of exactly that tag.
 let availableUpdateTag = null;
 // GitHub allows 60 unauthenticated requests per hour per address, shared with every other GitHub client behind the same connection. So a request is spent at most
@@ -56,25 +77,27 @@ let updateRequest = null;
 // The network layer (electron/net/egress.cjs): the only code of the main process that makes a request. Created on first use; every feature registers there
 // (the update check, for now) and its requests land in the activity log that Settings shows through the two 'trace:*-network-activity' channels below.
 let egress = null;
+// The build flavour of the receiver endpoint (see electron/bug-reports.cjs resolveEndpoint). Missing or unknown: the release, with the fixed endpoint.
+const bugReportFlavour = (() => { try { return require('../package.json').traceBuildFlavor; } catch { return undefined; } })();
 function getEgress() {
   if (!egress) {
     const layer = createEgress({
       // The in-memory partition 'trace-egress': no cookies or cache, no permissions, no downloads, only hosts some feature may reach.
-      fetchImpl: createElectronFetch({ session, isAllowed: (url) => layer.isAllowedUrl(url) }),
+      fetchImpl: createElectronFetch({ session, isAllowed: (url) => layer.isAllowedUrl(url), certificateVerifier: bugReports.qaCertificateVerifier({ flavour: bugReportFlavour }) }),
       version: app.getVersion(), now: () => Date.now(),
       // Read at the moment of each request from the committed settings, so a switch that was just turned off holds at once.
       isEnabled: (setting) => config.settings[setting] === true,
     });
     layer.register(updates.FEATURE);
     layer.register(support.FEATURE);
-    if (bugReports.CONFIG.enabled === true) layer.register(bugReports.FEATURE);
+    if (bugReports.CONFIG.enabled === true) layer.register(bugReports.featureFor({ flavour: bugReportFlavour }));
     egress = layer;
   }
   return egress;
 }
 /** One request to the releases API: the answer for the renderer (status and version only), the remembered tag and the cooldown change together. */
-async function requestUpdateCheck() {
-  const result = await updates.checkForUpdate({ currentVersion: app.getVersion(), egress: getEgress() });
+async function requestUpdateCheck({ userAction }) {
+  const result = await updates.checkForUpdate({ currentVersion: app.getVersion(), egress: getEgress(), userAction });
   nextUpdateRequestAt = Date.now() + Math.min(UPDATE_MAX_INTERVAL_MS, Math.max(UPDATE_MIN_INTERVAL_MS, result.retryAfterMs || 0));
   availableUpdateTag = result.status === 'available' ? result.tag : null;
   lastUpdateAnswer = result.status === 'available' ? { status: 'available', version: result.version } : { status: result.status };
@@ -89,11 +112,24 @@ async function openExternalUrl(url) {
 // Errors that carry one of these codes keep the code readable by the renderer: Electron drops custom
 // error properties on the way through IPC, so the message starts with "[CODE] " and preload.cjs turns it
 // back into `error.code` (the clean text follows the prefix).
-const PUBLIC_CODE = /^(?:DOCUMENT_|EXPORT_|WORKSPACE_|READINGS_|DIAGNOSTIC_)[A-Z_]+$|^(?:STORE_CLOSING|BOARD_CLOSING|BOARD_MISMATCH|MANIFEST_INVALID)$/;
+const PUBLIC_CODE = /^(?:DOCUMENT_|EXPORT_|WORKSPACE_|READINGS_|DIAGNOSTIC_|LIBRARY_)[A-Z_]+$|^(?:STORE_CLOSING|BOARD_CLOSING|BOARD_MISMATCH|MANIFEST_INVALID)$/;
 // Language of every native message and dialog. It follows the saved setting (see loadConfig and
 // trace:save-settings), so a language switch in the renderer applies here immediately.
 let locale = i18n.LEGACY_LANGUAGE;
 const t = (key, params) => i18n.translate(locale, key, params);
+// The language stored in the settings file, read at start-up (loadConfig). null when none is stored (a new profile, or a file that could not
+// be read): the renderer then keeps the system language. The renderer reads it before its first paint (TB-041).
+let savedLanguage = null;
+// The family filters of the open dialog: formats.json holds the English family ids, their labels come from the catalogue.
+function familyLabel(name) {
+  switch (name) {
+    case 'GenCAD': return t('native.dialog.familyGenCAD');
+    case 'Boardview': return t('native.dialog.familyBoardview');
+    case 'ECAD design': return t('native.dialog.familyEcad');
+    case 'Gerber': return t('native.dialog.familyGerber');
+    default: return name;
+  }
+}
 let mainWindow = null;
 let config = { version: 1, settings: { ...DEFAULT_SETTINGS, language: locale }, recentBoards: [] };
 // One queued atomic store for the settings, the notes and the workspaces: a single shutdown gate
@@ -103,12 +139,13 @@ let bugReportService = null;
 function getBugReportService() {
   if (!bugReportService) bugReportService = bugReports.createBugReportService({
     store: getStore(), egress: getEgress(), getVersion: () => app.getVersion(), platform: process.platform,
-    arch: process.arch, locale: () => locale,
+    arch: process.arch, locale: () => locale, flavour: bugReportFlavour,
   });
   return bugReportService;
 }
 // The readings of every board family (electron/repair-store.cjs): its own queue, closed by the same quit sequence.
 let repairStore = null;
+let deviceBridge = null;
 const readBudget = createByteBudget(MAX_INFLIGHT_READ_BYTES);
 const exportsInFlight = new Set();
 let initialBoardPromise = null;
@@ -121,7 +158,11 @@ const readCandidates = new Map();
 let quitting = false;
 let finalQuit = false;
 let windowsAllowed = false; // set once the startup chain created the first window (macOS activate / open-file must not beat it)
-let shutdown = null;
+// The quit in progress (before-quit, see quitWithSave): 'flushing' while the renderer writes what it holds, 'deciding' while the user
+// answers a save that failed, 'closing' once the stores are shutting down (nothing can be undone from then on), null when no quit is.
+// quitToken changes whenever a quit stage is abandoned, so a stage that outlived it does nothing (O-31).
+let quitStage = null;
+let quitToken = 0;
 // A config.json that could not be read (damaged, or written by another version of the application) is kept as
 // config.json.bak-<timestamp> before the first write replaces it (see preserveUnreadableConfig).
 let configUnreadable = false;
@@ -137,7 +178,14 @@ function optionValue(argv, option) {
   return typeof next === 'string' && !next.startsWith('-') ? next : null;
 }
 
+// A network location (\\server\share) stays refused: opening one can send the Windows sign-in to that server. The message says so
+// (MLX-03-04). Device namespace prefixes (\\?\, \\.\) are not network locations and keep the generic invalid-path text.
+function networkPath(value) {
+  return typeof value === 'string' && /^[\\/]{2}/.test(value) && !/^[\\/]{2}[?.][\\/]/.test(value);
+}
+
 function localAbsolutePath(value) {
+  if (networkPath(value)) throw new Error(t('native.error.networkPathUnsupported'));
   if (typeof value !== 'string' || value.length === 0 || value.length > 32767 || value.includes('\0') ||
       !path.isAbsolute(value) || value.startsWith('\\\\') || value.startsWith('//')) {
     throw new Error(t('native.error.invalidPath'));
@@ -145,11 +193,15 @@ function localAbsolutePath(value) {
   return path.normalize(value);
 }
 
+// A macOS AppleDouble companion ("._name") is read whatever its extension (an extensionless "._board" included): the renderer's readers
+// refuse its bytes with the explanation of parse.error.appleDoubleMetadata, on every platform. Its name is never a board.
+const isMacMetadataName = (filename) => path.basename(filename).startsWith('._');
+
 function boardPath(value) {
   const filename = localAbsolutePath(value);
   // W-fin-lifecycle-01: "host.txt:alt.cad" names an NTFS alternate data stream, not a board file.
   if (hasStreamSeparator(filename, process.platform)) throw new Error(t('native.error.invalidPath'));
-  if (!formats.isSupportedExtension(filename)) {
+  if (!formats.isSupportedExtension(filename) && !isMacMetadataName(filename)) {
     throw new Error(t('native.error.unsupportedFile'));
   }
   return filename;
@@ -176,15 +228,26 @@ function argumentPath(argument, workingDirectory) {
 
 // `workingDirectory` is the directory the launch was started in (this process, or the second instance), for relative arguments.
 // A --board value that cannot be turned into a local path is kept as it is, so that the usual check reports it.
+// A positional file the application does not read (an extension, but not a supported one) is named too, when no supported file is
+// among the arguments: the read then reports it as an unsupported file, the notice a dropped file gets, instead of ignoring an open
+// the user asked for. A directory (for example the working directory of `electron .`) and an argument without an extension stay ignored.
 function findBoardArgument(argv, workingDirectory) {
   const explicit = optionValue(argv, '--board');
   if (explicit) return argumentPath(explicit, workingDirectory) ?? explicit;
+  let unsupported = null;
   for (const raw of argv) {
     if (typeof raw !== 'string' || raw.startsWith('-')) continue;
     const argument = argumentPath(raw, workingDirectory);
-    if (typeof argument === 'string' && path.isAbsolute(argument) && formats.isSupportedExtension(argument)) return argument;
+    if (typeof argument !== 'string' || !path.isAbsolute(argument)) continue;
+    if (formats.isSupportedExtension(argument)) return argument;
+    if (unsupported === null && (path.extname(argument) !== '' || isMacMetadataName(argument)) && isNamedFile(argument)) unsupported = argument;
   }
-  return null;
+  return unsupported;
+}
+
+// A path that is not a directory (an existing file, or a name that does not exist yet, which the read reports as missing).
+function isNamedFile(filename) {
+  try { return !fsSync.statSync(filename).isDirectory(); } catch { return true; }
 }
 
 // The working directory of this launch. process.cwd() throws when that directory was removed in the meantime.
@@ -195,9 +258,15 @@ function launchDirectory() {
 // A separate profile makes development/QA runs independent of the user's saved data.
 const profileOverride = optionValue(process.argv, '--user-data-dir');
 if (profileOverride) {
-  const directory = localAbsolutePath(profileOverride);
-  fsSync.mkdirSync(directory, { recursive: true });
-  app.setPath('userData', directory);
+  // MLX-03-06: a profile folder that cannot be used stops the start with its message on stderr, not with an uncaught exception.
+  try {
+    const directory = localAbsolutePath(profileOverride);
+    fsSync.mkdirSync(directory, { recursive: true });
+    app.setPath('userData', directory);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    app.exit(2);
+  }
 } else if (process.platform === 'linux') {
   // Linux: Electron derives the default profile from package.json before this script runs, so setName below cannot move it, and a
   // builder or Electron upgrade that changed that default would leave the settings, notes and workspaces behind. Pinned instead:
@@ -213,15 +282,34 @@ if (profileOverride) {
 app.setName('TRACE Boardviewer');
 app.setAppUserModelId('hu.trace.boardviewer');
 startupBoardPath = findBoardArgument(process.argv.slice(app.isPackaged ? 1 : 2), launchDirectory());
+if (startupBoardPath) grants.grant(startupBoardPath, 'external');
 
-// Created on first use, after the profile directory is final. Once quitting began a store created
-// later is born closed, so no write can slip in between the quit intent and the final quit.
+// Created on first use, after the profile directory is final. Once the stores started closing a store created
+// later is born closed, so no write can slip in between the closing and the final quit.
 function getStore() {
   if (!store) {
-    store = createJsonStore({ directory: app.getPath('userData'), maxBytes: MAX_WORKSPACE_BYTES, t, fs, trusted: true });
-    if (quitting) void store.beginShutdown();
+    // The library's device folder is swept with the profile: the temporaries its writers leave behind (electron/library) are removed the same way.
+    store = createJsonStore({
+      directory: app.getPath('userData'), maxBytes: MAX_WORKSPACE_BYTES, t, fs, trusted: true,
+      temporaryFolders: [path.join(app.getPath('userData'), ...LIBRARY_DEVICE_SEGMENTS)],
+    });
+    if (quitStage === 'closing') void store.beginShutdown();
   }
   return store;
+}
+
+// The record of the export temporaries in the profile (electron/export-temporaries.cjs): created on first use, after the store.
+let exportTemporaries = null;
+function getExportTemporaries() {
+  if (!exportTemporaries) exportTemporaries = createExportTemporaries({ store: getStore(), fs, log: exportLog });
+  return exportTemporaries;
+}
+
+// A line in the profile's export.log. A journal that cannot be written does not stop an export (the export goes on, its temporary is not
+// swept if the process dies), so the failure is recorded here instead.
+function exportLog(message) {
+  try { fsSync.appendFileSync(path.join(app.getPath('userData'), 'export.log'), `${new Date().toISOString()} ${message}\n`); }
+  catch (error) { console.warn('TRACE: the export log could not be written:', error.message); }
 }
 let supportService = null;
 function getSupportService() {
@@ -231,9 +319,34 @@ function getSupportService() {
 function getRepairStore() {
   if (!repairStore) {
     repairStore = createRepairStore({ directory: app.getPath('userData'), t, fs, trusted: true });
-    if (quitting) void repairStore.beginShutdown();
+    if (quitStage === 'closing') void repairStore.beginShutdown();
   }
   return repairStore;
+}
+
+// Release switch of the Library bridge (LIB-05, defect O-43). It mirrors DEVICE_DATABASE_ENABLED in src/lib/library/devices/feature.ts, the
+// switch of the entry point; tests/desktop-checks.cjs fails when the two differ. While this is false no trace:library-* channel is
+// registered (see installIpc), so the shipped build answers none of them.
+const DEVICE_DATABASE_ENABLED = false;
+// The QA switch (LIB-02, electron/device-switch.cjs): on only in a packaged QA build started with TRACE_QA_DEVICE_DATABASE=1, so the
+// three-platform scenario can run. The release never sets it; DEVICE_DATABASE_ENABLED stays false.
+const packagedBuildFlavour = (() => { try { return require('../package.json').traceBuildFlavor; } catch { return undefined; } })();
+const DEVICE_DATABASE_QA = deviceSwitch.deviceDatabaseQaSwitch({ isPackaged: app.isPackaged, buildFlavour: packagedBuildFlavour, env: process.env });
+const DEVICE_DATABASE_ON = DEVICE_DATABASE_ENABLED || DEVICE_DATABASE_QA;
+// Library device catalogue (Library): created on first use. Only the native folder chooser of the main window picks a root.
+function getDeviceBridge() {
+  if (!deviceBridge) {
+    deviceBridge = createDeviceBridge({
+      core: deviceCore,
+      userDataDirectory: app.getPath('userData'),
+      anchorSource: createBoardStore({ userDataDirectory: app.getPath('userData') }),
+      chooseDirectory: async () => {
+        const choice = await dialog.showOpenDialog(mainWindow, { properties: ['openDirectory'] });
+        return choice.canceled || !choice.filePaths[0] ? null : choice.filePaths[0];
+      },
+    });
+  }
+  return deviceBridge;
 }
 
 const nativeError = (message, code) => Object.assign(new Error(message), { code });
@@ -257,6 +370,7 @@ function settingsValue(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       (value.language !== undefined && !i18n.isLanguage(value.language)) ||
       (value.updateCheck !== undefined && typeof value.updateCheck !== 'boolean') ||
+      (value.updateCheckAsked !== undefined && typeof value.updateCheckAsked !== 'boolean') ||
       !['dark', 'light', 'system'].includes(value.theme) ||
       !['workshop', 'focus'].includes(value.layout) ||
       ['motion', 'showLabels', 'showConnections'].some((key) => typeof value[key] !== 'boolean')) {
@@ -268,6 +382,8 @@ function settingsValue(value) {
     showLabels: value.showLabels, showConnections: value.showConnections,
     // A caller that predates the update check keeps the current choice.
     updateCheck: value.updateCheck ?? config.settings.updateCheck,
+    // The first-start question (see src/components/UpdateNotice.tsx) is answered once; a caller that predates it keeps the answer.
+    updateCheckAsked: value.updateCheckAsked ?? config.settings.updateCheckAsked,
   };
 }
 
@@ -280,8 +396,9 @@ function storedSettings(stored, language) {
     theme: field('theme', (value) => ['dark', 'light', 'system'].includes(value)),
     layout: field('layout', (value) => ['workshop', 'focus'].includes(value)),
     motion: field('motion', flag), showLabels: field('showLabels', flag), showConnections: field('showConnections', flag),
-    // Profiles saved before the update check have no such field: they get the default (on).
+    // Profiles saved before the update check have no such field: they get the default (off), and the first start asks once.
     updateCheck: field('updateCheck', flag),
+    updateCheckAsked: field('updateCheckAsked', flag),
   };
 }
 
@@ -312,45 +429,157 @@ function notesValue(value) {
 // A positional note that no conversion has been tried on (a keyed note has `target`; a tried one carries `unresolved`).
 const pendingPositional = (note) => note !== null && typeof note === 'object' && !Array.isArray(note) &&
   note.target === undefined && note.componentId !== undefined && note.unresolved === undefined;
-// The first save that replaces positional notes by their keyed form keeps the original file beside it, once, as `<notes file>.positional.bak`
-// (the store does it inside the write's own queue slot, see keepFirst in store.cjs). The renderer converts each positional id by looking it up in
-// the board as the current importer reads it; the copy keeps the old ids, the only record of what the notes pointed at, so the step can be undone
-// by hand. A save that still carries unconverted positional notes (an older writer) keeps nothing: nothing was converted.
+// Every save that replaces positional notes by their keyed form keeps the file it replaces beside it as a numbered copy
+// (`<notes file>.positional.bak.1`, newest, to `.5`, oldest, which is dropped), inside the write's own queue slot (keepRotated in store.cjs). U-02:
+// the earlier one-shot copy was never refreshed, so a later conversion overwrote the record of the first one. The renderer converts each positional
+// id by looking it up in the board as the current importer reads it; a copy keeps the old ids, the only record of what the notes pointed at, so the
+// step can be undone by hand. A save that still carries unconverted positional notes (an older writer) keeps nothing: nothing was converted.
+const POSITIONAL_COPIES = 5;
 const positionalNotesCopy = (name, incoming) => (incoming.some(pendingPositional) ? undefined
-  : { name: `${name}.positional.bak`, when: (current) => Array.isArray(current) && current.some(pendingPositional) });
+  : { name: (index) => `${name}.positional.bak.${index}`, count: POSITIONAL_COPIES, when: (current) => Array.isArray(current) && current.some(pendingPositional) });
 
 // A missing config file is a brand-new profile; an unreadable one is damaged (defaults, Hungarian UI).
 const MISSING = Symbol('missing');
+
+// A config.json that a sharing lock holds (another program, an antivirus scan) is not damaged: its read is retried for a moment (about 1.5 s in
+// all). When it still fails the file is left exactly as it is (configLocked): the program starts on defaults, no config write goes over the
+// file (updateConfig refuses), and the next start reads it again.
+const CONFIG_LOCK_CODES = new Set(['EBUSY', 'EPERM', 'EACCES']);
+const isConfigLock = (error) => CONFIG_LOCK_CODES.has(error?.cause?.code) || CONFIG_LOCK_CODES.has(error?.code);
+let configLocked = false;
+// A lock that appeared while the program runs (J09): a write of the settings failed on the lock. The settings this session holds stay in
+// memory, the file stays as it was, and the write is tried again until it succeeds. The state is "locked" meanwhile (the same notice).
+let configRuntimeLocked = false;
+// The state of config.json for the renderer (see ConfigNotice): "ok"; "locked" (another program locks it: unreadable, nothing is written over it);
+// "unreadable" (damaged, or another version: kept aside before the first write); "readonly" (readable but without write access: the settings change
+// in memory only and the file is never replaced). A locked or read-only file is checked again every few seconds and when the window gets focus.
+// The first readable read of a lock adopts the saved settings, and the renderer is told to read them again. Until it did (configStale) it cannot
+// save: a save from its defaults would overwrite what the file holds (CONFIG_STALE).
+const CONFIG_REREAD_MS = 3000;
+let configStale = false;
+let configReadOnly = false;
+let configRereadTimer = null;
+let configReading = false;
+let configStateSent = "ok";
+const configState = () => (configLocked || configRuntimeLocked ? "locked" : configUnreadable ? "unreadable" : configReadOnly ? "readonly" : "ok");
+
+// Takes the settings of a version-1 config.json as this process settings; false when the file is another version (kept aside on the next write).
+function adoptSavedConfig(saved) {
+  if (!saved || saved.version !== 1) return false;
+  const stored = saved.settings && typeof saved.settings === 'object' && !Array.isArray(saved.settings) ? saved.settings : {};
+  // A profile saved before language support (or holding an unusable value) keeps the Hungarian UI it was used with.
+  const language = i18n.normalizeLanguage(stored.language) || i18n.LEGACY_LANGUAGE;
+  config.settings = storedSettings(stored, language);
+  if (Array.isArray(saved.recentBoards)) {
+    config.recentBoards = saved.recentBoards.slice(0, MAX_RECENTS).flatMap((item) => {
+      try {
+        const filename = boardPath(item.path);
+        if (typeof item.openedAt !== 'string' || !Number.isFinite(Date.parse(item.openedAt))) return [];
+        return [{ name: path.basename(filename), path: filename, openedAt: item.openedAt }];
+      } catch { return []; }
+    });
+  }
+  // Linux: "Do not ask again" in the question about a missing Chromium sandbox (confirmUnsandboxedStart). Only a stored true counts.
+  // The recent boards of this profile are granted: the renderer opens them from the recent list (electron/path-grants.cjs).
+  for (const recent of config.recentBoards) grants.grant(recent.path, 'recent');
+  if (saved.noSandboxAccepted === true) config.noSandboxAccepted = true;
+  return true;
+}
 
 async function loadConfig() {
   let freshProfile = false;
   try {
     const saved = await getStore().read('config.json', { maxBytes: MAX_CONFIG_BYTES, missing: MISSING });
     if (saved === MISSING) freshProfile = true;
-    else if (saved && saved.version === 1) {
-      const stored = saved.settings && typeof saved.settings === 'object' && !Array.isArray(saved.settings) ? saved.settings : {};
-      // A profile saved before language support (or holding an unusable value) keeps the Hungarian UI it was used with.
-      const language = i18n.normalizeLanguage(stored.language) || i18n.LEGACY_LANGUAGE;
-      config.settings = storedSettings(stored, language);
-      if (Array.isArray(saved.recentBoards)) {
-        config.recentBoards = saved.recentBoards.slice(0, MAX_RECENTS).flatMap((item) => {
-          try {
-            const filename = boardPath(item.path);
-            if (typeof item.openedAt !== 'string' || !Number.isFinite(Date.parse(item.openedAt))) return [];
-            return [{ name: path.basename(filename), path: filename, openedAt: item.openedAt }];
-          } catch { return []; }
-        });
-      }
-      // Linux: "Do not ask again" in the question about a missing Chromium sandbox (confirmUnsandboxedStart). Only a stored true counts.
-      if (saved.noSandboxAccepted === true) config.noSandboxAccepted = true;
-    } else configUnreadable = true; // Another version wrote it: kept aside before this one overwrites it.
-  } catch {
-    configUnreadable = true;
-    console.warn('TRACE: the local settings could not be read; defaults were loaded instead.');
+    else if (!adoptSavedConfig(saved)) configUnreadable = true; // Another version wrote it: kept aside before this one overwrites it.
+  } catch (error) {
+    if (isConfigLock(error)) {
+      configLocked = true;
+      console.warn('TRACE: the local settings are locked by another program; defaults were loaded and the file is left as it is.');
+    } else {
+      configUnreadable = true;
+      console.warn('TRACE: the local settings could not be read; defaults were loaded instead.');
+    }
   }
   // Only a brand-new profile follows the system language; it is stored with the first config write.
   if (freshProfile) config.settings = { ...config.settings, language: i18n.detectLanguage(systemLanguages()) };
   locale = config.settings.language;
+  savedLanguage = freshProfile || configUnreadable || configLocked ? null : config.settings.language;
+  // A file the program can read but not write: its settings change in memory only (updateConfig). The renderer reads the state when it starts.
+  configReadOnly = !configLocked && !configUnreadable && !configWritableNow();
+  configStateSent = configState();
+  scheduleConfigReread();
+}
+
+// Tells the renderer that the state changed; before it is ready it reads the state when it starts (trace:config-state).
+function publishConfigState() {
+  const state = configState();
+  if (state === configStateSent) return;
+  configStateSent = state;
+  if (rendererReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("trace:config-state-changed", state);
+}
+
+// Write access now? A missing file can be created; a file without write access (a read-only attribute, a mode without write) is never replaced.
+function configWritableNow() {
+  const file = getStore().path("config.json");
+  try {
+    if ((fsSync.statSync(file).mode & 0o222) === 0) return false; // no write bit at all: read-only (root passes the access check on any mode)
+    fsSync.accessSync(file, fsSync.constants.W_OK);
+    return true;
+  } catch (error) { return error.code === "ENOENT"; }
+}
+
+function scheduleConfigReread() {
+  if (configRereadTimer || (!configLocked && !configReadOnly && !configRuntimeLocked)) return;
+  configRereadTimer = setTimeout(() => { configRereadTimer = null; void checkConfigState(); }, CONFIG_REREAD_MS);
+  configRereadTimer.unref?.(); // the window keeps the application alive; the timer alone must not keep a test process running
+}
+
+// A locked file is read again; a read-only one is tested for write access, and the settings kept in memory are saved once it is writable.
+// The next check is scheduled while the state is still not ok.
+async function checkConfigState() {
+  if (configLocked) await rereadLockedConfig();
+  else if (configRuntimeLocked) {
+    // The write of what this session holds is tried again: when the lock has ended it is saved, and the state returns to ok.
+    void updateConfig((current) => current).catch(() => {});
+  } else if (configReadOnly && configWritableNow()) {
+    // The settings kept in memory are written now; updateConfig clears the flag and publishes the state once they are on disk.
+    void updateConfig((current) => current).catch(() => {});
+  }
+  scheduleConfigReread();
+}
+
+// A readable locked file is adopted (the renderer is told to read the settings again); a lock that still holds, or any other read error, leaves
+// the program locked.
+async function rereadLockedConfig() {
+  if (configReading) return;
+  configReading = true;
+  try {
+    const saved = await getStore().read("config.json", { maxBytes: MAX_CONFIG_BYTES, missing: MISSING });
+    configLocked = false;
+    if (saved !== MISSING) {
+      if (adoptSavedConfig(saved)) {
+        configStale = true;
+        locale = config.settings.language;
+        if (process.platform === "darwin") Menu.setApplicationMenu(applicationMenu());
+        if (rendererReady && mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send("trace:settings-changed");
+      } else configUnreadable = true; // another version wrote it: kept aside before the first write
+    }
+    configReadOnly = !configUnreadable && !configWritableNow();
+  } catch (error) {
+    if (!isConfigLock(error)) console.warn("TRACE: the locked settings file could not be read again:", error.message);
+  } finally {
+    configReading = false;
+  }
+  publishConfigState();
+}
+
+// Focus: the file may be free now, so it is checked at once instead of at the next timer.
+function rereadLockedConfigNow() {
+  if (!configLocked && !configReadOnly && !configRuntimeLocked) return;
+  clearTimeout(configRereadTimer);
+  configRereadTimer = null;
+  void checkConfigState();
 }
 
 // Moves an unreadable config.json aside once, right before the first write and inside the store queue (no other write can slip
@@ -366,23 +595,57 @@ async function preserveUnreadableConfig() {
 // The updater runs inside the store queue, in submission order, on the committed in-memory config; the
 // result is written atomically and only then becomes the config.
 function updateConfig(updater) {
+  // The settings this process holds are defaults when the file was locked at start-up: writing them over the file would lose what it holds.
+  // Until the file can be read again the write is refused and the file stays as it is.
+  if (configLocked) return Promise.reject(nativeError(t("native.error.configLocked"), "CONFIG_LOCKED"));
+  if (!configWritableNow()) {
+    // A file without write access is never replaced: the change is kept in memory for this session, and the next check that finds the file
+    // writable saves all of it (checkConfigState).
+    try { config = updater(config); } catch (error) { return Promise.reject(error); }
+    configReadOnly = true;
+    publishConfigState();
+    scheduleConfigReread();
+    return Promise.resolve();
+  }
+  configReadOnly = false;
   let next;
-  return getStore().compute('config.json', async () => {
+  return getStore().compute("config.json", async () => {
     await preserveUnreadableConfig();
     next = updater(config);
     return next;
-  }, { maxBytes: MAX_CONFIG_BYTES, commit: () => { config = next; } }).then(() => undefined);
+  }, { maxBytes: MAX_CONFIG_BYTES, commit: () => { config = next; } }).then(() => {
+    configRuntimeLocked = false;
+    publishConfigState();
+  }, (error) => {
+    if (!isConfigLock(error)) throw error;
+    // A lock that appeared while the program runs (J09). The change stays in memory, so nothing the user chose is lost: the write is tried
+    // again (checkConfigState) and the next change saves all of it. The file is left as it was, the state says the settings are not saved,
+    // and the caller learns it through CONFIG_LOCKED.
+    if (next !== undefined) config = next;
+    configRuntimeLocked = true;
+    publishConfigState();
+    scheduleConfigReread();
+    throw nativeError(t("native.error.configLocked"), "CONFIG_LOCKED");
+  });
 }
 
 const superseded = () => Object.assign(new Error('superseded'), { superseded: true });
 
 // Companion sidecars of a board file are gathered only from the primary file's own
-// directory, matched by case-insensitive basename and never followed outside that directory. The plan
+// directory and never followed outside that directory. The plan
 // lists what exists and what it weighs BEFORE any byte is allocated; a missing sibling is simply
 // omitted (the parser decides what it needs). The primary and every companion together stay within
-// MAX_BOARD_BYTES. `formats.companionNames` lists the siblings of whichever set member was chosen, so the
+// the limit of the board. `formats.companionNames` lists the siblings of whichever set member was chosen, so the
 // same complete file set (and therefore the same board key, B32) results from every entry file.
-async function planCompanions(primaryPath, primaryBytes) {
+// Name policy: an entry spelled exactly as the companion name is the companion, and other spellings of that name are not considered.
+// Without an exact entry, a single entry that differs only by case is the companion, so mixed-case companions keep working. Two or
+// more such entries are ambiguous, so none is chosen. The read is refused only when that name's companion set is the chosen one, the
+// same rule an unreadable alternative follows; the user then sees the localized read failure.
+function companionAmbiguous() {
+  return Object.assign(new Error('the companion sidecar name is ambiguous'), { code: 'COMPANION_AMBIGUOUS' });
+}
+
+async function planCompanions(primaryPath, primaryBytes, limit = MAX_BOARD_BYTES) {
   const wanted = formats.companionNames(path.basename(primaryPath));
   if (!wanted.length) return { items: [], bytes: 0 };
   const directory = path.dirname(primaryPath);
@@ -390,7 +653,13 @@ async function planCompanions(primaryPath, primaryBytes) {
   const items = [];
   const candidateErrors = new Map();
   for (const name of wanted) {
-    const entry = entries.find((candidate) => candidate === name) ?? entries.find((candidate) => candidate.toLowerCase() === name);
+    const exact = entries.find((candidate) => candidate === name);
+    const variants = entries.filter((candidate) => candidate.toLowerCase() === name);
+    if (exact === undefined && variants.length > 1) {
+      candidateErrors.set(name, companionAmbiguous());
+      continue;
+    }
+    const entry = exact ?? variants[0];
     if (entry === undefined) continue;
     try {
       const canonical = await fs.realpath(path.join(directory, entry));
@@ -408,7 +677,7 @@ async function planCompanions(primaryPath, primaryBytes) {
   const chosen = items.filter((item) => selected.has(item.name));
   let total = primaryBytes;
   for (const item of chosen) {
-    if (item.size > MAX_BOARD_BYTES - total) throw new Error(t('native.error.boardTooLarge', { max: 64 }));
+    if (item.size > limit - total) throw new Error(t('native.error.boardTooLarge', { max: Math.round(limit / 1048576) }));
     total += item.size;
   }
   return { items: chosen, bytes: total - primaryBytes };
@@ -457,14 +726,15 @@ async function readBoard(filename, wanted = () => true) {
     checkpoint();
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error(t('native.error.notAFile'));
-    if (stat.size > MAX_BOARD_BYTES) throw new Error(t('native.error.boardTooLarge', { max: 64 }));
+    const limit = await boardByteLimit(handle, stat.size);
+    if (stat.size > limit) throw new Error(t('native.error.boardTooLarge', { max: Math.round(limit / 1048576) }));
     if (stat.size === 0) throw new Error(t('native.error.boardEmpty'));
     checkpoint();
-    const plan = await planCompanions(canonical, stat.size);
+    const plan = await planCompanions(canonical, stat.size, limit);
     release = await readBudget.acquire(stat.size + plan.bytes, checkpoint);
     // The original bytes travel unchanged; the renderer parser recognizes the format and a recent is
     // only recorded after that parse succeeds (acceptBoard).
-    const contents = await readBounded(handle, stat.size, MAX_BOARD_BYTES, t, { checkpoint });
+    const contents = await readBounded(handle, stat.size, limit, t, { checkpoint });
     const companions = await readCompanions(plan, checkpoint);
     const key = identity.boardKey([
       { name: path.basename(canonical), data: contents },
@@ -479,6 +749,8 @@ async function readBoard(filename, wanted = () => true) {
   } catch (error) {
     if (error.superseded) throw error;
     if (error.code === 'ENOENT') throw new Error(t('native.error.boardNotFound'));
+    // A file another program holds open exclusively fails with EBUSY on Windows (O-07): say so instead of a generic failure.
+    if (error.code === 'EBUSY') throw new Error(t('native.error.fileInUse'));
     if (error.code === 'EACCES' || error.code === 'EPERM') throw new Error(t('native.error.boardNotReadable'));
     // Size and change errors already carry their localized text.
     if (typeof error.code === 'string' && error.code.startsWith('STORE_')) throw new Error(error.message);
@@ -521,10 +793,11 @@ async function readDiagnosticFile(filename) {
     handle = await fs.open(canonical, 'r');
     const stat = await handle.stat();
     if (!stat.isFile()) throw new Error(t('native.error.notAFile'));
-    if (stat.size > MAX_BOARD_BYTES) throw new Error(t('native.error.boardTooLarge', { max: 64 }));
-    const plan = await planCompanions(canonical, stat.size);
+    const limit = await boardByteLimit(handle, stat.size);
+    if (stat.size > limit) throw new Error(t('native.error.boardTooLarge', { max: Math.round(limit / 1048576) }));
+    const plan = await planCompanions(canonical, stat.size, limit);
     release = await readBudget.acquire(stat.size + plan.bytes, diagnosticOpen);
-    const contents = await readBounded(handle, stat.size, MAX_BOARD_BYTES, t, { checkpoint: diagnosticOpen });
+    const contents = await readBounded(handle, stat.size, limit, t, { checkpoint: diagnosticOpen });
     const companions = await readCompanions(plan, diagnosticOpen);
     const base = path.basename(canonical);
     const member = formats.companionNames(base).length > 0;
@@ -537,6 +810,7 @@ async function readDiagnosticFile(filename) {
   } catch (error) {
     if (error.code === 'DIAGNOSTIC_CLOSING') throw error;
     if (error.code === 'ENOENT') throw new Error(t('native.error.boardNotFound'));
+    if (error.code === 'EBUSY') throw new Error(t('native.error.fileInUse'));
     if (error.code === 'EACCES' || error.code === 'EPERM') throw new Error(t('native.error.boardNotReadable'));
     if (typeof error.code === 'string' && error.code.startsWith('STORE_')) throw new Error(error.message);
     if (error.code) throw new Error(t('native.error.boardReadFailed'));
@@ -552,7 +826,7 @@ async function pickDiagnosticFile() {
   const choice = await dialog.showOpenDialog(mainWindow, {
     title: t('native.dialog.diagnosticPickTitle'), buttonLabel: t('native.dialog.diagnosticPickButton'), properties: ['openFile'],
     // Any file may be diagnosed (an unrecognized one is the usual reason): "all files" first, then the format filters.
-    filters: [{ name: t('native.dialog.diagnosticAllFiles'), extensions: ['*'] }, ...formats.dialogFilters(t('native.dialog.openFilter'))],
+    filters: [{ name: t('native.dialog.diagnosticAllFiles'), extensions: ['*'] }, ...formats.dialogFilters(t('native.dialog.openFilter'), undefined, familyLabel)],
   });
   if (choice.canceled || !choice.filePaths[0]) return null;
   diagnosticOpen();
@@ -585,27 +859,38 @@ async function saveDiagnosticReport(report) {
 }
 
 
-function acceptBoard(filename, key) {
+// The same file under another spelling of its name: APFS folds case and normalises Unicode, so one file can be reached under several
+// names. Device and inode decide it, as for the library roots (9db2291); a case-sensitive volume keeps such names as two files.
+async function sameRecentFile(left, right) {
+  if (samePath(left, right)) return true;
+  try {
+    const [a, b] = [await fs.stat(left), await fs.stat(right)];
+    return a.ino !== 0 && a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
+async function acceptBoard(filename, key) {
   const checkedPath = boardPath(filename);
   const checkedKey = validateKey(key);
   const candidate = readCandidates.get(`${pathId(checkedPath)}\0${checkedKey}`);
   if (!candidate) throw new Error(t('native.error.boardNotVerified'));
+  // An entry for the same file is replaced by this one, not kept beside it.
+  const replaced = new Set();
+  for (const item of config.recentBoards) if (await sameRecentFile(item.path, candidate.path)) replaced.add(item.path);
+  // A locked settings file (see updateConfig) does not stop the board: it opens, and only the recents of this session are not kept.
   return updateConfig((current) => ({
     ...current,
     recentBoards: [
       { name: candidate.name, path: candidate.path, openedAt: new Date().toISOString() },
-      ...current.recentBoards.filter((item) => !samePath(item.path, candidate.path)),
+      ...current.recentBoards.filter((item) => !samePath(item.path, candidate.path) && !replaced.has(item.path)),
     ].slice(0, MAX_RECENTS),
-  }));
+  })).catch((error) => { if (error?.code !== 'CONFIG_LOCKED') throw error; });
 }
 
 function isTrustedUrl(value) {
-  try {
-    const received = new URL(value);
-    const expected = new URL(trustedPageUrl);
-    return received.protocol === expected.protocol && received.origin === expected.origin &&
-      received.pathname === expected.pathname && received.search === expected.search;
-  } catch { return false; }
+  return navigation.isTrustedUrl(value, trustedPageUrl);
 }
 
 function trustedSender(event) {
@@ -644,7 +929,7 @@ async function loadManifest(key) {
   let raw;
   try { raw = await getStore().read(workspace.manifestName(key), { maxBytes: MAX_WORKSPACE_BYTES }); }
   catch {
-    throw nativeError('The saved workspace cannot be read. The existing file was left unchanged.', 'WORKSPACE_UNREADABLE'); // i18n: pending
+    throw nativeError(t('native.error.workspaceUnreadable'), 'WORKSPACE_UNREADABLE');
   }
   // BOARD_MISMATCH / MANIFEST_INVALID: a manifest of another board or a damaged one is never returned.
   return raw === null ? null : workspace.validateManifest(raw, key);
@@ -653,9 +938,16 @@ async function loadManifest(key) {
 function pickOptions(value) {
   if (value === undefined || value === null) return {};
   if (typeof value !== 'object' || Array.isArray(value) || (value.multiple !== undefined && typeof value.multiple !== 'boolean')) {
-    throw nativeError('Invalid document options.', 'DOCUMENT_INVALID_OPTIONS'); // i18n: pending
+    throw nativeError(t('native.error.documentOptionsInvalid'), 'DOCUMENT_INVALID_OPTIONS');
   }
   return { kinds: value.kinds, multiple: value.multiple };
+}
+
+// The renderer may name a file only if the user chose it, the system named it, or the profile remembers it (electron/path-grants.cjs).
+// A relative or malformed path is never granted, but it is not a file the user could have chosen either: the handler's own syntax check
+// names it (the usual invalid-path message), so it is left to that check.
+function requireGranted(filename) {
+  if (typeof filename === 'string' && path.isAbsolute(filename) && !grants.has(filename)) throw new Error(t('native.error.pathNotGranted'));
 }
 
 function documentContext(extra) {
@@ -667,7 +959,7 @@ function exportRequest(value) {
       value.documentIds.length > workspace.LIMITS.documents ||
       value.documentIds.some((id) => typeof id !== 'string' || id.length === 0 || id.length > workspace.LIMITS.id) ||
       typeof value.includeBoard !== 'boolean' || typeof value.includeNotes !== 'boolean') {
-    throw nativeError('Invalid workspace export request.', 'EXPORT_INVALID_REQUEST'); // i18n: pending
+    throw nativeError(t('native.error.exportRequestInvalid'), 'EXPORT_INVALID_REQUEST');
   }
   return { key: validateKey(value.boardKey), documentIds: [...value.documentIds], includeBoard: value.includeBoard, includeNotes: value.includeNotes };
 }
@@ -677,9 +969,9 @@ function exportRequest(value) {
 function refuseWhenClosing(code, message) {
   if (quitting) throw nativeError(message, code);
 }
-const exportOpen = () => refuseWhenClosing('EXPORT_CLOSING', 'The application is closing; the export was not started.'); // i18n: pending
-const boardOpen = () => refuseWhenClosing('BOARD_CLOSING', 'The application is closing; no board was opened.'); // i18n: pending
-const documentsOpen = () => refuseWhenClosing('DOCUMENT_CLOSING', 'The application is closing; no document was attached.'); // i18n: pending
+const exportOpen = () => refuseWhenClosing('EXPORT_CLOSING', t('native.error.exportClosing'));
+const boardOpen = () => refuseWhenClosing('BOARD_CLOSING', t('native.error.boardClosing'));
+const documentsOpen = () => refuseWhenClosing('DOCUMENT_CLOSING', t('native.error.documentClosing'));
 const diagnosticOpen = () => refuseWhenClosing('DIAGNOSTIC_CLOSING', t('native.error.diagnosticClosing'));
 
 async function exportWorkspace(value) {
@@ -687,14 +979,14 @@ async function exportWorkspace(value) {
   exportOpen();
   const manifest = await loadManifest(request.key);
   exportOpen();
-  if (!manifest) throw nativeError('Save the workspace before exporting it.', 'WORKSPACE_NOT_FOUND'); // i18n: pending
+  if (!manifest) throw nativeError(t('native.error.workspaceNotSaved'), 'WORKSPACE_NOT_FOUND');
   const notes = request.includeNotes ? notesValue(await getStore().read(notesName(request.key), { maxBytes: MAX_NOTES_BYTES, missing: [] })) : null;
   const stem = documents.safeFileName(path.parse(manifest.board.name).name, 'workspace');
   exportOpen(); // no await since the notes load: this is the last look before the dialog opens
   const choice = await dialog.showSaveDialog(mainWindow, {
-    title: 'Export workspace', buttonLabel: 'Export', // i18n: pending
+    title: t('native.dialog.exportTitle'), buttonLabel: t('native.dialog.exportButton'),
     defaultPath: path.isAbsolute(manifest.board.path) ? path.join(path.dirname(manifest.board.path), `${stem}-workspace.zip`) : `${stem}-workspace.zip`,
-    filters: [{ name: 'ZIP archive', extensions: ['zip'] }], // i18n: pending
+    filters: [{ name: t('native.dialog.exportZipFilter'), extensions: ['zip'] }],
   });
   if (choice.canceled || !choice.filePath) return null;
   // The dialog may have been open when the quit intent arrived; an answer after it starts nothing. From here on the
@@ -705,7 +997,7 @@ async function exportWorkspace(value) {
     let boardFiles = null;
     if (request.includeBoard) {
       const board = await readBoard(manifest.board.path);
-      if (board.key !== request.key) throw nativeError('The board file changed since the workspace was saved; it cannot be bundled.', 'EXPORT_BOARD_CHANGED'); // i18n: pending
+      if (board.key !== request.key) throw nativeError(t('native.error.exportBoardChanged'), 'EXPORT_BOARD_CHANGED');
       boardFiles = [
         { name: board.name, path: board.path, primary: true, data: board.data },
         ...Object.entries(board.companions ?? {}).map(([name, data]) => ({ name, path: path.join(path.dirname(board.path), name), data })),
@@ -713,6 +1005,7 @@ async function exportWorkspace(value) {
     }
     return documents.exportBundle({
       manifest, notes, documentIds: request.documentIds, includeBoard: request.includeBoard, boardFiles, target, t, fs, platform: process.platform,
+      temporaries: getExportTemporaries(),
     });
   })();
   exportsInFlight.add(work);
@@ -750,6 +1043,8 @@ async function importReadings() {
   } catch (error) {
     if (error && typeof error.code === 'string' && error.code.startsWith('READINGS_')) throw error;
     if (error && typeof error.code === 'string' && error.code.startsWith('STORE_')) throw readingsError(error.message, 'READINGS_FILE_UNREADABLE');
+    // A file another program holds open reports EBUSY on Windows (O-07): say so instead of the generic text.
+    if (error && error.code === 'EBUSY') throw readingsError(t('native.error.fileInUse'), 'READINGS_FILE_UNREADABLE');
     throw readingsError(t('native.error.readingsFileUnreadable'), 'READINGS_FILE_UNREADABLE');
   } finally {
     if (handle) await handle.close();
@@ -786,11 +1081,19 @@ async function exportReadings(value) {
   const target = chosen.toLowerCase().endsWith(`.${extension}`) ? chosen : `${chosen}.${extension}`;
   const work = (async () => {
     const temporary = `${target}.${process.pid}.${Date.now().toString(36)}.tmp`;
+    const journal = getExportTemporaries();
+    let stage = 'write';
     try {
+      await journal.record(temporary); // recorded before the file exists (electron/export-temporaries.cjs)
       await fs.writeFile(temporary, data, { flag: 'wx', mode: 0o600 });
+      stage = 'rename';
       await renameWithRetry(fs, temporary, target);
+      await journal.forget(temporary);
     } catch (error) {
-      await fs.unlink(temporary).catch(() => {});
+      // Forgotten only when the temporary is gone: one that could not be removed stays recorded for the next start.
+      if (await fs.unlink(temporary).then(() => true, (unlinkError) => unlinkError?.code === 'ENOENT')) await journal.forget(temporary);
+      // A destination another program holds open: EBUSY anywhere, EPERM only from the final rename over it (O-07, as for workspace exports).
+      if (error && (error.code === 'EBUSY' || (error.code === 'EPERM' && stage === 'rename'))) throw readingsError(t('native.error.fileInUse'), 'READINGS_SAVE_FAILED');
       throw readingsError(t('native.error.dataSaveFailed'), 'READINGS_SAVE_FAILED');
     }
     return { name: path.basename(target), bytes: data.length, readings: request.pack.readings.length };
@@ -813,7 +1116,9 @@ function readingsReadOptions(value) {
 // the renderer to write what it still holds ('trace:flush-request', preload.cjs onFlushRequest) and waits - bounded - for
 // its answer ('trace:flush-done') and for the store queue (the rename retry included) to drain. The wait is bounded so
 // a hung renderer can never keep the window or the app open; the quit itself still drains the store without a bound.
-const FLUSH_TIMEOUT_MS = 1000;
+// 3 s: a save that needs the store's rename retries (about 0.6 s of waiting) takes up to about 1.2 s on Windows, where a freshly written
+// file can be held for a moment; a 1 s bound counted such a save as done while it was still in progress (U-04).
+const FLUSH_TIMEOUT_MS = 3000;
 const flushWaiters = new Map();
 let flushSequence = 0;
 
@@ -832,41 +1137,190 @@ function rendererFlushable(window) {
   return !(contents.isDestroyed?.() || contents.isCrashed?.());
 }
 
-// Resolves once the renderer's pending saves reached the disk or the bounded wait elapsed; never rejects.
+// Resolves 'saved' only when the renderer answered that its pending saves reached the disk (U-04). 'failed': it answered otherwise (an
+// answer without the outcome counts as failed). 'unconfirmed': no answer within the bounded wait, or the renderer cannot be reached; nothing
+// is claimed then, and the user decides as for a failure. Never rejects.
 async function flushForClose(window) {
   const id = ++flushSequence;
   let acknowledge;
   const answered = new Promise((resolve) => { acknowledge = resolve; });
   flushWaiters.set(id, acknowledge);
+  let outcome = 'unconfirmed';
   const work = (async () => {
     try {
       window.webContents.send('trace:flush-request', id);
-      await answered;
-    } catch { /* A renderer that cannot be reached has nothing left to flush. */ }
+      outcome = (await answered) === true ? 'saved' : 'failed';
+    } catch { /* A renderer that cannot be reached: nothing is confirmed. */ }
     if (store) await store.flush(); // The writes the renderer just issued, rename retries included.
     if (repairStore) await repairStore.flush();
   })();
   await boundedWait(work, FLUSH_TIMEOUT_MS);
   flushWaiters.delete(id);
+  return outcome;
+}
+
+// U-04: what the renderer still held did not reach the disk. The user decides: retry the save (the question comes again when it fails
+// again), quit without the unsaved changes (a second question first), or stay. `current()` turns false once an open request cancelled the
+// quit (O-31): then nothing more is asked and the answer is 'cancel'.
+async function askSaveFailed(parent, outcome, current = () => true) {
+  const answer = await dialog.showMessageBox(parent, {
+    type: 'warning', title: app.name, noLink: true, defaultId: 0, cancelId: 2,
+    buttons: [t('native.dialog.saveRetry'), t('native.dialog.quitWithoutSaving'), t('native.dialog.saveCancel')],
+    message: outcome === 'unconfirmed' ? t('native.dialog.saveUnconfirmedMessage') : t('native.dialog.saveFailedMessage'),
+    detail: t('native.dialog.saveFailedDetail'),
+  });
+  if (!current()) return 'cancel';
+  if (answer?.response === 0) return 'retry';
+  if (answer?.response !== 1) return 'cancel';
+  const confirmation = await dialog.showMessageBox(parent, {
+    type: 'warning', title: app.name, noLink: true, defaultId: 1, cancelId: 1,
+    buttons: [t('native.dialog.quitWithoutSaving'), t('native.dialog.saveCancel')],
+    message: t('native.dialog.discardConfirmMessage'), detail: t('native.dialog.discardConfirmDetail'),
+  });
+  return confirmation?.response === 0 && current() ? 'discard' : 'cancel';
+}
+
+// The quit gets this long to drain (the stores, the bug report service, the exports in flight, the record of a board for the relaunch);
+// what is still unfinished then is named in quit.log and the application exits anyway (FXQA-20261011-01, PARITY-20261011-09).
+const QUIT_DRAIN_MS = 2000;
+
+// Set once will-quit has run, on any path: quitWithSave emits it itself only when it has not (see the guard there).
+let willQuitRan = false;
+app.on('will-quit', () => { willQuitRan = true; });
+
+// What the quit left unfinished, appended to quit.log in the profile (the store is closed by then, so this is plain file I/O).
+function quitLog(message) {
+  try { fsSync.appendFileSync(path.join(app.getPath('userData'), 'quit.log'), `${new Date().toISOString()} ${message}\n`); }
+  catch (error) { console.warn('TRACE: the quit log could not be written:', error.message); }
+}
+
+// The quit (before-quit): the renderer writes what it holds, then the stores close and the application quits. A save that failed keeps
+// the application here and the user decides (U-04). Every step checks `token` first: once an open request cancelled this quit (O-31) it
+// leaves nothing behind, and the application simply keeps running.
+async function quitWithSave(token) {
+  for (;;) {
+    quitStage = 'flushing';
+    const outcome = rendererFlushable(mainWindow) ? await flushForClose(mainWindow) : 'saved';
+    if (token !== quitToken) return;
+    if (outcome === 'saved') break;
+    quitStage = 'deciding';
+    const choice = await askSaveFailed(mainWindow, outcome, () => token === quitToken);
+    if (token !== quitToken) return;
+    if (choice === 'cancel') { quitStage = null; quitting = false; return; }
+    if (choice === 'discard') break;
+  }
+  quitStage = 'closing';
+  // A board recorded for the relaunch during the drain is written too (pendingOpenWrite), inside the same bound.
+  const drained = Promise.allSettled([
+    bugReportService ? bugReportService.beginShutdown() : Promise.resolve(),
+    store ? store.beginShutdown() : Promise.resolve(), repairStore ? repairStore.beginShutdown() : Promise.resolve(), ...exportsInFlight,
+  ]).then(() => pendingOpenWrite);
+  let bound;
+  const outcome = await Promise.race([drained.then(() => 'drained'), new Promise((resolve) => { bound = setTimeout(() => resolve('timed-out'), QUIT_DRAIN_MS); })]);
+  clearTimeout(bound);
+  if (outcome === 'timed-out') {
+    const left = store ? store.unfinished() : { queued: 0, writing: [] };
+    quitLog(`the quit was not drained within ${QUIT_DRAIN_MS} ms: ${left.queued} store operation(s) not settled, writing: ${left.writing.join(', ') || 'none'}; exports in flight: ${exportsInFlight.size}; the application exits and these may be lost`);
+  }
+  finalQuit = true;
+  relaunchForPendingOpens();
+  // app.exit, not app.quit: the stores are drained (or named in quit.log above), and app.exit leaves at once. Electron does not emit will-quit
+  // for app.exit, so it is emitted here, before the exit: its listeners (the packaged QA's pre-main observer writes its final snapshot on
+  // will-quit) get their last synchronous chance, as on a normal quit. quit is not emitted here: the candidate's shutdown log shows Electron
+  // emits it once, after app.exit. app.quit is not used: the shutdown that follows it is what FXQA-20261011-01 measured.
+  // The guard: will-quit goes out once per process, whichever path ran it first (willQuitRan).
+  if (!willQuitRan) app.emit('will-quit', { preventDefault() {} });
+  app.exit(0);
+}
+
+// O-31: a board that arrives while the quit waits (for the renderer's save or for the user's answer) cancels that quit before any store
+// closes, and the board then opens the usual way. Once the stores started closing nothing can be undone: the quit goes on, and the board
+// is recorded for a relaunch instead (boardRequested).
+function cancelQuitForBoard() {
+  if (quitStage !== 'flushing' && quitStage !== 'deciding') return;
+  quitToken++;
+  quitStage = null;
+  quitting = false;
+}
+
+// O-31 after the stores started closing: a board that arrives then cannot be opened by this process, because nothing it would write can be
+// saved any more. It is recorded in the profile at once (a crash keeps it), and the application relaunches with the newest recorded board
+// after the drain (relaunchForPendingOpens). A relaunch that fails leaves the record for the next start (noticePendingOpens).
+const PENDING_OPEN_FILE = 'pending-open.json';
+let pendingOpens = [];
+let pendingOpenWrite = Promise.resolve(); // the record writes, in order; never rejects
+
+function recordPendingOpen(filename) {
+  pendingOpens = [...pendingOpens, filename];
+  const directory = app.getPath('userData');
+  const file = path.join(directory, PENDING_OPEN_FILE);
+  pendingOpenWrite = pendingOpenWrite
+    .then(() => fs.mkdir(directory, { recursive: true }))
+    .then(() => fs.writeFile(file, `${JSON.stringify({ version: 1, files: pendingOpens }, null, 2)}\n`, 'utf8'))
+    .catch((error) => console.warn('TRACE: an open request could not be recorded:', error.message));
+}
+
+// Open requests (open-file, second-instance): the board opens as usual, or is recorded once the stores started closing.
+function boardRequested(filename) {
+  if (quitStage === 'closing') { recordPendingOpen(filename); return; }
+  cancelQuitForBoard();
+  void deliverBoard(filename);
+}
+
+// After the drain, so the new process starts from what this one wrote: the newest recorded board is opened by a relaunch. The
+// single-instance lock is released first, or the new process would hand its board to this one, which is already quitting, and exit.
+function relaunchForPendingOpens() {
+  const newest = pendingOpens.at(-1);
+  if (!newest) return;
+  try {
+    app.releaseSingleInstanceLock();
+    app.relaunch({ args: app.isPackaged ? [newest] : [process.argv[1], newest] });
+  } catch (error) {
+    console.warn('TRACE: the application could not relaunch with the board; it stays recorded for the next start:', error.message);
+  }
+}
+
+// The start after a closing that recorded boards: the board the process was launched with is opened as usual, every other recorded board
+// was not opened. The record moves to an archive file (nothing is deleted) and the user is told about each board that was not opened.
+async function noticePendingOpens(launched) {
+  const file = path.join(app.getPath('userData'), PENDING_OPEN_FILE);
+  let record;
+  try { record = JSON.parse(await fs.readFile(file, 'utf8')); } catch { return; } // No record (the usual case) or one that cannot be read
+  const files = Array.isArray(record?.files) ? record.files.filter((entry) => typeof entry === 'string') : [];
+  const opened = launched ? path.resolve(launched) : null;
+  const notOpened = files.filter((entry) => path.resolve(entry) !== opened);
+  await fs.rename(file, path.join(app.getPath('userData'), `pending-open.${Date.now()}.json`)).catch(() => {});
+  if (notOpened.length > 0) {
+    await dialog.showMessageBox({
+      type: 'warning', title: app.name, noLink: true, buttons: [t('native.dialog.pendingOpenButton')],
+      message: t('native.dialog.pendingOpenMessage'), detail: notOpened.join('\n'),
+    });
+  }
 }
 
 function installIpc() {
-  ipcMain.on('trace:flush-done', (event, id) => {
+  // A file dropped onto the window: the preload asks synchronously (sendSync) so that the grant is in place before the renderer reads it.
+  ipcMain.on('trace:grant-dropped', (event, filename) => {
+    if (trustedSender(event)) grants.grant(filename, 'drop');
+    event.returnValue = true;
+  });
+  ipcMain.on('trace:flush-done', (event, id, saved) => {
     if (!trustedSender(event) || !Number.isSafeInteger(id)) return;
-    flushWaiters.get(id)?.();
+    flushWaiters.get(id)?.(saved);
   });
   handle('trace:open-board', async () => {
     boardOpen();
     supersedeDeliveries();
     const choice = await dialog.showOpenDialog(mainWindow, {
       title: t('native.dialog.openTitle'), buttonLabel: t('native.dialog.openButton'), properties: ['openFile'],
-      filters: formats.dialogFilters(t('native.dialog.openFilter'), t('native.dialog.allFiles')),
+      filters: formats.dialogFilters(t('native.dialog.openFilter'), t('native.dialog.allFiles'), familyLabel),
     });
     if (choice.canceled || !choice.filePaths[0]) return null;
+    grants.grant(choice.filePaths[0], 'dialog');
     boardOpen();
     return readBoard(choice.filePaths[0]);
   });
-  handle('trace:read-board', (filename) => { supersedeDeliveries(); return readBoard(filename); });
+  handle('trace:read-board', (filename) => { requireGranted(filename); supersedeDeliveries(); return readBoard(filename); });
   handle('trace:accept-board', acceptBoard);
   handle('trace:initial-board', () => {
     rendererReady = true;
@@ -899,12 +1353,32 @@ function installIpc() {
     return initialBoardPromise;
   });
   handle('trace:recent-boards', () => config.recentBoards.map((item) => ({ ...item })));
-  handle('trace:get-settings', () => ({ ...config.settings }));
+  handle('trace:get-settings', () => { configStale = false; return { ...config.settings }; }); // the renderer read the settings it holds now
+  // The stored language before the first paint (TB-041): the preload asks synchronously, so the window's first frame is in the saved language.
+  // Only the language string is answered, and only to the app's own window.
+  ipcMain.on('trace:initial-language', (event) => { event.returnValue = trustedSender(event) ? savedLanguage : null; });
+  handle('trace:config-state', () => ({ state: configState() }));
   handle('trace:save-settings', (settings) => {
     const checked = settingsValue(settings);
-    // Native messages and dialogs switch together with the renderer, before the write completes.
+    // A locked file takes no save (updateConfig refuses it); the adopted settings wait for the renderer to read them (configStale).
+    if (configLocked) throw nativeError(t('native.error.configLocked'), 'CONFIG_LOCKED');
+    if (configStale) throw nativeError(t('native.error.configStale'), 'CONFIG_STALE');
+    // Native messages and dialogs switch together with the renderer, before the write completes. The macOS menu carries
+    // translated labels, so it is built again for the new language.
+    const previous = locale;
     locale = checked.language;
+    if (process.platform === 'darwin' && locale !== previous) Menu.setApplicationMenu(applicationMenu());
     return updateConfig((current) => ({ ...current, settings: checked }));
+  });
+  // Linux "Do not ask again" (confirmUnsandboxedStart): Settings reads whether the answer is stored and can take it back, so the question
+  // comes again at the next start without the sandbox. Other platforms are never asked; neither call takes an argument.
+  handle('trace:get-no-sandbox-consent', () => noSandboxConsent());
+  handle('trace:revoke-no-sandbox', async () => {
+    if (process.platform === 'linux' && config.noSandboxAccepted === true) {
+      // A failed write rejects: the renderer shows that the setting could not be changed, and the stored answer stays as it was.
+      await updateConfig(({ noSandboxAccepted, ...rest }) => rest);
+    }
+    return noSandboxConsent();
   });
   handle('trace:get-notes', async (key) => {
     const name = notesName(key);
@@ -914,8 +1388,8 @@ function installIpc() {
   handle('trace:save-notes', async (key, notes) => {
     const name = notesName(key);
     const checked = notesValue(notes);
-    const keepFirst = positionalNotesCopy(name, checked);
-    try { await getStore().write(name, checked, { maxBytes: MAX_NOTES_BYTES, ...(keepFirst ? { keepFirst } : {}) }); }
+    const keepRotated = positionalNotesCopy(name, checked);
+    try { await getStore().write(name, checked, { maxBytes: MAX_NOTES_BYTES, ...(keepRotated ? { keepRotated } : {}) }); }
     catch (error) {
       if (error && error.code === 'STORE_TOO_LARGE') throw new Error(t('native.error.notesTooLarge', { max: 8 }));
       throw error;
@@ -931,19 +1405,28 @@ function installIpc() {
     const { kinds, multiple } = pickOptions(options);
     documentsOpen();
     const choice = await dialog.showOpenDialog(mainWindow, {
-      title: 'Attach documents', buttonLabel: 'Attach', // i18n: pending
+      title: t('native.dialog.attachTitle'), buttonLabel: t('native.dialog.attachButton'),
       properties: multiple === false ? ['openFile'] : ['openFile', 'multiSelections'],
-      filters: documents.dialogFilters(kinds),
+      filters: documents.dialogFilters(kinds, { t }),
     });
     if (choice.canceled || !choice.filePaths.length) return [];
+    for (const filename of choice.filePaths) grants.grant(filename, 'dialog');
     documentsOpen();
     return documents.readSelection(choice.filePaths, documentContext({ kinds }));
   });
   handle('trace:read-document', async (filename, options) => {
+    requireGranted(filename);
     const { kinds } = pickOptions(options);
     return (await documents.readSelection([filename], documentContext({ kinds })))[0];
   });
-  handle('trace:locate-documents', (boardFile, requests) => documents.locateDocuments(boardFile, requests, documentContext()));
+  handle('trace:locate-documents', async (boardFile, requests) => {
+    requireGranted(boardFile);
+    const located = await documents.locateDocuments(boardFile, requests, documentContext());
+    // A document found inside the folder of the granted board is granted: the renderer then reads it by the path it was given. A path outside
+    // that folder is never granted here (it needs the user's own choice).
+    for (const result of located) if (result && typeof result.path === 'string' && result.relativePath !== undefined) grants.grant(result.path, 'located');
+    return located;
+  });
   handle('trace:export-workspace', exportWorkspace);
   // Format diagnostic report: the first takes no argument (main opens the dialog), the second only the report object, which is validated again here.
   handle('trace:diagnostic-pick', () => pickDiagnosticFile());
@@ -962,6 +1445,25 @@ function installIpc() {
   handle('trace:append-readings', (familyId, events) => getRepairStore().append(familyId, events));
   handle('trace:import-readings', importReadings);
   handle('trace:export-readings', exportReadings);
+  // Library device catalogue: the renderer names roots by the opaque id pickRoot returned, never by a path. Scans are read-only;
+  // only the corrections file under userData is ever written. Saving is refused once quitting began. Registered only while the
+  // release switch is on (DEVICE_DATABASE_ENABLED): with it off the channels do not exist in the build.
+  if (DEVICE_DATABASE_ON) {
+    handle('trace:library-pick-root', () => getDeviceBridge().pickRoot());
+    handle('trace:library-list-roots', () => getDeviceBridge().listRoots());
+    handle('trace:library-remove-root', (request) => getDeviceBridge().removeRoot(request));
+    handle('trace:library-scan', (request) => getDeviceBridge().scan(request));
+    handle('trace:library-cancel-scan', () => getDeviceBridge().cancelScan());
+    handle('trace:library-scan-skip-step', (request) => getDeviceBridge().skipScanStep(request));
+    handle('trace:library-list-folders', (request) => getDeviceBridge().listFolders(request));
+    handle('trace:library-list-boards', (request) => getDeviceBridge().listBoards(request));
+    handle('trace:library-board-detail', (request) => getDeviceBridge().boardDetail(request));
+    handle('trace:library-load-corrections', () => getDeviceBridge().loadCorrections());
+    handle('trace:library-save-corrections', (document) => {
+      refuseWhenClosing('LIBRARY_CLOSING', t('native.error.libraryClosing'));
+      return getDeviceBridge().saveCorrections(document);
+    });
+  }
   // Developer-facing text on purpose: the renderer only ever sends the four fixed ids, so users never see this message.
   handle('trace:open-support-link', async (id) => {
     if (typeof id !== 'string' || !Object.hasOwn(SUPPORT_LINKS, id)) throw new Error('Unknown support link.');
@@ -976,13 +1478,22 @@ function installIpc() {
   });
   handle('trace:get-support-status', () => getSupportService().status());
   handle('trace:prepare-support', () => getSupportService().prepare());
-  handle('trace:check-support', () => getSupportService().check());
-  // No renderer argument is read by either update handler. Developer-facing text on purpose, like the support link above.
+  // Only the Verify button asks with { userAction: true }; the flag is read as a boolean, nothing else from the renderer reaches the service.
+  handle('trace:check-support', request => getSupportService().check({ userAction: request?.userAction === true }));
+  // The automatic check is separately gated here, against the committed preference. The manual Settings action remains available when it is off.
+  handle('trace:check-for-startup-updates', () => {
+    if (config.settings.updateCheck !== true) return { status: 'unavailable' };
+    const wait = nextUpdateRequestAt - Date.now();
+    // Inside the cooldown the last answer is repeated. A wait longer than any cooldown ever set can only come from a clock that was set back: it is dropped.
+    if (wait > 0 && wait <= UPDATE_MAX_INTERVAL_MS) return lastUpdateAnswer;
+    if (!updateRequest) updateRequest = requestUpdateCheck({ userAction: false }).finally(() => { updateRequest = null; });
+    return updateRequest;
+  });
   handle('trace:check-for-updates', () => {
     const wait = nextUpdateRequestAt - Date.now();
     // Inside the cooldown the last answer is repeated. A wait longer than any cooldown ever set can only come from a clock that was set back: it is dropped.
     if (wait > 0 && wait <= UPDATE_MAX_INTERVAL_MS) return lastUpdateAnswer;
-    if (!updateRequest) updateRequest = requestUpdateCheck().finally(() => { updateRequest = null; });
+    if (!updateRequest) updateRequest = requestUpdateCheck({ userAction: true }).finally(() => { updateRequest = null; });
     return updateRequest;
   });
   handle('trace:open-update-page', async () => {
@@ -994,10 +1505,13 @@ function installIpc() {
   handle('trace:get-network-activity', () => ({ features: getEgress().features(), ...getEgress().activity() }));
   handle('trace:clear-network-activity', () => { getEgress().clearLog(); });
   handle('trace:is-maximized', () => mainWindow.isMaximized());
+  // The caption close button (its "close application" control) quits the application on every platform (PARITY-MAC-20261011-01): on macOS closing
+  // the last window keeps the app running, so the button did nothing there. It takes the Cmd+Q path: app.quit() runs before-quit, which
+  // flushes the renderer's pending writes and the store, and only then quits. The window is never closed by the button itself.
   for (const [channel, action] of [
     ['trace:minimize', () => mainWindow.minimize()],
     ['trace:maximize', () => mainWindow.isMaximized() ? mainWindow.unmaximize() : mainWindow.maximize()],
-    ['trace:close', () => mainWindow.close()],
+    ['trace:close', () => app.quit()],
   ]) {
     ipcMain.on(channel, (event) => { if (trustedSender(event)) action(); });
   }
@@ -1052,9 +1566,11 @@ async function deliverBoard(filename) {
     const payload = await readBoard(filename, current);
     if (current()) targetWindow.webContents.send('trace:board-opened', payload);
   } catch (error) {
-    // A failed delivery that outlived the quit intent must not open a message box on a closing app.
+    // The failure reaches the renderer as the notice of a failed interactive open (the same text, in the application's language, and
+    // no native box): a window still hidden or on its way up keeps it until the user closes it. A delivery that was superseded or
+    // outlived the quit intent reports nothing.
     if (current() && !quitting) {
-      await dialog.showMessageBox(targetWindow, { type: 'error', title: t('native.dialog.openFailedTitle'), message: error.message });
+      targetWindow.webContents.send('trace:open-failed', typeof error?.message === 'string' ? error.message : t('native.error.boardReadFailed'));
     }
   }
 }
@@ -1100,19 +1616,31 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'), sandbox: true, contextIsolation: true,
       nodeIntegration: false, webSecurity: true, allowRunningInsecureContent: false,
       webviewTag: false, spellcheck: false,
+      // Only the QA switch adds an argument: the renderer shows the device database entry only when the main process has it on.
+      additionalArguments: DEVICE_DATABASE_QA ? [deviceSwitch.RENDERER_ARGUMENT] : [],
     },
   });
   const window = mainWindow;
   mainWindow.setMenuBarVisibility(false);
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
-  mainWindow.webContents.on('will-navigate', (event, url) => { if (!isTrustedUrl(url)) event.preventDefault(); });
-  mainWindow.webContents.on('will-redirect', (event, url) => { if (!isTrustedUrl(url)) event.preventDefault(); });
-  mainWindow.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+  // The navigation policy (electron/navigation.cjs): links, redirects and subframes are prevented; a main-frame navigation that bypassed
+  // those events (loadURL, the DevTools protocol) is stopped by the watchdog and the trusted page is loaded again.
+  const guard = navigation.createNavigationGuard({ trustedUrl: () => trustedPageUrl });
+  mainWindow.webContents.on('will-navigate', (event, url) => guard.willNavigate(event, url));
+  mainWindow.webContents.on('will-redirect', (event, url) => guard.willRedirect(event, url));
+  mainWindow.webContents.on('will-frame-navigate', (event, url) => guard.willFrameNavigate(event, url));
+  mainWindow.webContents.on('did-start-navigation', (_event, url, _inPlace, isMainFrame) => {
+    if (guard.startNavigation(url, isMainFrame) === 'stop' && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.stop();
+      mainWindow.loadURL(trustedPageUrl).catch(() => {});
+      return;
+    }
     if (isMainFrame) bugReportService?.invalidateWindow();
   });
   mainWindow.webContents.on('will-attach-webview', (event) => event.preventDefault());
   mainWindow.on('maximize', () => mainWindow.webContents.send('trace:maximized', true));
   mainWindow.on('unmaximize', () => mainWindow.webContents.send('trace:maximized', false));
+  mainWindow.on('focus', () => rereadLockedConfigNow());
   const showWindow = () => {
     if (quitting || mainWindow !== window || window.isDestroyed() || window.isVisible()) return;
     window.show();
@@ -1158,17 +1686,23 @@ function createWindow() {
       window.close();
     });
   });
-  // The first close request is held back until the renderer's pending saves are written (bounded, see
-  // flushForClose), then the window closes for real. A quit in progress (finalQuit) has already flushed.
+  // The first close request is held back until the renderer's pending saves are written (bounded, see flushForClose), then the window
+  // closes for real. A save that failed keeps the window open and the user decides (U-04). A quit in progress (finalQuit) has already flushed.
   let closeApproved = false;
   let closeFlush = null;
+  const closeWhenSaved = async () => {
+    for (let outcome = await flushForClose(window); outcome !== 'saved'; outcome = await flushForClose(window)) {
+      const choice = await askSaveFailed(window, outcome);
+      if (choice === 'cancel') return;
+      if (choice === 'discard') break;
+    }
+    closeApproved = true;
+    if (!window.isDestroyed()) window.close();
+  };
   window.on('close', (event) => {
     if (closeApproved || finalQuit || !rendererFlushable(window)) return;
     event.preventDefault();
-    closeFlush ??= flushForClose(window).then(() => {
-      closeApproved = true;
-      if (!window.isDestroyed()) window.close();
-    });
+    closeFlush ??= closeWhenSaved().finally(() => { closeFlush = null; });
   });
   window.on('closed', () => {
     clearTimeout(fallbackShow);
@@ -1178,17 +1712,18 @@ function createWindow() {
   void loadPage();
 }
 
-// macOS routes Cmd+Q, Cmd+H, Cmd+M, Cmd+W and the Edit key equivalents through the application menu, and
-// setApplicationMenu(null) leaves Electron's default menu in place there, View > Reload and Toggle Developer Tools
-// included. A minimal menu replaces it: the application, Edit and Window menus with their standard roles only, no
-// View and no Help (the role menus would add Services, Speech and the window list). Windows and Linux keep no menu bar.
+// The macOS menu (its template is in electron/app-menu.cjs): translated labels, rebuilt when the language changes (trace:save-settings).
+// Windows and Linux keep no menu bar.
 function applicationMenu() {
-  if (process.platform !== 'darwin') return null;
-  return Menu.buildFromTemplate([
-    { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' }] },
-    { label: 'Edit', submenu: [{ role: 'undo' }, { role: 'redo' }, { type: 'separator' }, { role: 'cut' }, { role: 'copy' }, { role: 'paste' }, { role: 'selectAll' }] }, // i18n: pending
-    { label: 'Window', submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }] }, // i18n: pending
-  ]);
+  const template = applicationMenuTemplate({ platform: process.platform, appName: app.name, t, openSettings: openSettingsFromMenu });
+  return template ? Menu.buildFromTemplate(template) : null;
+}
+// The Settings… item: the page opens its settings when it hears the window event trace:open-settings (OPEN_SETTINGS_EVENT in
+// src/components/workspace/shortcuts.ts, listened to by Shell.tsx). The event must be dispatched in the page's own world, so the
+// script runs there through executeJavaScript; it is a constant and nothing from the request enters it.
+const OPEN_SETTINGS_SCRIPT = "window.dispatchEvent(new Event('trace:open-settings'));";
+function openSettingsFromMenu() {
+  if (mainWindow && !mainWindow.isDestroyed()) void mainWindow.webContents.executeJavaScript(OPEN_SETTINGS_SCRIPT).catch(() => {});
 }
 
 // Linux sandbox gate. Chromium's OS sandbox (a user and PID namespace, or the SUID helper, plus a seccomp-bpf filter) confines every
@@ -1206,6 +1741,11 @@ const NO_SANDBOX_WARNING = 'TRACE: running without the Chromium sandbox (--no-sa
 function sandboxGate({ platform, noSandbox, acceptEnvironment, accepted }) {
   if (platform !== 'linux' || noSandbox !== true) return 'start';
   return acceptEnvironment === '1' || accepted === true ? 'accepted' : 'ask';
+}
+// What Settings shows: whether this platform is ever asked, and whether the answer "Do not ask again" is stored.
+function noSandboxConsent() {
+  const applicable = process.platform === 'linux';
+  return { applicable, saved: applicable && config.noSandboxAccepted === true };
 }
 
 // Resolves true when the start-up may go on, false when the user chose to quit. Runs after loadConfig (the stored answer and the
@@ -1240,7 +1780,7 @@ if (!singleInstance) {
 } else {
   app.on('second-instance', (_event, argv, workingDirectory) => {
     const filename = findBoardArgument(argv.slice(app.isPackaged ? 1 : 2), workingDirectory);
-    if (filename) void deliverBoard(filename);
+    if (filename) { grants.grant(filename, 'external'); boardRequested(filename); }
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       // A window still waiting for its first paint is shown as it is: a second launch must never leave nothing on screen.
@@ -1250,21 +1790,33 @@ if (!singleInstance) {
   });
   app.on('open-file', (event, filename) => {
     event.preventDefault();
+    grants.grant(filename, 'external');
     if (!app.isReady()) startupBoardPath = filename;
     else {
-      void deliverBoard(filename);
+      boardRequested(filename);
       // macOS keeps the process alive without a window: the board waits in pendingBoardPath for the new renderer.
       if (process.platform === 'darwin' && windowsAllowed && !quitting && BrowserWindow.getAllWindows().length === 0) createWindow();
     }
   });
+  // A packaged release never opens the DevTools protocol: its switches are refused here (electron/navigation.cjs explains why the fuses
+  // do not cover them). The QA flavour keeps them, because its packaged runs attach through them.
+  // The build flavour is the flag the QA configs write into the packaged package.json (electron/navigation.cjs). Missing: the release.
+  const buildFlavour = (() => { try { return require('../package.json').traceBuildFlavor; } catch { return undefined; } })();
+  if (app.isPackaged && navigation.remoteDebuggingRefused({ isPackaged: true, buildFlavour, hasSwitch: (name) => app.commandLine.hasSwitch(name) })) {
+    console.error('TRACE Boardviewer refuses a remote debugging switch in a packaged build.');
+    app.exit(1);
+  }
   app.whenReady().then(async () => {
+    const launched = startupBoardPath; // the board this process was started with, before the window can take it
     await loadConfig();
     if (!(await confirmUnsandboxedStart())) { app.quit(); return; }
     Menu.setApplicationMenu(applicationMenu());
     installIpc();
+    void getExportTemporaries().sweep(); // the export temporaries of a writer that is gone (electron/export-temporaries.cjs)
     installSession();
     createWindow();
     windowsAllowed = true;
+    void noticePendingOpens(launched);
   }).catch((error) => {
     dialog.showErrorBox(t('native.dialog.startupErrorTitle'), error.message || t('native.dialog.startupFailed'));
     app.quit();
@@ -1276,14 +1828,9 @@ if (!singleInstance) {
     if (finalQuit) return;
     event.preventDefault();
     // With a live renderer the quit first lets it write what it still holds (the debounced workspace snapshot of a
-    // direct app.quit()); only then the store flips to "closing" (new writes are rejected with STORE_CLOSING) and the
-    // promise resolves after every write accepted before that moment has been committed. Without a live renderer
-    // the store closes at once, in this very turn.
-    const closeStore = () => Promise.allSettled([
-      bugReportService ? bugReportService.beginShutdown() : Promise.resolve(),
-      store ? store.beginShutdown() : Promise.resolve(), repairStore ? repairStore.beginShutdown() : Promise.resolve(), ...exportsInFlight,
-    ]);
-    shutdown ??= (rendererFlushable(mainWindow) ? flushForClose(mainWindow).then(closeStore) : closeStore())
-      .then(() => { finalQuit = true; app.quit(); });
+    // direct app.quit()); only then the stores flip to "closing" (new writes are rejected with STORE_CLOSING) and the
+    // application quits after every write accepted before that moment has been committed. Without a live renderer
+    // the stores close at once, in this very turn. A quit already in progress is not started again (see quitWithSave).
+    if (quitStage === null) void quitWithSave(++quitToken);
   });
 }

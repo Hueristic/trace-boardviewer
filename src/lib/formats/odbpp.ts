@@ -5,7 +5,8 @@
  * What is read: matrix/matrix (steps, layer types and order), misc/info (default units), the chosen step's stephdr (nested steps),
  * profile (board outline and cutouts), eda/data (nets with toeprint subnets, packages with pins and outlines), the component layers
  * comp_+_top / comp_+_bot (CMP, PRP, TOP and BOM records) and, only when eda/data has no nets, netlists/cadnet/netlist matched to
- * pins by position. Copper features, drills, symbols, fonts and attributes of graphic layers are not read.
+ * pins by position. The outer copper and drill layers give pads, lines, arcs and drilled holes (odbpp-copper.ts), kept in board.copper and
+ * drawn by the board view (board-copper.ts). Silkscreen, mask, paste, inner copper, pours, text, fonts and the attributes of graphic layers are not read.
  *
  * Coordinates: ODB++ is Y-up and seen from the top, like the TRACE board model; every file carries its own UNITS (MM or INCH; a file
  * without one falls back to misc/info, then to INCH as the specification says). Pins are placed at their TOP record positions, which
@@ -20,9 +21,11 @@
  * "unconnected-(…)" placeholder nets, so both readings of one design agree.
  */
 import type { Board, BoardSide, Point } from '../types';
+import { sourceBaseName, type SourcePlatform } from './source-name';
 import { BoardFormatError, buildBoard, decodeText, note, TextDecodeError, type ParseInput, type RawPart, type RawPin } from './common';
-import { odbTail, readContainer, resolveLimits, sniffContainer, treeFromFiles, type OdbppContainer, type OdbppLimits, type OdbppTree } from './odbpp-archive';
+import { isLayerFileTail, odbTail, readContainer, resolveLimits, sniffContainer, treeFromFiles, type OdbppContainer, type OdbppLimits, type OdbppTree } from './odbpp-archive';
 import { pathEvidence } from './odbpp-sniff';
+import { readCopper, type CopperPlan, type CopperResult } from './odbpp-copper';
 import {
   FID, MM_PER_UNIT, parseCadNetlist, parseComponents, parseEdaData, parseKeyValues, parseMatrix, parseSurfaces,
   type ComponentRecord, type Components, type EdaData, type LayerKind, type EdaPackage, type EdaPin, type Matrix, type MatrixLayer, type OdbUnits, type Outline, type Polygon,
@@ -114,7 +117,7 @@ export function openOdbpp(input: ParseInput, limits?: Partial<OdbppLimits>): Odb
     if (!sniffOdbpp(input.data, resolved)) return null;
     const tree = readContainer(input.data, resolved);
     if (!tree) return null;
-    return source(tree, input.name);
+    return source(tree, input.name, input.platform);
   } catch (error) { return tag(error); }
 }
 /** An extracted product-model directory (or its parent) as relative path → bytes. */
@@ -131,8 +134,8 @@ export function listOdbppSteps(input: ParseInput, limits?: Partial<OdbppLimits>)
 
 // --- product model ---
 
-const archiveName = (name: string) => {
-  const base = name.split(/[\\/]/).pop() ?? name;
+const archiveName = (name: string, platform?: SourcePlatform) => {
+  const base = sourceBaseName(name, platform);
   return base.replace(/\.(?:tar\.gz|tar\.z|tgz|tar|zip)$/i, '') || base;
 };
 function text(data: Uint8Array, file: string): string {
@@ -158,11 +161,14 @@ function tolerant<T>(read: () => T, fallback: (error: BoardFormatError) => T): T
   try { return read(); }
   catch (error) { if (error instanceof BoardFormatError && error.code !== 'LIMIT_EXCEEDED') return fallback(error); throw error; }
 }
-function job(tree: OdbppTree, name: string): Job {
+function job(tree: OdbppTree, name: string, platform?: SourcePlatform): Job {
   const roots = new Map<string, { files: Map<string, Uint8Array>; matrix: boolean }>();
+  // Layer features and tools (copper and drill data) do not make a product model by themselves: they join the chosen one below.
+  const layerFiles: Array<{ root: string; tail: string; data: Uint8Array }> = [];
   for (const [path, data] of tree.files) {
     const split = odbTail(path);
     if (!split) continue;
+    if (isLayerFileTail(split.tail)) { layerFiles.push({ root: split.root, tail: split.tail, data }); continue; }
     let root = roots.get(split.root);
     if (!root) roots.set(split.root, root = { files: new Map(), matrix: false });
     root.files.set(split.tail, data);
@@ -171,6 +177,7 @@ function job(tree: OdbppTree, name: string): Job {
   if (!roots.size) fail(`the archive has an ODB++ layout, but none of the files a board needs (matrix/matrix, components, eda/data) could be read${tree.links ? ` (${tree.links} links were skipped)` : ''}${tree.unsafePaths ? ` (${tree.unsafePaths} unsafe paths were ignored)` : ''}.`);
   const ranked = [...roots].sort(([a, x], [b, y]) => Number(y.matrix) - Number(x.matrix) || y.files.size - x.files.size || (a < b ? -1 : a > b ? 1 : 0));
   const [root, chosen] = ranked[0];
+  for (const layer of layerFiles) if (layer.root === root) chosen.files.set(layer.tail, layer.data);
   const get = (tail: string) => chosen.files.get(tail);
   const notes: string[] = [];
   const matrixData = get('matrix/matrix');
@@ -194,10 +201,17 @@ function job(tree: OdbppTree, name: string): Job {
     if (COPPER.has(layer.type)) { minCopper = Math.min(minCopper, layer.row); maxCopper = Math.max(maxCopper, layer.row); }
   }
   const copperRows = minCopper <= maxCopper ? { min: minCopper, max: maxCopper } : null;
-  return { container: tree.container, root, name: archiveName(name), tree, get, matrix, infoUnits, source, version, rootCount: roots.size, notes, tails: [...chosen.files.keys()], layerByName, copperRows };
+  return { container: tree.container, root, name: archiveName(name, platform), tree, get, matrix, infoUnits, source, version, rootCount: roots.size, notes, tails: [...chosen.files.keys()], layerByName, copperRows };
 }
 
 const COPPER = new Set(['SIGNAL', 'POWER_GROUND', 'MIXED']);
+/** The outer copper layers (lowest and highest matrix row), the drill layers and the inner copper count of the product model. */
+function copperPlan(j: Job): CopperPlan {
+  const layers = j.matrix?.layers ?? [];
+  const copper = [...new Set(layers.filter(layer => COPPER.has(layer.type)).sort((a, b) => a.row - b.row).map(layer => layer.name))];
+  const drills = [...new Set(layers.filter(layer => layer.type === 'DRILL').map(layer => layer.name))];
+  return { top: copper[0], bottom: copper.length > 1 ? copper[copper.length - 1] : undefined, drills, innerLayers: Math.max(0, copper.length - 2) };
+}
 interface ComponentLayer { name: string; side: 'top' | 'bottom'; parsed: Components; file: string }
 /** Per toeprint of a component layer (offsets by component): the eda/data net index (-1: none) and the FID mask of its subnet. */
 interface SubnetTable { offsets: Int32Array; nets: Int32Array; masks: Int32Array }
@@ -246,8 +260,8 @@ function componentLayers(j: Job, step: string, files: StepFiles, units: (file: s
   return { layers, skipped };
 }
 
-function source(tree: OdbppTree, name: string): OdbppSource {
-  const j = job(tree, name);
+function source(tree: OdbppTree, name: string, platform?: SourcePlatform): OdbppSource {
+  const j = job(tree, name, platform);
   const cache = new Map<string, StepData>();
   const declared: Record<string, OdbUnits> = {}, fallbacks = new Set<string>();
   const unitsOf = (file: string, units?: OdbUnits): OdbUnits => {
@@ -704,8 +718,42 @@ function model(j: Job, step: string, steps: OdbppStepInfo[], data: StepData, can
     if (!polygons.length) notes.push('The step profile holds no closed surface; the outline is estimated from the components.');
   } else notes.push('The step has no profile file; the outline is estimated from the components.');
 
+  // Copper pads, lines, arcs and drilled holes of the outer copper and drill layers (odbpp-copper.ts). A copper or drill file of this step
+  // that was not kept (over the layer-file limit) or is not text would leave partial copper, which would mislead: then none is read.
+  const plan = copperPlan(j);
+  const layerTail = (layer: string, kind: 'features' | 'tools') => `steps/${step}/layers/${layer}/${kind}`;
+  const copperTails: string[] = [];
+  for (const layer of new Set([plan.top, plan.bottom])) if (layer) copperTails.push(layerTail(layer, 'features'));
+  for (const layer of plan.drills) copperTails.push(layerTail(layer, 'features'), layerTail(layer, 'tools'));
+  const dropped = copperTails.filter(tail => j.tree.auxDropped.includes(`${j.root}${tail}`));
+  const unreadable = copperTails.filter(tail => {
+    const data = j.get(tail);
+    if (!data) return false;
+    try { decodeText(data); return false; }
+    catch (error) { if (error instanceof TextDecodeError) return true; throw error; }
+  });
+  // Units of the copper files are recorded only when their copper is kept: a step without copper keeps the units record it had before.
+  const copperUnits: Record<string, OdbUnits> = {}, copperFallbacks: string[] = [];
+  let copperResult: CopperResult;
+  if (dropped.length || unreadable.length) {
+    const reasons = [...dropped.map(tail => `${tail} (over the layer-file limit)`), ...unreadable.map(tail => `${tail} (not text)`)];
+    copperResult = { notes: [`Copper and drill data of step "${step}" were not read: ${list(reasons, 4)}. Partial copper would mislead, so none is read.`] };
+  } else {
+    copperResult = readCopper(plan, {
+      read: (layer, kind) => { const tail = layerTail(layer, kind), data = j.get(tail); return data ? { file: tail, text: decodeText(data) } : undefined; },
+      units: (file, declared) => {
+        if (declared) return copperUnits[file] = declared;
+        copperFallbacks.push(file);
+        return copperUnits[file] = j.infoUnits ?? 'INCH';
+      },
+    });
+  }
+  const copperKept = copperResult.copper !== undefined;
+  if (copperKept) Object.assign(declared, copperUnits);
+
   // English diagnostics, shown through the formatNote catalog entry (parse.warning.formatNote = "{message}") like the other adapters.
-  notes.unshift(`ODB++ step "${step}"${j.version ? `, ODB++ ${j.version}` : ''}${j.source ? `, written by ${j.source}` : ''}: components, pins, packages, nets and the profile are read; copper features, drills and other layers are not drawn.`);
+  // The copper sentence only describes copper that is in the board data; a board without it keeps the earlier wording.
+  notes.unshift(`ODB++ step "${step}"${j.version ? `, ODB++ ${j.version}` : ''}${j.source ? `, written by ${j.source}` : ''}: components, pins, packages, nets and the profile are read; ${copperKept ? 'copper pads, lines, arcs and drilled holes are kept in the board data and drawn in the board view; silkscreen, mask, paste, inner copper, pours and text are not read' : 'copper features, drills and other layers are not drawn'}.`);
   if (candidates.length > 1) notes.push(`The product model has ${candidates.length} steps with components (${list(candidates.map(candidate => candidate.name))}); "${step}" (the most components) was read. Another step can be chosen.`);
   if (data.info.childSteps.length) notes.push(`Step "${step}" nests other steps (${list(data.info.childSteps)}); only its own components are shown, the nested instances are not expanded.`);
   if (j.rootCount > 1) notes.push(`The archive holds ${j.rootCount} product models; "${j.root.replace(/\/$/, '') || '(archive root)'}" was read.`);
@@ -716,7 +764,7 @@ function model(j: Job, step: string, steps: OdbppStepInfo[], data: StepData, can
   if (brokenSteps.length) notes.push(`${brokenSteps.length} other step(s) could not be read: ${list(brokenSteps.map(other => `${other.name} (${other.error})`), 3)}.`);
   if (j.tree.endMissing) notes.push('The tar archive ends without its end-of-archive block; it may be truncated (every entry it holds is complete).');
   if (data.skippedLayers.length) notes.push(`Component layers that are not on an outer side were skipped (embedded or unknown): ${list(data.skippedLayers)}.`);
-  const stepFallbacks = [...fallbacks].filter(file => file.startsWith(base));
+  const stepFallbacks = [...fallbacks, ...(copperKept ? copperFallbacks : [])].filter(file => file.startsWith(base));
   if (stepFallbacks.length) notes.push(`${stepFallbacks.length} file(s) have no UNITS directive and were read in ${j.infoUnits ? `${j.infoUnits} (misc/info)` : 'INCH (the specification default)'}: ${list(stepFallbacks)}.`);
   if (!eda) notes.push('eda/data is missing: package names come from the CMP part names and pads have no size.');
   else if (netSource === 'none') notes.push('eda/data has no nets and no usable cadnet netlist was found; pins have no nets.');
@@ -739,8 +787,10 @@ function model(j: Job, step: string, steps: OdbppStepInfo[], data: StepData, can
   const ignoredRecords = data.layers.reduce((sum, layer) => sum + layer.parsed.ignored, 0) + (eda?.ignored ?? 0);
   if (ignoredRecords) notes.push(`${ignoredRecords} unrecognized records in the component layers and eda/data were ignored.`);
 
+  notes.push(...copperResult.notes);
   const board = buildBoard({ name: j.name, data: new Uint8Array(0) }, { format: ODBPP_FORMAT, unitsToMm: 1, parts, pins, outlines, warnings: notes.map(note) });
   board.name = j.name;
+  if (copperResult.copper) board.copper = copperResult.copper;
   const units: Record<string, OdbUnits> = {};
   for (const [file, value] of Object.entries(declared)) if (file.startsWith(base)) units[file] = value;
   return { board, step, steps, container: j.container, root: j.root.replace(/\/$/, ''), layers: j.matrix?.layers ?? [], units, ...(j.source ? { source: j.source } : {}), ...(j.version ? { version: j.version } : {}), components: infos };

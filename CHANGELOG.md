@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.3.3 — 2026-10-11
+
+Windows x64, macOS Apple silicon and Linux x86-64 packages carry the same application features; macOS and Linux remain experimental.
+
+### New
+
+- ODB++ boards show their copper (pads, copper lines and arcs) and their drilled holes in the 2D view. Copper pours and text, fonts, solder mask and silkscreen are still not read.
+- EasyEDA Pro V3 projects are read: components, pads, nets and the board outline. A project that cannot be read is refused, and the message names the reason. Projects with the .epro2 extension can be picked in the open dialog.
+
+### Improved and fixed
+
+- The board view shows a visible focus ring; three accessible labels use catalogue texts, control borders have at least a 3:1 contrast, and the canvases are announced as application regions.
+- A settings file that another program has locked no longer delays the start. Its state is shown as a persistent notice, and TRACE reads the file again when it is free.
+- KiCad schematic and ODB++ archive names are split into folders and file names by the rules of the platform they were picked on.
+- Export dialog: its texts come from the translation catalogues and are shown in all eight languages; the sentences no longer change with the number of items, and the file size uses the interface's number format.
+- The message "The export file could not be written completely." is translated in all eight languages.
+- The known limits and accepted risks of the device database, which stays hidden in this release, are documented in docs/LIBRARY-LIMITS.md. Nothing changes in the interface.
+- A TVW board file that is refused now says why, and a missing net table has its own localized message.
+- The link dialog shows why an alias was rejected, in the interface language.
+- On Mac and Linux, a document whose file name contains a backslash keeps its place beside the board after the board is moved; it is found again instead of showing as Missing.
+- The search field shows the shortcut for the platform: Cmd+F on macOS, Ctrl+F elsewhere.
+- Bug reports redact file names more completely: names without an extension, relative paths with spaces and host names written without a scheme are now covered.
+- A start-up sample that cannot be opened (CST, LST or CSV) leaves an error notice on screen with the reason. The notice does not disappear after a timer.
+- A file dropped into the window that TRACE does not recognize is refused by name, in the user's language.
+- When TRACE closes, it waits at most 2 seconds for pending saves and exports. Anything still unfinished is named in a quit.log file in the application data folder, and the application then closes. Before, the close could wait for a save without a limit.
+- TRACE starts in the language saved in its settings. Before, the first screen could show the system language for a moment. A new profile starts in the system language.
+- More interface texts are shown in all eight languages: the empty tabs pane, the attached-file notice, the export status word, and the refusal messages for CST, CSV, VS2 and XZZ files.
+- More interface labels, including accessible names and shortcut texts, come from the translation catalogues in all eight languages.
+- The file-status texts of the workspace come from the translation catalogues, so they are shown in the chosen language.
+- On large boards, pads that would be smaller than 1.5 pixels on screen are drawn as small squares of the same area, so the board draws with less detail when zoomed out.
+- Zoom and pan are faster on very large boards. In a synthetic benchmark with 100,000 and 250,000 pins, on a graphics card (median of three runs), the 95th-percentile zoom frame time fell by 35% and 44%, and the pan frame time by 32% and 24%.
+- After panning or restarting TRACE, the board view's background covers every row, so no row shows mixed colours.
+- EasyEDA: bottom-side parts are now rotated correctly at every angle.
+- Smaller app package: the bundled app archive shrank from about 94 MB to 22 MB; the Windows portable download is about 5% smaller.
+- Settings: if the settings file is locked while the app runs, a notice now appears and the change is saved once the file is writable again (previously the change could be lost silently).
+- Leftover temporary export files are cleaned up at the next start. An export is no longer stopped when its temporary-file record cannot be written; the export log says so.
+- XZZ, FZ and CAE key dialogs: the reason line and the key hints are translated in all eight languages.
+- macOS metadata files (._name) are refused with a named reason on every platform.
+
+## 1.3.2 (not released separately; its changes ship in 1.3.3)
+
+Windows x64, macOS Apple silicon and Linux x86-64 packages carry the same application features; macOS and Linux remain experimental.
+
+### New
+
+- In-app bug reports: a private form for describing a problem, with an exact preview of what will be sent before anything leaves the computer. Drafts can be kept locally. Sending is an explicit action after review, through a separate receiver. Detected personal details can be removed while the rest of the text is kept; home-relative and drive-less file paths are detected too. The description has a 2,000-character limit with a counter.
+- Keyboard: Ctrl+, (Windows and Linux) and Cmd+, (macOS) open Settings, also before a board is open and while a text field has the focus. A comma typed in a text field stays text, and the shortcut is listed in the keyboard help.
+- Linux: Settings shows the saved answer to "Do not ask again" for starting without the Chromium sandbox. Its button "Ask again at the next start" takes that answer back. Windows and macOS are never asked. The section is optional.
+
+### Improved and fixed
+
+- Native Cadence Allegro databases up to 240 MiB now open when they declare 4,000,000 objects or fewer (the limit was 64 MiB). Larger databases get a message that names the size or record count. Other formats keep their 64 MiB limit. An Allegro board that TRACE cannot read says which database layout or footprint layer was found and asks for a text GenCAD 1.4 export.
+- ODB++ boards also read their copper (pads, copper lines and arcs) and drilled holes from the top, bottom and drill layers. The copper and the drilled holes are drawn in the 2D view. A copper or drill file that is too large or not text gives that board no copper; the import note names the file.
+- GenCAD files in a CAD storage wrapper with non-zero bytes after the board text still do not open. The message asks for a text GENCAD 1.4 export from the source tool and is shown in all eight languages. TRACE does not guess the version of such a file.
+- EasyEDA Pro: a bottom-side part turned by exactly 180 degrees had its two pads swapped with the other pad's position; they now sit on their own nets. An unreadable EasyEDA Pro V3 project is refused by name, not as an unrecognized file.
+- Support table: the IPC-2581, IPC-D-356 and ODB++ readers are described by what they were checked with: files written by the KiCad 9 command-line export (kicad-cli) from open designs (IPC-2581: 27 files; IPC-D-356 and ODB++: 39 each). No file written by a vendor's own software was tested, and these formats are no longer listed under real-file validation. How these files open does not change.
+- Files in use: a board, document, export or readings file that another program holds open is reported as "The file is in use by another program" (Windows), instead of a generic error. Network locations (\\server\share) are still refused; the message says so and asks for a copy on a local drive.
+- An unusable --user-data-dir value stops the start with its message on the standard error and exit code 2, instead of an uncaught error.
+- Companion files: on Mac, a schematic or board is no longer listed as one of its own companion files when the file system reports it under another spelling of its name. A moved document whose name contains a backslash is found again on Mac and Linux. A board opened under another spelling of its name appears once in the recent boards.
+- A companion file that exists only online (for example in OneDrive) is no longer downloaded in the background. TRACE says it is available online only: open it or attach it by hand. The readings notice names the affected file.
+- Update check: it is off until you choose. The first start asks once whether to check for new releases when TRACE starts, and Settings changes the choice. In 1.3.1 the startup check was on by default.
+- A settings file locked by another program is no longer overwritten; TRACE reads it again when the lock ends.
+- Search results heading and label, the parts-search empty state and the save status are shown in all eight languages.
+- Documents list: picking a schematic now shows it in the Schematic tab. Before, the tab kept the last cross-probed schematic.
+- Library undo: an undo that the library store cannot apply because the request is invalid no longer blocks the older corrections. Undoing a correction whose folder was removed says that the file is no longer known and reloads the lists.
+- Typing in a text field no longer switches tabs: Alt+1, Alt+2 and Alt+3 are ignored while the cursor is in a text field, so a note typed in a PDF keeps its text (on a Mac, Option+digit types its symbol there). The tab shortcuts work everywhere else.
+- macOS: the application's own close button (the caption control labelled "close application") now quits the application, as Cmd+Q does, and pending changes are written first. Before, on macOS that button did nothing, because closing the last window keeps the application running.
+- Languages: the macOS Edit and Window menus follow the chosen language and are updated when it changes; the application menu has a Settings item (Cmd+,). The extra shortcut rows of the Help dialog, the workspace and split labels and the search placeholder are translated. The native dialogs for attaching documents and exporting a workspace show their titles, buttons and ZIP filter in the chosen language. Document and family filters, many error and status messages, and the net banners and schematic-net section are shown in all eight languages.
+- The device database is built in but switched off in this release: the top bar shows no Database entry and its dialog cannot be opened. Nothing leaves the computer and no file is changed.
+- Documentation: the data folder is named after the packaged app: %APPDATA%\trace-boardviewer on Windows and ~/Library/Application Support/trace-boardviewer on macOS. These two locations are not yet confirmed on native builds; Linux is unchanged. The application does not move any data.
+
 ## 1.3.1 — 2026-10-09
 
 Windows x64, macOS Apple silicon and Linux x86-64 packages carry the same application features; macOS and Linux remain experimental.
@@ -107,7 +178,7 @@ Testing prerelease preceding stable 1.3.1; macOS and Linux packages were experim
 - Local phase-1 continuation (Windows): the document camera keeps its fit mode (`fit: width | page | none`) across remounts, search hits and restarts instead of freezing a manual zoom (W-win-viewers-01, W-fin-crossprobe-02); the PDF row status follows the pdf.js session, so a rejected PDF shows an error instead of a Ready chip (I06); a rejected FZ/XZZ key is forgotten (W-win-import-02); native writes retry a rename blocked by another handle and reads no longer collide with writes of the same file (W-win-lifecycle-01), the window close and `app.quit()` ask the renderer to write its pending state first (W-fin-lifecycle-02, W-fin-documents-01), NTFS alternate-data-stream paths are refused (W-fin-lifecycle-01); the workshop layout stays usable at 960×640 (side panels start collapsed on the document views below 1120 px, the document strip wraps and keeps Attach visible; W-win-viewers-02/03); schematic candidate banners are an overlay that no longer shifts the sheet under the pointer (W-fin-crossprobe-01); the board canvas repaints after a lost 2D context (GPU process restart; W-fix2-portable-02), component hit-testing uses the real outline (B17), pad picking prefers the pad under the pointer (B23), the measurement dash is clipped to the viewport (P03) and offscreen pad paths are no longer rebuilt on zoom (P04). Docs: portable temp footprint and local packaging prerequisites.
 - Portable Windows wrapper (pnpm patch of electron-builder's `portable.nsi`, `patches/app-builder-lib@26.15.3.patch`): two launches started within a few milliseconds of each other no longer share one NSIS plug-in folder (measured on real Windows: 8 of 40 such starts lost one launch before the patch, independent of the extraction-folder setting); the wrapper now serializes that initialization through `%TEMP%\trace-boardviewer-portable-init.lock` (a 0-byte file that stays in `%TEMP%`) and retries the removal of its extraction folder (40 retries of 250 ms plus the removal attempts themselves: measured about 10 s after the app's processes ended with a file still held, and 20.3 s in total when the lock itself is held) while a child process of the app still holds a file (measured: 3 of 20 same-profile second launches left `%TEMP%\ns<letter><hex>.tmp\app` behind before the patch). The app itself (ASAR) is unchanged.
 - Portable Windows build: every launch now extracts into its own private temporary folder (`build.portable.unpackDirName: true`), so closing or starting one instance no longer deletes another running instance's runtime and overlapping launches no longer lose each other (W-win-build-01, W-fin-build-01). Guarded by a static builder-semantics test, a real-Windows two-instance check that runs against the exact uploaded EXE, and a control build of the old shared-folder layout that the check must detect. A launch that is killed or crashes can leave its folder in `%TEMP%`.
-- macOS (experimental): an unsigned Apple-silicon zip (ad-hoc signed, not notarized; `config/electron-builder.mac.yml`, `scripts/mac-smoke.cjs`, static checks, `docs/MAC_VALIDATION.md`) is built, smoke-tested and scanned for private names and paths by the `mac` job of the release workflow on a GitHub macOS runner, and attached to the draft release next to the Windows EXE with its SHA256 file. A downloaded copy needs the quarantine flag removed once (`xattr -dr com.apple.quarantine "/Applications/TRACE Boardviewer.app"`). Validated natively on an Apple M3 (`docs/MAC_LOCAL_REPORT_arm64_2026-10-06.md`); Intel Macs and a universal build are not packaged.
+- macOS (experimental): an unsigned Apple-silicon zip (ad-hoc signed, not notarized; `config/electron-builder.mac.yml`, `scripts/mac-smoke.cjs`, static checks, `docs/MAC_VALIDATION.md`) is built, smoke-tested and scanned for private names and paths by the `mac` job of the release workflow on a GitHub macOS runner, and attached to the draft release next to the Windows EXE with its SHA256 file. Gatekeeper may block a downloaded copy; this release gives no way around that block, and the quarantine flag must not be removed to open it. One development check ran on an Apple M3 (`docs/MAC_LOCAL_REPORT_arm64_2026-10-06.md`): development evidence, not an acceptance test of a downloaded, signed build. Intel Macs and a universal build are not packaged.
 - Release workflow: a version with a prerelease suffix (for example `1.3.0-rc.1`) is created as a GitHub prerelease, so the in-app update check, which only reads the latest stable release, never sees a suffixed tag.
 - Desktop shell: a renderer that crashed or was killed is reported in a dialog and the page is loaded again (the start-up state is reset, an external open that arrives meanwhile waits for the new renderer); a renderer that stops responding offers Wait or Close window; a window whose page never paints is shown after 4 s instead of staying invisible while it holds the single-instance lock, and a second launch shows a not-yet-visible window before focusing it; `--board <path>` with a space works when handed to a running instance (Chromium moves the switch in front of the path); a start-up file that cannot be opened no longer blocks the recent boards: the renderer gets the error and the last board follows; a `config.json` that is damaged or was written by another version is kept as `config.json.bak-<timestamp>` before the first write; the session policy (permissions, no downloads) is installed once instead of per window (H1-01, H1-02, H1-03, H1-05, H1-06, H1-08). The two dialogs have texts in all eight languages.
 - Packaging: the Electron fuses are flipped in the Windows and macOS binaries (`build.electronFuses` in `package.json`, `config/electron-builder.mac.yml`): no `ELECTRON_RUN_AS_NODE`, no `NODE_OPTIONS`, application code only from `app.asar` with the embedded integrity check, cookie encryption; `file://` keeps its privileges (the UI and pdf.js load over it) and `--inspect` stays available because every Playwright launch of a packaged build (`pnpm qa:packaged`, `scripts/mac-smoke.cjs`) attaches through it (H1-07).

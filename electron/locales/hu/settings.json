@@ -13,5 +13,10 @@
   "settings.labelsHint": "A nagyításhoz igazodó referenciajelölések",
   "settings.connections": "Kapcsolati segédvonalak",
   "settings.connectionsHint": "Egyenes vonalak a kiválasztott pin és a net padjai között",
-  "settings.autosave": "A beállítások automatikusan mentődnek."
+  "settings.autosave": "A beállítások automatikusan mentődnek.",
+  "settings.noSandbox.title": "Linux: indítás sandbox nélkül",
+  "settings.noSandbox.hint": "Ha a „Ne kérdezd újra” választást kérted, a TRACE nem kérdez rá újra. A visszavonás a következő indításkor lép életbe.",
+  "settings.noSandbox.saved": "Mentve: a TRACE nem kérdez rá újra",
+  "settings.noSandbox.unsaved": "Nincs mentve: a kérdés minden indításkor megjelenik, ha sandbox nélkül indul",
+  "settings.noSandbox.revoke": "Kérdezzen újra a következő indításkor"
 }

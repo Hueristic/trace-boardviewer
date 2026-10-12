@@ -44,6 +44,7 @@ export interface Hit {
    * The LITERAL text that matched, exactly as written in the PDF item (before normalization: "r1" for a board "R1"), capped at
    * MAX_HIT_TOKEN_LENGTH characters. Candidate hits: the matched token (for "D+/D-" parts: the part). Search hits: the matched
    * substring; absent when upper-casing changed the item's length (e.g. "ß" -> "SS"), because the offset is then not reliable.
+   * A recognized reference designator is matched upper-cased, but its token is the OCR reading ("u10" for "U10", see TextItem.ocrRaw).
    */
   token?: string;
   /** Set when the matched item is recognized text (OCR): its confidence 0-100 travels with the hit. */
@@ -94,6 +95,8 @@ export const MAX_CANDIDATE_WORK = 20_000_000;
 export const MAX_HIT_TOKEN_LENGTH = 128;
 const CONTEXT_LENGTH = 160;
 const capToken = (value: string) => (value.length > MAX_HIT_TOKEN_LENGTH ? value.slice(0, MAX_HIT_TOKEN_LENGTH) : value);
+/** The literal text at `start` as the PDF item (or the OCR, for a normalized designator) read it. `ocrRaw` has the same length as `str`. */
+const literalOf = (item: TextItem, start: number, length: number): string => (item.ocrRaw !== undefined && item.ocrRaw.length === item.str.length ? item.ocrRaw : item.str).slice(start, start + length);
 /** Work units between cooperative checkpoints (abort check, chance to yield to the event loop): at least every 4096 items, even when no item contains a token. */
 const CHECKPOINT_WORK = 4096;
 
@@ -213,7 +216,7 @@ function* findSteps(index: TextIndex, query: string, options: FindOptions, signa
       if (options.wholeWord && (!isBoundary(haystack, position - 1) || !isBoundary(haystack, position + needle.length))) continue;
       hits.push({
         page: item.page, itemIndex: i, ...partialBox(item, position, needle.length, haystack.length), context: context(item.str, position, needle.length),
-        ...(haystack.length === item.str.length ? { token: capToken(item.str.slice(position, position + needle.length)) } : {}), ...originOf(item),
+        ...(haystack.length === item.str.length ? { token: capToken(literalOf(item, position, needle.length)) } : {}), ...originOf(item),
       });
       if (hits.length >= maxHits) return hits;
       from = position + needle.length;
@@ -318,7 +321,7 @@ function* refScanSteps(index: TextIndex, refs: ReadonlySet<string>, nets: Readon
         for (const group of matches) {
           if (group.hits.length >= maxPerReference) { capped = true; continue; }
           if (total >= maxTotal) { stop = 'total-hits'; break scan; } // checked BEFORE building the hit: nothing past the budget is allocated
-          group.hits.push({ page: item.page, itemIndex: i, ...partialBox(item, start, token.length, item.str.length), context: context(item.str, start, token.length), token: capToken(token), ...originOf(item) });
+          group.hits.push({ page: item.page, itemIndex: i, ...partialBox(item, start, token.length, item.str.length), context: context(item.str, start, token.length), token: capToken(literalOf(item, start, token.length)), ...originOf(item) });
           total++;
         }
       }

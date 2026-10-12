@@ -38,20 +38,46 @@ test('status is local; only an explicit check uses egress, stores a signed recei
   const store = { read: async () => value, write: async (_name, next) => { value = next; } };
   const service = createSupportService({ store, egress: () => layer, now: () => now, config: { enabled: true, endpoint: 'https://' + FEATURE.hosts[0], publicKey } });
   assert.equal((await service.status()).status, 'inactive'); assert.equal(requests, 0);
-  assert.equal((await service.check()).status, 'verified'); assert.equal(requests, 1);
-  assert.equal((await service.check()).status, 'verified'); assert.equal(requests, 1);
+  assert.equal((await service.check({ userAction: true })).status, 'verified'); assert.equal(requests, 1);
+  assert.equal((await service.check({ userAction: true })).status, 'verified'); assert.equal(requests, 1);
   const restarted = createSupportService({ store, egress: () => { throw new Error('offline'); }, now: () => now, config: { enabled: true, publicKey } });
   assert.equal((await restarted.status()).status, 'verified');
   assert.ok(!JSON.stringify(layer.activity()).includes(claim));
   assert.deepEqual(Object.keys(value).sort(), ['claim', 'receipt']);
 });
+test('the receipt request needs the explicit Verify action or an enabled opt-in: with the opt-in off, status, preparation and any call without the flag make no request', async () => {
+  let value = { claim }, fetches = 0;
+  const settings = {};
+  // The fetch is the network observer: a request is counted only when it leaves egress.
+  const layer = createEgress({ version: '1.3.2', isEnabled: setting => settings[setting] === true, fetchImpl: async () => { fetches++; return new Response(JSON.stringify(receipt()), { status: 200 }); } });
+  layer.register(FEATURE);
+  const store = { read: async () => value, write: async (_name, next) => { value = next; } };
+  const config = { enabled: true, endpoint: 'https://' + FEATURE.hosts[0], publicKey };
+  const service = createSupportService({ store, egress: () => layer, now: () => now, config });
+  assert.equal((await service.status()).status, 'inactive');
+  assert.equal((await service.prepare()).code, claim);
+  assert.equal((await service.check()).status, 'unavailable');
+  assert.equal((await service.check(null)).status, 'unavailable');
+  assert.equal((await service.check({ userAction: false })).status, 'unavailable');
+  assert.equal((await service.check({ userAction: 'true' })).status, 'unavailable', 'only the boolean true is an explicit action');
+  assert.equal(fetches, 0, 'no request without the explicit action or the opt-in');
+  assert.equal((await service.check({ userAction: true })).status, 'verified');
+  assert.equal(fetches, 1);
+  // With the opt-in on, a call that did not come from the button may reach the network (a fresh service: the first one is in its cooldown after a receipt).
+  settings.supportVerification = true;
+  value = { claim };
+  const optedIn = createSupportService({ store, egress: () => layer, now: () => now, config });
+  assert.equal((await optedIn.check()).status, 'verified');
+  assert.equal(fetches, 2);
+});
+
 test('network failure, pending payment, forged receipt and failed local save never grant suppression', async () => {
   for (const answer of [{ ok: false }, { ok: true, status: 404 }, { ok: true, status: 200, body: Buffer.from('{}') }]) {
     const service = createSupportService({ store: { read: async () => ({ claim }) }, egress: () => ({ request: async () => answer }), now: () => now, config: { enabled: true, endpoint: 'https://example.invalid', publicKey } });
-    assert.notEqual((await service.check()).status, 'verified');
+    assert.notEqual((await service.check({ userAction: true })).status, 'verified');
   }
   const service = createSupportService({ store: { read: async () => ({ claim }), write: async () => { throw new Error('disk'); } }, egress: () => ({ request: async () => ({ ok: true, status: 200, body: Buffer.from(JSON.stringify(receipt())) }) }), now: () => now, config: { enabled: true, endpoint: 'https://example.invalid', publicKey } });
-  assert.equal((await service.check()).status, 'unavailable');
+  assert.equal((await service.check({ userAction: true })).status, 'unavailable');
 });
 test('corrupt storage stays byte-for-byte intact and preparation, status and check report unavailable without network access', async t => {
   const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'trace-support-corrupt-'));
@@ -63,7 +89,7 @@ test('corrupt storage stays byte-for-byte intact and preparation, status and che
   const service = createSupportService({ store: { ...store, update: (...args) => { updates++; return store.update(...args); } }, egress: () => ({ request: async () => { requests++; return { ok: true, status: 404 }; } }), now: () => now, config: { enabled: true, endpoint: 'https://' + FEATURE.hosts[0], publicKey } });
   assert.deepEqual(await service.prepare(), { status: 'unavailable', expiresAt: null, available: true, code: '' });
   assert.equal((await service.status()).status, 'unavailable');
-  assert.equal((await service.check()).status, 'unavailable');
+  assert.equal((await service.check({ userAction: true })).status, 'unavailable');
   assert.equal(updates, 0);
   assert.equal(requests, 0);
   assert.deepEqual(await fsp.readFile(filename), original);
@@ -80,7 +106,7 @@ test('unreadable storage returns a bounded unavailable result and never attempts
   const service = createSupportService({ store, egress: () => ({ request: async () => { requests++; return { ok: true, status: 404 }; } }), now: () => now, config: { enabled: true, endpoint: 'https://' + FEATURE.hosts[0], publicKey } });
   assert.deepEqual(await service.prepare(), { status: 'unavailable', expiresAt: null, available: true, code: '' });
   assert.equal((await service.status()).status, 'unavailable');
-  assert.equal((await service.check()).status, 'unavailable');
+  assert.equal((await service.check({ userAction: true })).status, 'unavailable');
   assert.equal(writes, 0);
   assert.equal(requests, 0);
 });
@@ -106,8 +132,8 @@ test('a receipt save failure can be explicitly retried and the signed receipt su
   const flakyStore = { ...store, write: async (...args) => { if (failSave) { failSave = false; throw new Error('disk unavailable'); } return originalWrite(...args); } };
   const egress = () => ({ request: async () => { requests++; return { ok: true, status: 200, body: Buffer.from(JSON.stringify(signed)) }; } });
   const service = createSupportService({ store: flakyStore, egress, now: () => now, config: { enabled: true, endpoint: 'https://' + FEATURE.hosts[0], publicKey } });
-  assert.equal((await service.check()).status, 'unavailable');
-  assert.equal((await service.check()).status, 'verified');
+  assert.equal((await service.check({ userAction: true })).status, 'unavailable');
+  assert.equal((await service.check({ userAction: true })).status, 'verified');
   assert.equal(requests, 2);
   const restarted = createSupportService({ store, egress: () => { throw new Error('the saved receipt is local'); }, now: () => now, config: { enabled: true, publicKey } });
   assert.deepEqual(await restarted.status(), { status: 'verified', expiresAt: yearAfter(now), available: true });

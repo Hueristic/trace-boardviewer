@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const {
   createJsonStore, createByteBudget, validateName, readBounded, DEFAULT_MAX_BYTES, RENAME_RETRY_DELAYS_MS, renameWithRetry, hasStreamSeparator, localAbsolutePath,
 } = require('../electron/store.cjs');
@@ -150,7 +151,7 @@ test('electron/store.cjs: queued atomic JSON store with a shutdown gate', async 
       assert.deepEqual(await tmpFiles(directory), []);
       // A failure before rename (the temporary file could not be created) is reported the same way.
       const failingWrite = Object.create(mockFs);
-      failingWrite.writeFile = async () => { throw Object.assign(new Error('read-only'), { code: 'EROFS' }); };
+      failingWrite.open = async () => { throw Object.assign(new Error('read-only'), { code: 'EROFS' }); };
       const readOnly = createJsonStore({ directory, t, fs: failingWrite });
       await assert.rejects(readOnly.write('broken.json', { n: 3 }), { code: 'STORE_WRITE_FAILED', message: 'native.error.dataSaveFailed' });
       await readOnly.beginShutdown();
@@ -865,6 +866,160 @@ test('W-fin-lifecycle-01: a Windows path that names an NTFS alternate data strea
     assert.equal(localAbsolutePath('C:\\Boards\\board.cad', t), 'C:\\Boards\\board.cad');
     assert.doesNotThrow(() => localAbsolutePath('C:\\Users\\x\\AppData\\profile', t, true), 'the trusted profile directory is not subject to the stream rule');
   }
+});
+
+test('MLX-03-05 / W-store-ntfs-mode / MLX-03-12: the temporary file is synced before the rename, the directory after it, files are 0600 on POSIX, and a start sweeps only the own temporaries', async (t0) => {
+  const { randomUUID } = require('node:crypto');
+  const root = await makeTempDir('trace-store-durable-test-');
+  t0.after(async () => {
+    const absolute = path.resolve(root);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  let counter = 0;
+  const profile = async () => { const directory = path.join(root, `profile-${++counter}`); await fs.mkdir(directory); return directory; };
+  // Records every step of the file operations the store performs on its temporary files and on the directory of the target.
+  function recordingFs(directory, events, { syncError = null, directorySyncError = null } = {}) {
+    const mockFs = Object.create(fs);
+    mockFs.open = async (file, flag, mode) => {
+      const handle = await fs.open(file, flag, mode);
+      if (flag === 'wx') {
+        const name = path.basename(file);
+        return {
+          writeFile: async (body, encoding) => { events.push(['write', name]); return handle.writeFile(body, encoding); },
+          sync: async () => { events.push(['sync', name]); if (syncError) throw syncError; return handle.sync(); },
+          close: async () => { events.push(['close', name]); return handle.close(); },
+        };
+      }
+      if (file === directory) {
+        return {
+          sync: async () => { events.push(['directory-sync']); if (directorySyncError) throw directorySyncError; return handle.sync(); },
+          close: async () => handle.close(),
+        };
+      }
+      return handle;
+    };
+    mockFs.rename = async (from, to) => { events.push(['rename', path.basename(to)]); return fs.rename(from, to); };
+    return mockFs;
+  }
+
+  await t0.test('the temporary file is written and synced before the rename; the directory is synced after it on POSIX only', async () => {
+    const directory = await profile();
+    const events = [];
+    const store = createJsonStore({ directory, t, fs: recordingFs(directory, events) });
+    await store.write('config.json', { n: 1 });
+    await store.beginShutdown();
+    assert.deepEqual(await readJson(path.join(directory, 'config.json')), { n: 1 });
+    const order = events.map(([kind]) => kind);
+    const expected = process.platform === 'win32'
+      ? ['write', 'sync', 'close', 'rename']
+      : ['write', 'sync', 'close', 'rename', 'directory-sync'];
+    assert.deepEqual(order, expected);
+    const [, temporary] = events[0];
+    assert.ok(temporary.startsWith('config.json.') && temporary.endsWith('.tmp'));
+    assert.equal(events[1][1], temporary, 'the sync is for the temporary file that is then renamed');
+    assert.equal(events[3][1], 'config.json', 'the renamed file is the target');
+    assert.deepEqual(await tmpFiles(directory), []);
+  });
+
+  await t0.test('a failed sync is a failed write: the old file stays, nothing is renamed, the temporary file is removed', async () => {
+    const directory = await profile();
+    const target = path.join(directory, 'config.json');
+    await fs.writeFile(target, JSON.stringify({ n: 0 }));
+    const events = [];
+    const store = createJsonStore({ directory, t, fs: recordingFs(directory, events, { syncError: Object.assign(new Error('disk I/O error'), { code: 'EIO' }) }) });
+    await assert.rejects(store.write('config.json', { n: 1 }), (error) => error.code === 'STORE_WRITE_FAILED' && error.message === 'native.error.dataSaveFailed' && error.cause.code === 'EIO');
+    assert.equal(events.some(([kind]) => kind === 'rename'), false, 'a rename of unsynced bytes never happens');
+    assert.deepEqual(await readJson(target), { n: 0 });
+    assert.deepEqual(await tmpFiles(directory), []);
+    await store.beginShutdown();
+  });
+
+  await t0.test('a directory sync that fails after the rename is not reported: the new content is in place (POSIX; Windows does not sync directories)', async () => {
+    const directory = await profile();
+    const events = [];
+    const failing = recordingFs(directory, events, { directorySyncError: Object.assign(new Error('not supported'), { code: 'EINVAL' }) });
+    const store = createJsonStore({ directory, t, fs: failing });
+    await assert.doesNotReject(store.write('config.json', { n: 7 }));
+    assert.deepEqual(await readJson(path.join(directory, 'config.json')), { n: 7 });
+    assert.equal(events.some(([kind]) => kind === 'directory-sync'), process.platform !== 'win32');
+    await store.beginShutdown();
+  });
+
+  await t0.test('store files are created with mode 0600 on POSIX (Windows ignores the mode; its files take the profile ACL)', async () => {
+    if (process.platform === 'win32') return;
+    const directory = await profile();
+    const store = createJsonStore({ directory, t, fs });
+    await store.write('config.json', { n: 1 });
+    await store.write(`notes/${'b'.repeat(64)}.json`, { n: 2 });
+    await store.beginShutdown();
+    for (const file of [path.join(directory, 'config.json'), path.join(directory, 'notes', `${'b'.repeat(64)}.json`)]) {
+      assert.equal((await fs.stat(file)).mode & 0o777, 0o600, file);
+    }
+  });
+
+  await t0.test('a start removes the temporary files of killed writes in the profile directory and its immediate sub-directories, and keeps every other file', async () => {
+    const directory = await profile();
+    for (const folder of ['notes', 'workspaces', 'deeper', path.join('deeper', 'inner')]) await fs.mkdir(path.join(directory, folder), { recursive: true });
+    const temporaryName = (base, pid) => `${base}.${pid}.${randomUUID()}.tmp`;
+    // A PID whose process has exited: the writer of these temporaries is gone (processGone answers ESRCH for it).
+    const gonePid = spawnSync(process.execPath, ['-e', '']).pid;
+    const staleLive = path.join(directory, temporaryName('stale.json', process.ppid)); // a day old: stale even though its process runs (PID reuse)
+    const removed = [
+      path.join(directory, temporaryName('config.json', gonePid)),
+      path.join(directory, 'notes', temporaryName(`${'a'.repeat(64)}.json`, gonePid)),
+      path.join(directory, 'workspaces', temporaryName('x.json', gonePid)),
+      path.join(directory, 'deeper', temporaryName('x.json', gonePid)), // an immediate sub-directory of the profile
+      staleLive,
+    ];
+    const kept = [
+      path.join(directory, temporaryName('config.json', process.pid)), // a temporary of this process: another store of this process may be writing it
+      path.join(directory, temporaryName('config.json', process.ppid)), // a temporary of a process that still runs (another instance): never removed
+      path.join(directory, `config.json.${gonePid}.not-a-uuid.tmp`), // not the store's temporary name
+      path.join(directory, 'notes.tmp'),
+      path.join(directory, `config.json.${gonePid}.${randomUUID()}.tmp.bak`),
+      path.join(directory, 'deeper', 'inner', temporaryName('x.json', gonePid)), // two levels down: not searched
+    ];
+    for (const file of removed.concat(kept)) await fs.writeFile(file, '{"left": true}');
+    const longAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    await fs.utimes(staleLive, longAgo, longAgo);
+    const folderTemporary = path.join(directory, temporaryName('folder.json', gonePid));
+    await fs.mkdir(folderTemporary); // a directory with the temporary name is not a file
+    const store = createJsonStore({ directory, t, fs });
+    await store.flush();
+    for (const file of removed) await assert.rejects(fs.stat(file), { code: 'ENOENT' }, file);
+    for (const file of kept.concat(folderTemporary)) await assert.doesNotReject(fs.stat(file), file);
+    await store.write('config.json', { n: 3 });
+    assert.deepEqual(await readJson(path.join(directory, 'config.json')), { n: 3 }, 'writes work after the sweep');
+    await store.beginShutdown();
+  });
+});
+
+test('quit log support: unfinished() names the writes in progress and counts the operations not settled, and is empty once they settle', async (t) => {
+  const root = await makeTempDir('trace-store-unfinished-test-');
+  t.after(async () => {
+    const absolute = path.resolve(root);
+    assert.ok(await isInsideTemp(absolute));
+    await fs.rm(absolute, { recursive: true, force: true });
+  });
+  let release;
+  const held = new Promise((resolve) => { release = resolve; });
+  const gated = new Proxy(fs, { get(source, property) {
+    if (property === 'rename') return async (from, to) => { if (String(to).endsWith('held.json')) await held; return source.rename(from, to); };
+    return source[property];
+  } });
+  const store = createJsonStore({ directory: root, t, fs: gated });
+  const first = store.write('held.json', { n: 1 });
+  const second = store.write('queued.json', { n: 2 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const during = store.unfinished();
+  assert.equal(during.queued, 2, 'both operations are not settled');
+  assert.equal(during.writing.length, 1, 'one atomic write is in progress');
+  assert.ok(during.writing[0].endsWith('held.json'), 'and it is the held one');
+  release();
+  await Promise.all([first, second]);
+  assert.deepEqual(store.unfinished(), { queued: 0, writing: [] });
+  await store.beginShutdown();
 });
 
 // The repair store (electron/repair-store.cjs) builds on this store's helpers; its checks run with this suite.

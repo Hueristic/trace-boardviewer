@@ -108,7 +108,11 @@ function permute(high: number, low: number, table: readonly number[]): [number, 
 
 /** DES ECB over complete 8-byte records, using network byte order as in XZZPCB. */
 export function createDes(keyText: string): (data: Uint8Array, decrypt?: boolean) => Uint8Array {
-  if (!/^(?:0x)?[0-9a-f]{16}$/i.test(keyText.trim())) throw new BoardFormatError('The XZZ key must contain exactly 16 hexadecimal digits.', 'INVALID_KEY', 'XZZPCB', 'xzz');
+  if (!/^(?:0x)?[0-9a-f]{16}$/i.test(keyText.trim())) {
+    const error = new BoardFormatError('The XZZ key must contain exactly 16 hexadecimal digits.', 'INVALID_KEY', 'XZZPCB', 'xzz');
+    error.issue = { key: 'parse.error.xzzKeyFormat' };
+    throw error;
+  }
   const key = keyText.trim().replace(/^0x/i, '');
   const high = Number.parseInt(key.slice(0, 8), 16), low = Number.parseInt(key.slice(8), 16);
   const bits = PC1.map(position => position <= 32 ? high >>> (32 - position) & 1 : low >>> (64 - position) & 1);

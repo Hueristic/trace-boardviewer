@@ -131,7 +131,19 @@ async function openPage(options, dsf) {
     page = await context.newPage();
     version = `Chromium headless shell ${browser.version()}`;
     close = () => browser.close();
-  } else throw new Error('--runtime must be headless or electron.');
+  } else if (options.runtime === 'headed') {
+    // Headed Chromium on the host's own GPU: the canvas is accelerated and the frame includes the GPU raster (with --fence).
+    const browser = await chromium.launch({ headless: false, executablePath: process.env.TRACE_CHROMIUM || undefined, args: ['--force-color-profile=srgb', '--ignore-gpu-blocklist', '--enable-gpu-rasterization'] });
+    const context = await browser.newContext({ viewport: VIEWPORT, deviceScaleFactor: dsf });
+    page = await context.newPage();
+    const gl = await page.evaluate(() => {
+      const probe = document.createElement('canvas').getContext('webgl');
+      const debug = probe?.getExtension('WEBGL_debug_renderer_info');
+      return debug ? probe.getParameter(debug.UNMASKED_RENDERER_WEBGL) : 'unknown GL renderer';
+    });
+    version = `Chromium ${browser.version()} headed / ${gl}`;
+    close = () => browser.close();
+  } else throw new Error('--runtime must be headless, headed or electron.');
   const errors = [];
   page.on('pageerror', error => errors.push(`pageerror: ${error.message}`));
   page.on('console', message => { if (message.type() === 'error') errors.push(`console: ${message.text()}`); });

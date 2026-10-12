@@ -32,12 +32,19 @@ export interface TvwLayer { name: string; side: 'top' | 'bottom'; sourceOffset: 
  * the body of any other kind is never interpreted.
  */
 export interface TvwLayerHeader { index: number; name: string; type: number; sourceOffset: number; layer?: TvwLayer }
-export interface TvwLayerResult { layers: TvwLayer[]; skippedLayers: number; headers: TvwLayerHeader[] }
+export interface TvwLayerResult {
+  layers: TvwLayer[]; skippedLayers: number; headers: TvwLayerHeader[];
+  /** The skipped layers whose failure was an out-of-range coordinate or dimension; the others are structural. Present only when nonzero. */
+  rangeSkipped?: number;
+}
 /** The header type word: 1 is a TOP layer and 2 a BOTTOM layer; every other value is a kind that is counted but never read. */
 export const TVW_LAYER_TOP = 1, TVW_LAYER_BOTTOM = 2;
 const MAX_HEADERS = 1024, MAX_OTHER_TYPE = 255;
 
 const invalid = (): never => { throw new BoardFormatError('TVW: incomplete or unsupported layer structure.', 'INVALID_FORMAT', 'tvw'); };
+/** A coordinate or dimension outside the supported range. Such a layer is dropped and counted apart (TvwLayerResult.rangeSkipped). */
+class OutOfRange extends BoardFormatError {}
+const outOfRange = (): never => { throw new OutOfRange('TVW: a physical coordinate or dimension is outside the supported range.', 'INVALID_FORMAT', 'tvw'); };
 const limit = (message: string): never => { throw new BoardFormatError(`TVW: ${message}`, 'LIMIT_EXCEEDED', 'tvw'); };
 class Cursor {
   readonly view: DataView;
@@ -46,8 +53,8 @@ class Cursor {
   u8() { this.need(1); return this.data[this.at++]; }
   u32() { this.need(4); const result = this.view.getUint32(this.at, true); this.at += 4; return result; }
   i32() { this.need(4); const result = this.view.getInt32(this.at, true); this.at += 4; return result; }
-  coordinate() { const value = this.i32(); if (Math.abs(value) > COORD) invalid(); return value; }
-  dimension() { const value = this.coordinate(); if (value < 0) invalid(); return value; }
+  coordinate() { const value = this.i32(); if (Math.abs(value) > COORD) outOfRange(); return value; }
+  dimension() { const value = this.coordinate(); if (value < 0) outOfRange(); return value; }
   point(): Point { const y = this.coordinate(), x = this.coordinate(); return { x, y }; }
   text() {
     const length = this.u8(); this.need(length);
@@ -187,7 +194,7 @@ export function readTvwLayers(data: Uint8Array, netCount: number): TvwLayerResul
   if (data.length > MAX_IMPORT_BYTES) limit('file exceeds the 64 MiB import limit.');
   if (!Number.isInteger(netCount) || netCount < 0 || netCount > 100_000) invalid();
   const layers: TvwLayer[] = [], headers: TvwLayerHeader[] = [], budget: Budget = { definitions: 0, pads: 0, vertices: 0, lines: 0 };
-  let skippedLayers = 0;
+  let skippedLayers = 0, rangeSkipped = 0;
   for (let p = 0; p + 35 <= data.length; p++) {
     if (data[p] || data[p + 1] || data[p + 2] || data[p + 3] || ![1, 3].includes(data[p + 4]) || data[p + 5] || data[p + 6] || data[p + 7]
       || data[p + 8] !== 2 || data[p + 9] || data[p + 10] || data[p + 11] || data[p + 12] !== 1 || data[p + 13] || data[p + 14] || data[p + 15]) continue;
@@ -233,8 +240,9 @@ export function readTvwLayers(data: Uint8Array, netCount: number): TvwLayerResul
       p = cursor.at - 1;
     } catch (error) {
       if (error instanceof BoardFormatError && error.code === 'LIMIT_EXCEEDED') throw error;
+      if (error instanceof OutOfRange) rangeSkipped++;
       skippedLayers++;
     }
   }
-  return { layers, skippedLayers, headers };
+  return { layers, skippedLayers, headers, ...(rangeSkipped ? { rangeSkipped } : {}) };
 }

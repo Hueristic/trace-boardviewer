@@ -11,6 +11,7 @@ import { createMockWorkspace, useMockWorkspace } from '../src/app/mock-api';
 import type { MockWorkspace } from '../src/app/mock-api';
 import Shell from '../src/components/workspace/Shell';
 import { configurePdfResources } from '../src/lib/pdf/worker';
+import { catalogs } from '../src/lib/i18n';
 
 /**
  * Dev harness of the whole workspace shell on the synthetic mock core (src/app/mock-api.ts).
@@ -18,6 +19,10 @@ import { configurePdfResources } from '../src/lib/pdf/worker';
  * Test hooks: window.__mock (recorded action calls, state, patch helpers) and window.__wspRenders (commit counters per panel).
  */
 const params = new URLSearchParams(location.search);
+// Test-only, in this harness page alone: one translated key is removed from one language's catalog in memory, so the English fallback
+// (src/lib/i18n.ts lookup chain) can be observed. Nothing is written, and the product catalogs on disk are untouched.
+const dropLang = params.get('dropLang'), dropKey = params.get('dropKey');
+if (dropLang && dropKey && dropLang in catalogs) delete (catalogs[dropLang as keyof typeof catalogs] as Record<string, unknown>)[dropKey];
 const origin = location.origin;
 configurePdfResources({ workerSrc: new URL('pdfjs-dist/legacy/build/pdf.worker.min.mjs', import.meta.url).href, cMapUrl: `${origin}/pdfjs/cmaps/`, standardFontDataUrl: `${origin}/pdfjs/standard_fonts/`, wasmUrl: `${origin}/pdfjs/wasm/`, iccUrl: `${origin}/pdfjs/iccs/` });
 

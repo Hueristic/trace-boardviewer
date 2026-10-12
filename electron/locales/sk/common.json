@@ -5,6 +5,7 @@
   "common.delete": "Odstrániť",
   "common.note": "Poznámka",
   "common.skip": "Preskočiť",
+  "common.cancel": "Zrušiť",
 
   "unit.components": { "one": "{count} súčiastka", "few": "{count} súčiastky", "other": "{count} súčiastok" },
   "unit.pins": { "one": "{count} pin", "few": "{count} piny", "other": "{count} pinov" },

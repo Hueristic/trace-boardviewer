@@ -12,10 +12,18 @@ export default defineBoardAdapter({
   family: 'Boardview',
   detection: 'structure',
   sniff(input) {
-    // An AppleDouble stub ("._name") is no boardview; claiming it lets the reader refuse it with a clear message.
-    if (isAppleDouble(input.head) && /(?:\.tvw|(?:^|[\\/])\._[^\\/]*)$/i.test(input.name)) return sniffed(60, 'AppleDouble companion file, not a boardview');
+    // An AppleDouble companion ("._name", or a copy whose name lost its "._") is no boardview, and its header decides on every
+    // platform. The name only raises the confidence: the diagnostic report hands its readers a neutral name (electron/diagnostics.cjs).
+    // A bare header stays below the name claim of the other readers (FZ claims a .fz name at 40), so it never displaces them, and below
+    // LIKELY, so an archive member that is only this stub never outranks a real board in the archive.
+    if (isAppleDouble(input.head)) return sniffed(/(?:\.tvw|(?:^|[\\/])\._[^\\/]*)$/i.test(input.name) ? 60 : 35, 'AppleDouble companion file, not a boardview');
     if (hasTvwNetTable(input.head)) return sniffed(78, 'duplicate TVW net count and complete ProbeDB table terminator');
     return /\.tvw$/i.test(input.name) ? sniffed(40, '.tvw name; structured tables may lie beyond the sniff window') : NO_MATCH;
+  },
+  // Asked only after parse returned null: the whole file has no complete net table (the same test parse applies to the full input).
+  declineReason(input) {
+    if (hasTvwNetTable(input.data)) return undefined;
+    return { message: 'TVW boardview: no complete net table was found, so the file is not opened.', issue: { key: 'parse.error.tvwNoNetTable' } };
   },
   parse: parseTvw,
 });

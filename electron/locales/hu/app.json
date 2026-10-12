@@ -8,14 +8,19 @@
   "header.settings": "Beállítások",
   "layout.workshop": "Műhely",
   "layout.focus": "Fókusz",
-
   "window.minimize": "Ablak kicsinyítése",
   "window.restore": "Ablak visszaállítása",
   "window.maximize": "Ablak maximalizálása",
   "window.close": "Alkalmazás bezárása",
-
   "status.fileInfo": "Fájlinformáció",
   "status.shortcuts": "Billentyűparancsok",
+  "status.saved": "Mentve",
+  "status.saving": "Mentés…",
+  "status.unsaved": "Nem mentett módosítások",
+  "status.failed": "Mentés sikertelen: {message}",
+  "status.notSaved": "Nincs mentve (böngészőmód)",
+  "status.region": "Állapotsor",
+  "status.zoom": "Nagyítás",
 
   "welcome.eyebrow": "A NYÁK MÖGÖTTI ÖSSZEFÜGGÉSEK",
   "welcome.title1": "Lásd át.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "A megnyitott panelek itt jelennek meg.",
   "welcome.footerLocal": "Helyi munkatér · offline használat",
   "welcome.shortcuts": "Billentyűparancsok",
-
   "toast.close": "Értesítés bezárása",
   "toast.settingsSaveFailed": "A beállítások mentése nem sikerült.",
   "toast.settingsReadFailed": "A beállítások nem olvashatók.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "Az alkalmazás indítása nem sikerült.",
   "toast.importCancelled": "A fájl megnyitása megszakítva.",
   "toast.importStopped": "A fájl megnyitása leállt, mert {seconds} másodpercig nem haladt. Lehet, hogy a fájl sérült vagy szokatlanul összetett.",
-
+  "toast.companionOnlineOnly": "A társfájl csak online érhető el. Nyisd meg, vagy csatold kézzel.",
+  "toast.companionOnlineOnlyNames": "Érintett társfájlok: {names}.",
+  "toast.noSandboxRevokeFailed": "A beállítást nem sikerült megváltoztatni.",
   "loading.processing": "A panel feldolgozása…",
   "loading.reading": "A fájl beolvasása…",
   "loading.hint": "Néhány pillanat, és összeáll a kép.",
@@ -68,5 +74,13 @@
   "loading.stalled": "Ez a fájl a szokásosnál jóval tovább tart. Várhatsz még, vagy megszakíthatod.",
   "loading.cancel": "Megszakítás",
   "drop.title": "Engedd el a panelt",
-  "fileInput.aria": "Boardview fájl"
+  "fileInput.aria": "Boardview fájl",
+  "toast.componentMissing": "Az alkatrész nem található ezen a boardon.",
+  "toast.documentsAfterBoard": "A táblával együtt húzott dokumentumokat a tábla megnyitása után csatold újra.",
+  "toast.attachedOne": "Csatolva: „{name}”.",
+  "toast.attachedMany": "{count} dokumentum csatolva.",
+
+  "config.locked": "A beállítások nem olvashatók, mert egy másik program zárolja a fájlt; nem írjuk felül.",
+  "config.readOnly": "A beállítások fájlja csak olvasható: a változtatások csak erre a munkamenetre érvényesek, a fájlt nem írjuk felül.",
+  "config.unreadable": "A beállítások fájlja sérült vagy más verzió írta: a program alapértelmezésekkel indult, a régi fájlt az első mentés előtt megtartjuk."
 }

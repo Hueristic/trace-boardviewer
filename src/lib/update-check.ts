@@ -15,7 +15,10 @@ export type { UpdateCheckResult };
 export const UPDATE_KEYS = {
   setting: 'update.setting', settingHint: 'update.settingHint', checkNow: 'update.checkNow', checking: 'update.checking', current: 'update.current',
   available: 'update.available', failed: 'update.failed', download: 'update.download', dismiss: 'update.dismiss',
+  askText: 'update.askText', askYes: 'update.askYes', askNo: 'update.askNo', askSkip: 'update.askSkip',
 } as const satisfies Record<string, MessageKey>;
+/** The first-start question: yes or no turns the check on or off; skip leaves it off. Each answer also marks the question as asked. */
+export type UpdateAnswer = 'on' | 'off' | 'skip';
 /** Shown when the release page could not be opened (the Download button of the strip or of Settings). */
 export const UPDATE_OPEN_FAILED_KEY = 'update.openFailed' as const satisfies MessageKey;
 
@@ -137,13 +140,15 @@ export function claimStartupUpdateCheck(): boolean {
 }
 
 /**
- * The check at start. The launch's single claim is taken whatever the setting says, so switching the setting on later in the same launch does not start a request
- * (the "Check now" button is for that). Without the setting, without the bridge or when the check fails, nothing is shown and nothing is said.
+ * The check at start. The launch's single claim is taken whatever the setting says, so switching it on later in the same launch does not start a request
+ * (the "Check now" button is for that). Main repeats the setting gate before making the automatic request.
  */
 export async function beginStartupUpdateCheck(desktop: Partial<TraceDesktop> | undefined | null, enabled: boolean): Promise<void> {
   if (!claimStartupUpdateCheck()) return;
-  if (!enabled || !updateCheckSupported(desktop)) return;
-  const result = await createUpdateActions(desktop).check();
+  if (!enabled || !updateCheckSupported(desktop) || typeof desktop.checkForStartupUpdates !== 'function') return;
+  let result: UpdateCheckResult;
+  try { result = normalizeUpdateResult(await desktop.checkForStartupUpdates()); }
+  catch { result = { status: 'unavailable' }; }
   if (result) publish({ ...launch, result });
 }
 

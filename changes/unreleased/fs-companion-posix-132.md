@@ -1,0 +1,2 @@
+- On Mac, a schematic or board is no longer listed as one of its own companion files when the file system reports the same file under another spelling of its name.
+- A moved document whose file name contains a backslash is found again on Mac and Linux, under its real name.

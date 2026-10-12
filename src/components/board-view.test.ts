@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { boardToScreen, orientPoint, screenToBoard, viewportBounds } from '../lib/geometry';
 import type { Point2, ViewTransform } from '../lib/geometry';
-import { applyMatrix, boardMatrix, boardToCanvas, canvasToBoard, coversCanvas, fullPane, MAIN_PANE, paneAt, paneToScreen, paneViewport, screenMatrix } from './board-view';
+import { applyMatrix, bitmapSize, boardMatrix, boardToCanvas, canvasToBoard, coversCanvas, fullPane, MAIN_PANE, paneAt, paneToScreen, paneViewport, screenMatrix } from './board-view';
 import type { BoardPane } from './board-view';
 
 const views: ViewTransform[] = [];
@@ -86,5 +86,21 @@ describe('board view: pane layout', () => {
     expect(coversCanvas(fullPane(view, 'top', 800, 300), 800, 300)).toBe(true);
     expect(coversCanvas(left, 800, 300)).toBe(false);
     expect(coversCanvas(right, 800, 300)).toBe(false);
+  });
+});
+
+describe('bitmapSize: the board bitmap never has a device row or column that the background does not cover', () => {
+  it('rounds down, so a fractional pane is covered whole (U-29: the last row was blended on every redraw)', () => {
+    expect(bitmapSize(901.6, 792.6, 1.25)).toEqual({ width: 1127, height: 990 });
+  });
+
+  it('stays within the device area the background fills for every size and density', () => {
+    for (const [width, height, dpr] of [[901.6, 792.6, 1.25], [100.5, 33.3, 1.5], [640, 480, 1], [1280.4, 720.9, 2], [777.7, 555.5, 2.5]]) {
+      const size = bitmapSize(width, height, dpr);
+      expect(size.width).toBeLessThanOrEqual(width * dpr);
+      expect(size.height).toBeLessThanOrEqual(height * dpr);
+      expect(size.width).toBeGreaterThanOrEqual(1);
+      expect(size.height).toBeGreaterThanOrEqual(1);
+    }
   });
 });

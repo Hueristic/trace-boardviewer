@@ -9,6 +9,10 @@
   "update.openFailed": "The download page could not be opened.",
   "update.download": "Download",
   "update.dismiss": "Dismiss",
+  "update.askText": "Check for new TRACE releases when the app starts? The check only contacts GitHub's release page. You can change this in Settings.",
+  "update.askYes": "Yes, check at start",
+  "update.askNo": "No, keep it off",
+  "update.askSkip": "Skip",
 
   "network.title": "Network",
   "network.intro": "TRACE uses the internet only for the features listed here. Every request is recorded in the activity list below, and nothing about your boards, notes or documents is ever sent.",
@@ -46,5 +50,6 @@
   "network.bugReport": "Bug report",
   "network.bugReportHint": "A report is sent only after you choose Send in the report form.",
   "network.resultCancelled": "Cancelled",
-  "network.resultHttpStatus": "HTTP status not accepted: {status}"
+  "network.resultHttpStatus": "HTTP status not accepted: {status}",
+  "network.stateOnDemand": "Only when you press Verify"
 }

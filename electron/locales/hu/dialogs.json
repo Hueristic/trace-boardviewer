@@ -13,16 +13,31 @@
   "help.footer": "Egérgörgő: nagyítás a kurzornál. Húzás: panel mozgatása. Kattintás: alkatrész vagy pin kijelölése.",
   "help.diagnosticReport": "Formátum-diagnosztikai jelentés…",
   "help.diagnosticHint": "Egy meg nem nyíló fájlt ír le, a tartalma nélkül.",
-
+  "help.settings": "Beállítások megnyitása",
   "recents.title": "Legutóbbi panelek",
   "recents.empty": "Még nincs megnyitott fájl.",
   "recents.openOther": "Másik fájl megnyitása",
-
   "info.title": "A panel adatai",
   "info.format": "Formátum",
   "info.size": "Panelméret",
   "info.counts": "Alkatrészek / pinek / netek",
   "info.footer": "A segédvonalak hálózati kapcsolatokat mutatnak. A fájlban szereplő rézvezetősávok geometriáját nem helyettesítik.",
+  "key.skipHelp": "Ezt a lépést kihagyhatod, az appot tovább használhatod. Ez a titkosított fájl a megfelelő kulcs megadásáig nem nyílik meg.",
+  "help.shortcutTabs": "Tábla / Kapcsolási rajz / Dokumentumok fül",
+  "help.shortcutSplit": "Osztott nézet be / ki",
+  "help.shortcutResize": "Osztott panelek átméretezése (elválasztó fókuszban)",
+  "help.shortcutResults": "Keresési találatok: mozgatás / megnyitás",
+  "help.shortcutClearSearch": "Keresőmező törlése (a második lenyomás kilép)",
 
-  "key.skipHelp": "Ezt a lépést kihagyhatod, az appot tovább használhatod. Ez a titkosított fájl a megfelelő kulcs megadásáig nem nyílik meg."
+  "dialogs.keyTitleFz": "FZ / CAE titkosítási kulcs",
+  "dialogs.keyTitleXzz": "XZZ titkosítási kulcs",
+  "dialogs.keyLabelFz": "Illeszd be a gyártói kulcs 44 hexadecimális, 32 bites szavát (a 0x előtag elhagyható; a szavak között szóköz, vessző vagy új sor állhat).",
+  "dialogs.keyLabelXzz": "Írd be a kulcs 16 hexadecimális számjegyét.",
+  "dialogs.keyValid": "A kulcs formátuma érvényes. Csak erre a munkamenetre marad meg, és soha nem mentődik el.",
+  "dialogs.keyUse": "Kulcs használata",
+  "dialogs.shortcutResizeKeys": "← →  ·  Shift = nagy lépések  ·  Enter = alaphelyzet",
+  "dialogs.keyXzzHexOnly": "Csak hexadecimális számjegyek (0-9, a-f) megengedettek.",
+  "dialogs.keyXzzCount": "Pontosan 16 hexadecimális számjegyet írj be (eddig: {count}).",
+  "dialogs.keyFzWordInvalid": "\"{word}\" nem hexadecimális 32 bites szó.",
+  "dialogs.keyFzWordCount": "Írj be 44 hexadecimális 32 bites szót (eddig: {count})."
 }

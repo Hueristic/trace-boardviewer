@@ -144,7 +144,7 @@ test('downstream cancel and redirect callbacks consume the one-shot gate once an
 test('headers latch holds only the exact admitted response and records real accepted Cancel plus uncertain send before fallback', async () => {
   const qa=fixture();
   const cancelResult={status:'cancelled',uncertain:true};
-  const sendResult={status:'cancelled',error:'network'};
+  const sendResult={status:'cancelled',uncertain:true};
   let resolveSend;
   const sendPromise=new Promise(resolve=>{resolveSend=resolve});
   qa.registerReportHandlers({cancel(){resolveSend(sendResult);return cancelResult},send(){return sendPromise}});
@@ -183,7 +183,7 @@ test('IPC wrappers preserve original receiver and argument identity while retain
   const sendPromise=new Promise(resolve=>{resolveSend=resolve});
   qa.registerReportHandlers({
     send(event,request){sendInvocation={receiver:this,event,request};return sendPromise},
-    cancel(event,request){cancelInvocation={receiver:this,event,request};resolveSend({status:'cancelled',error:'private'});return {status:'cancelled',uncertain:true}},
+    cancel(event,request){cancelInvocation={receiver:this,event,request};resolveSend({status:'cancelled',uncertain:true});return {status:'cancelled',uncertain:true}},
   });
   assert.equal(qa.arm(body,{responseMode:'hold-and-cancel'}).ok,true);
   const actualSend=qa.invokeWithEvent('trace:bug-report-send',sendEvent,sendRequest);

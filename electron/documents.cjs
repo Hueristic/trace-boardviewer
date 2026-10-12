@@ -19,6 +19,7 @@ const defaultFs = require('node:fs/promises');
 const path = require('node:path');
 const { createHash, randomUUID } = require('node:crypto');
 const { localAbsolutePath, readBounded, renameWithRetry } = require('./store.cjs');
+const { isOnlineOnly } = require('./placeholder.cjs');
 const ids = require('./identity.cjs');
 const formats = require('./formats.cjs');
 const { xmlRoot } = require('./xml-prolog.mjs');
@@ -41,9 +42,9 @@ const PDF_HEADER_WINDOW = 1024; // The PDF specification allows the header withi
 const identity = (key) => key;
 
 const KINDS = Object.freeze({
-  pdf: Object.freeze({ label: 'PDF documents', extensions: Object.freeze(['.pdf']) }), // i18n: pending
-  image: Object.freeze({ label: 'Images', extensions: Object.freeze(['.png', '.jpg', '.jpeg', '.webp', '.svg']) }), // i18n: pending
-  schematic: Object.freeze({ label: 'Schematics', extensions: Object.freeze(['.kicad_sch', '.sch', '.lib', '.schdoc']) }), // i18n: pending
+  pdf: Object.freeze({ extensions: Object.freeze(['.pdf']) }),
+  image: Object.freeze({ extensions: Object.freeze(['.png', '.jpg', '.jpeg', '.webp', '.svg']) }),
+  schematic: Object.freeze({ extensions: Object.freeze(['.kicad_sch', '.sch', '.lib', '.schdoc']) }),
 });
 const KIND_NAMES = Object.freeze(Object.keys(KINDS));
 // Content formats each extension may carry; the first entry's kind is the extension's kind.
@@ -52,12 +53,37 @@ const EXTENSION_CONTENT = Object.freeze({
   '.kicad_sch': ['kicad_sch'], '.sch': ['eeschema', 'eagle', 'kicad_sch'], '.lib': ['eeschema-lib'], '.schdoc': ['altium-sch'],
 });
 const CONTENT = Object.freeze({
-  pdf: { kind: 'pdf', label: 'PDF' }, png: { kind: 'image', label: 'PNG image' }, jpeg: { kind: 'image', label: 'JPEG image' },
-  webp: { kind: 'image', label: 'WebP image' }, svg: { kind: 'image', label: 'SVG image' },
-  kicad_sch: { kind: 'schematic', label: 'KiCad schematic' }, eeschema: { kind: 'schematic', label: 'KiCad legacy schematic' },
-  'altium-sch': { kind: 'schematic', label: 'Altium schematic' },
-  eagle: { kind: 'schematic', label: 'EAGLE XML' }, 'eeschema-lib': { kind: 'schematic', label: 'KiCad legacy symbol library' },
-}); // i18n: pending (labels appear in mismatch diagnostics only)
+  pdf: { kind: 'pdf' }, png: { kind: 'image' }, jpeg: { kind: 'image' },
+  webp: { kind: 'image' }, svg: { kind: 'image' },
+  kicad_sch: { kind: 'schematic' }, eeschema: { kind: 'schematic' },
+  'altium-sch': { kind: 'schematic' },
+  eagle: { kind: 'schematic' }, 'eeschema-lib': { kind: 'schematic' },
+});
+// The content names of the mismatch message come from the catalogue (the literal keys keep them visible to the catalogue checks).
+function contentLabel(format, t) {
+  switch (format) {
+    case 'pdf': return t('native.content.pdf');
+    case 'png': return t('native.content.png');
+    case 'jpeg': return t('native.content.jpeg');
+    case 'webp': return t('native.content.webp');
+    case 'svg': return t('native.content.svg');
+    case 'kicad_sch': return t('native.content.kicadSch');
+    case 'eeschema': return t('native.content.eeschema');
+    case 'altium-sch': return t('native.content.altiumSch');
+    case 'eagle': return t('native.content.eagle');
+    case 'eeschema-lib': return t('native.content.eeschemaLib');
+    default: return format;
+  }
+}
+// The status word of a document that cannot be exported (the statuses of locateOne).
+function statusLabel(status, t) {
+  switch (status) {
+    case 'changed': return t('native.error.exportStatusChanged');
+    case 'unreadable': return t('native.error.exportStatusUnreadable');
+    case 'missing': return t('native.error.exportStatusMissing');
+    default: return status;
+  }
+}
 
 function documentError(message, code, cause) {
   const error = cause === undefined ? new Error(message) : new Error(message, { cause });
@@ -65,16 +91,26 @@ function documentError(message, code, cause) {
   return error;
 }
 
+// A network (UNC) location is refused, as the store refuses it (electron/store.cjs); the refusal names the reason (MLX-03-04).
+// Device namespace prefixes (\\?\, \\.\) are not network locations and keep the store's invalid-path text.
+const networkPath = (value) => typeof value === 'string' && /^[\\/]{2}/.test(value) && !/^[\\/]{2}[?.][\\/]/.test(value);
+function localDocumentPath(value, t = identity) {
+  if (networkPath(value)) throw documentError(t('native.error.networkPathUnsupported'), 'DOCUMENT_INVALID_PATH');
+  return localAbsolutePath(value, t);
+}
+
 // Maps file-system and store errors to document errors; document errors pass through.
-function mapError(error, t) {
+function mapError(error, t = identity) {
   const code = error && error.code;
   if (typeof code === 'string' && code.startsWith('DOCUMENT_')) return error;
   if (code === 'STORE_INVALID_PATH') return documentError(error.message, 'DOCUMENT_INVALID_PATH');
   if (code === 'STORE_TOO_LARGE') return documentError(error.message, 'DOCUMENT_TOO_LARGE');
   if (code === 'STORE_CHANGED') return documentError(error.message, 'DOCUMENT_CHANGED');
-  if (code === 'ENOENT') return documentError('The document file was not found. It may have been moved or deleted.', 'DOCUMENT_NOT_FOUND', error); // i18n: pending
-  if (code === 'EACCES' || code === 'EPERM') return documentError('The document file cannot be read. Check the access permissions.', 'DOCUMENT_NOT_READABLE', error); // i18n: pending
-  if (code) return documentError('The document file could not be read.', 'DOCUMENT_READ_FAILED', error); // i18n: pending
+  if (code === 'ENOENT') return documentError(t('native.error.documentNotFound'), 'DOCUMENT_NOT_FOUND', error);
+  // A file another program holds open exclusively reports EBUSY on Windows (O-07).
+  if (code === 'EBUSY') return documentError(t('native.error.fileInUse'), 'DOCUMENT_IN_USE', error);
+  if (code === 'EACCES' || code === 'EPERM') return documentError(t('native.error.documentNotReadable'), 'DOCUMENT_NOT_READABLE', error);
+  if (code) return documentError(t('native.error.documentReadFailed'), 'DOCUMENT_READ_FAILED', error);
   return error;
 }
 
@@ -107,14 +143,34 @@ function positiveInteger(value, fallback, name) {
 
 // Platform aware (M01): case-insensitive only where the platform's volumes are (see identity.cjs).
 const samePath = (a, b, platform) => ids.samePath(a, b, { platform });
+// The same file under another spelling (case or Unicode normalisation on a volume that folds or normalises names): the same device
+// and inode. Spelling alone cannot tell this, because a case-sensitive volume keeps two such names as two files with two inodes.
+async function sameFile(left, right, fs) {
+  try {
+    const [a, b] = [await fs.stat(left), await fs.stat(right)];
+    return a.ino !== 0 && a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
 const sha256 = (buffer) => createHash('sha256').update(buffer).digest('hex');
 // A plain Uint8Array over the read buffer's own ArrayBuffer (never the Buffer pool), safe to clone to the renderer.
 const plainBytes = (buffer) => new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
 
+// The TextDecoder label of a byte-order-marked UTF-16 head (FF FE little endian, FE FF big endian), or null.
+function utf16Label(head) {
+  if (head[0] === 0xff && head[1] === 0xfe) return 'utf-16le';
+  if (head[0] === 0xfe && head[1] === 0xff) return 'utf-16be';
+  return null;
+}
+
 // { format, unsafe }: the detected content format (or null), and whether an XML file was refused for
 // declaring entities (B34; the root element comes from the prolog scanner the renderer sniffers share,
 // electron/xml-prolog.mjs, so both sides reach the same verdict). Binary signatures first, then the text
-// formats (which never contain NUL bytes) within the first 4 KiB.
+// formats within the first 4 KiB. Byte-order-marked UTF-16 is sniffed as text too (O-27): its ASCII characters
+// carry NUL bytes, which would refuse every such schematic here, while the schematic dispatcher re-encodes it as
+// UTF-8 before parsing. Only the schematic formats are accepted from UTF-16: SVG stays UTF-8 only, because the
+// image viewer reads ASCII-compatible markup alone (sniffImage in src/lib/images.ts).
 function inspectContent(data) {
   const head = Buffer.from(data.buffer, data.byteOffset, Math.min(data.byteLength, SNIFF_WINDOW));
   const found = (format) => ({ format, unsafe: false });
@@ -124,15 +180,16 @@ function inspectContent(data) {
   const pdfAt = head.indexOf('%PDF-', 0, 'latin1');
   if (pdfAt >= 0 && pdfAt < PDF_HEADER_WINDOW) return found('pdf');
   if (isSchDoc(data)) return found('altium-sch');
-  if (head.includes(0)) return found(null);
-  const text = head.toString('utf8').replace(/^\uFEFF/, '').trimStart();
+  const utf16 = utf16Label(head);
+  if (utf16 === null && head.includes(0)) return found(null);
+  const text = (utf16 === null ? head.toString('utf8') : new TextDecoder(utf16).decode(head)).replace(/^\uFEFF/, '').trimStart();
   if (text.startsWith('(kicad_sch')) return found('kicad_sch');
   if (text.startsWith('EESchema Schematic File')) return found('eeschema');
   if (text.startsWith('EESchema-LIBRARY')) return found('eeschema-lib');
   if (text.startsWith('<')) {
     const xml = xmlRoot(text);
     if (xml && xml.unsafe) return { format: null, unsafe: true };
-    if (xml && xml.root === 'svg') return found('svg');
+    if (xml && xml.root === 'svg' && utf16 === null) return found('svg');
     if (xml && xml.root === 'eagle') return found('eagle');
   }
   return found(null);
@@ -149,27 +206,27 @@ async function readDocument(filename, options = {}) {
   let handle;
   let release = null;
   try {
-    const requested = localAbsolutePath(filename, t);
+    const requested = localDocumentPath(filename, t);
     const canonical = localAbsolutePath(await fs.realpath(requested), t);
     const extension = path.extname(canonical).toLowerCase();
     const accepted = EXTENSION_CONTENT[extension];
     const kind = accepted ? CONTENT[accepted[0]].kind : null;
     if (!kind || !allowed.includes(kind)) {
       const list = allowed.flatMap((name) => KINDS[name].extensions).join(', ');
-      throw documentError(`Unsupported document type "${extension || path.basename(canonical)}". Allowed: ${list}.`, 'DOCUMENT_UNSUPPORTED_EXTENSION'); // i18n: pending
+      throw documentError(t('native.error.documentUnsupportedType', { extension: extension || path.basename(canonical), allowed: list }), 'DOCUMENT_UNSUPPORTED_EXTENSION');
     }
     handle = await fs.open(canonical, 'r');
     const stat = await handle.stat();
     if (!stat.isFile()) throw documentError(t('native.error.notAFile'), 'DOCUMENT_NOT_A_FILE');
     if (stat.size > maxBytes) throw documentError(t('native.error.fileLimitExceeded'), 'DOCUMENT_TOO_LARGE');
-    if (stat.size === 0) throw documentError('The document file is empty.', 'DOCUMENT_EMPTY'); // i18n: pending
+    if (stat.size === 0) throw documentError(t('native.error.documentEmpty'), 'DOCUMENT_EMPTY');
     if (options.budget) release = await options.budget.acquire(stat.size); // Aggregate bound on concurrent reads.
     const buffer = await readBounded(handle, stat.size, maxBytes, t);
     const { format, unsafe } = inspectContent(buffer);
-    if (unsafe) throw documentError('The XML document declares entities in its DOCTYPE and was rejected for safety.', 'DOCUMENT_UNSAFE_XML'); // i18n: pending
+    if (unsafe) throw documentError(t('native.error.documentUnsafeXml'), 'DOCUMENT_UNSAFE_XML');
     if (!format || !accepted.includes(format)) {
-      const detected = format ? CONTENT[format].label : 'unrecognized data';
-      throw documentError(`The file extension "${extension}" does not match the file content (${detected}).`, 'DOCUMENT_CONTENT_MISMATCH'); // i18n: pending
+      const detected = format ? contentLabel(format, t) : t('native.content.unrecognized');
+      throw documentError(t('native.error.documentContentMismatch', { extension, detected }), 'DOCUMENT_CONTENT_MISMATCH');
     }
     return { name: path.basename(canonical), path: canonical, kind, format, data: plainBytes(buffer), key: sha256(buffer), size: buffer.byteLength };
   } catch (error) {
@@ -180,8 +237,9 @@ async function readDocument(filename, options = {}) {
   }
 }
 
-// Gathers sibling files of the selected file by extension (case-insensitive), bounded by count
-// and total bytes, each required to resolve inside the selected file's directory.
+// Gathers sibling files of the selected file by extension, bounded by count and total bytes, each required to
+// resolve inside the selected file's directory. Names: an exact lower-case name wins, a unique case variant is
+// accepted, and several case variants with no exact name are all reported as duplicate names (see the loop).
 // Returns { directory, files: Record<lowercase basename, Uint8Array>, skipped: { name, reason }[] }.
 async function gatherCompanions(filename, options = {}) {
   const { t = identity, fs = defaultFs } = options;
@@ -192,7 +250,7 @@ async function gatherCompanions(filename, options = {}) {
   const { platform } = options;
   let canonical, entries;
   try {
-    canonical = localAbsolutePath(await fs.realpath(localAbsolutePath(filename, t)), t);
+    canonical = localAbsolutePath(await fs.realpath(localDocumentPath(filename, t)), t);
     entries = await fs.readdir(path.dirname(canonical), { withFileTypes: true });
   } catch (error) {
     throw mapError(error, t);
@@ -203,37 +261,77 @@ async function gatherCompanions(filename, options = {}) {
   let total = 0;
   let count = 0;
   entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  // Name policy, the same as for board sidecars (planCompanions): the entries of one lower-case name are decided together, so the outcome
+  // never depends on the listing order. An entry spelled exactly in lower case is the companion; without one, a single case variant is the
+  // companion; two or more variants with no exact spelling are ambiguous, so none is chosen and each is reported as a duplicate name.
+  // Bytes are never attributed to a name that no entry spells exactly or uniquely.
+  const groups = new Map();
   for (const entry of entries) {
     const lower = entry.name.toLowerCase();
     if (!wanted.has(path.extname(lower))) continue;
-    // A crowded directory must not turn into unbounded work: stop listing once enough reasons are known.
-    if (skipped.length >= MAX_SKIPPED) { skipped.push({ name: '…', reason: 'more files were skipped' }); break; } // i18n: pending
-    if (entry.isDirectory()) { skipped.push({ name: entry.name, reason: 'not a file' }); continue; } // i18n: pending (all reasons)
-    if (Object.hasOwn(files, lower)) { skipped.push({ name: entry.name, reason: 'duplicate name' }); continue; }
+    if (!groups.has(lower)) groups.set(lower, []);
+    groups.get(lower).push(entry);
+  }
+  const chosen = new Set();
+  for (const [lower, variants] of groups) {
+    const exact = variants.find((entry) => entry.name === lower);
+    if (exact !== undefined) chosen.add(exact);
+    else if (variants.length === 1) chosen.add(variants[0]);
+  }
+  const selectedName = path.basename(canonical);
+  // The skipped reasons are bounded (MAX_SKIPPED, then one overflow marker), but that bound limits only what is reported. The choice above
+  // and the reading below do not depend on it: every chosen companion is read, up to maxFiles, however many rejected variants precede it.
+  let overflowed = false;
+  const reject = (name, reason) => {
+    if (skipped.length < MAX_SKIPPED) skipped.push({ name, reason });
+    else overflowed = true;
+  };
+  for (const entry of entries) {
+    const lower = entry.name.toLowerCase();
+    if (!wanted.has(path.extname(lower))) continue;
+    if (entry.name === selectedName) continue; // The selected file is not its own companion, and it is never reported.
+    if (!chosen.has(entry)) { reject(entry.name, t('native.skipped.duplicateName')); continue; }
+    if (entry.isDirectory()) { reject(entry.name, t('native.skipped.notAFile')); continue; }
+    if (samePath(entry.name, selectedName, platform)) continue; // The selected file under its alias: the same identity rule as the realpath check below, and no file-system call.
+    // The companion limit comes before any file-system call, so a crowded directory costs no more than its listing.
+    if (count >= maxFiles) { reject(entry.name, t('native.skipped.fileLimit')); continue; }
     let handle;
     let release = null;
     try {
+      // A Windows reparse point that is not a link is never opened: reading it can download it (a cloud placeholder) or fail (a dedup
+      // file, an app execution link). A placeholder is recorded as 'online-only' so the user is told to open or attach it; anything else
+      // as 'reparse point'. A link is resolved below, as before.
+      if (typeof entry.isSymbolicLink === 'function' && entry.isSymbolicLink()) {
+        const meta = await fs.lstat(path.join(directory, entry.name));
+        if (!meta.isSymbolicLink()) {
+          skipped.push({ name: entry.name, reason: isOnlineOnly(meta) ? 'online-only' : 'reparse point' });
+          continue;
+        }
+      }
       const real = localAbsolutePath(await fs.realpath(path.join(directory, entry.name)), t);
       if (samePath(real, canonical, platform)) continue; // The selected file is not its own companion.
-      if (!samePath(path.dirname(real), directory, platform)) { skipped.push({ name: entry.name, reason: 'outside the selected directory' }); continue; }
-      if (count >= maxFiles) { skipped.push({ name: entry.name, reason: 'file limit reached' }); continue; }
+      // The same inode under another spelling (APFS folds case and normalises names), or a hard link to the selected file: the same file.
+      // It is skipped without a notice, by decision (U-18), so that one file is not counted twice.
+      if (await sameFile(real, canonical, fs)) continue;
+      if (!samePath(path.dirname(real), directory, platform)) { reject(entry.name, 'outside the selected directory'); continue; }
       handle = await fs.open(real, 'r');
       const stat = await handle.stat();
-      if (!stat.isFile()) { skipped.push({ name: entry.name, reason: 'not a file' }); continue; }
+      if (!stat.isFile()) { reject(entry.name, t('native.skipped.notAFile')); continue; }
       const budget = Math.min(maxBytes, maxTotalBytes - total);
-      if (stat.size > budget) { skipped.push({ name: entry.name, reason: 'size limit reached' }); continue; }
+      if (stat.size > budget) { reject(entry.name, 'size limit reached'); continue; }
       if (options.budget) release = await options.budget.acquire(stat.size);
       const buffer = await readBounded(handle, stat.size, budget, t);
       total += buffer.byteLength;
       count++;
       files[lower] = plainBytes(buffer);
     } catch (error) {
-      skipped.push({ name: entry.name, reason: error && error.code === 'STORE_CHANGED' ? 'changed while reading' : 'not readable' });
+      reject(entry.name, error && error.code === 'STORE_CHANGED' ? 'changed while reading' : 'not readable');
     } finally {
       if (handle) await handle.close();
       if (release) release();
     }
   }
+  if (overflowed) skipped.push({ name: '…', reason: t('native.skipped.moreFiles') });
   return { directory, files, skipped };
 }
 
@@ -248,11 +346,11 @@ async function readSelection(filenames, options = {}) {
   const { t = identity, fs = defaultFs } = options;
   if (!Array.isArray(filenames)) throw documentError('The document selection must be a list.', 'DOCUMENT_INVALID_OPTIONS'); // i18n: pending
   if (filenames.length > MAX_SELECTION_FILES) {
-    throw documentError(`Select at most ${MAX_SELECTION_FILES} documents at a time.`, 'DOCUMENT_TOO_MANY'); // i18n: pending
+    throw documentError(t('native.error.selectionTooMany', { max: MAX_SELECTION_FILES }), 'DOCUMENT_TOO_MANY');
   }
   const perFile = positiveInteger(options.maxBytes, DEFAULT_MAX_BYTES, 'maxBytes');
   let remaining = positiveInteger(options.maxTotalBytes, MAX_SELECTION_BYTES, 'maxTotalBytes');
-  const batchTooLarge = () => documentError(`The selected documents together exceed ${Math.round(MAX_SELECTION_BYTES / 1048576)} MiB.`, 'DOCUMENT_BATCH_TOO_LARGE'); // i18n: pending
+  const batchTooLarge = () => documentError(t('native.error.selectionTooLarge', { mib: Math.round(MAX_SELECTION_BYTES / 1048576) }), 'DOCUMENT_BATCH_TOO_LARGE');
   const payloads = [];
   for (const filename of filenames) {
     if (remaining <= 0) throw batchTooLarge();
@@ -275,7 +373,7 @@ async function readSelection(filenames, options = {}) {
         if (gathered.skipped.length) payload.skipped = gathered.skipped;
         for (const name of names) remaining -= gathered.files[name].byteLength;
       } else {
-        payload.skipped = [{ name: '…', reason: 'selection size limit reached' }]; // i18n: pending
+        payload.skipped = [{ name: '…', reason: t('native.error.skippedSizeLimit') }];
       }
     }
     payloads.push(payload);
@@ -319,10 +417,12 @@ async function hashFile(filename, options = {}) {
 
 // A stored relative path: '/'-separated segments below the board directory, never absolute, never
 // '..', no empty or dot segments, no drive or stream separators. Returns the segments or null.
-function relativeSegments(value) {
+// On POSIX a backslash is an ordinary character of a name (a file name may hold one); on Windows it is a separator as well.
+function relativeSegments(value, platform = process.platform) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 32767 || value.includes('\0')) return null;
-  if (/^[A-Za-z]:/.test(value) || value.startsWith('/') || value.startsWith('\\')) return null;
-  const segments = value.split(/[\\/]/);
+  const windows = platform === 'win32';
+  if (/^[A-Za-z]:/.test(value) || value.startsWith('/') || (windows && value.startsWith('\\'))) return null;
+  const segments = value.split(windows ? /[\\/]/ : '/');
   return segments.some((segment) => segment === '' || segment === '.' || segment === '..' || segment.includes(':')) ? null : segments;
 }
 
@@ -359,7 +459,7 @@ function validateRequest(request) {
 async function boardRoot(boardPath, options) {
   const { t = identity, fs = defaultFs } = options;
   let board;
-  try { board = localAbsolutePath(boardPath, t); } catch (error) { throw mapError(error, t); }
+  try { board = localDocumentPath(boardPath, t); } catch (error) { throw mapError(error, t); }
   if (!formats.isSupportedExtension(board)) throw documentError(t('native.error.unsupportedFile'), 'DOCUMENT_INVALID_PATH');
   try { return localAbsolutePath(await fs.realpath(path.dirname(board)), t); } catch { return null; }
 }
@@ -375,9 +475,9 @@ async function locateOne(request, root, options) {
   let problem = null;
   try { candidates.push({ via: 'path', filename: localAbsolutePath(request.path, t) }); } catch { /* No usable absolute path. */ }
   if (request.relativePath !== undefined && root) {
-    const segments = relativeSegments(request.relativePath);
+    const segments = relativeSegments(request.relativePath, platform);
     if (segments) candidates.push({ via: 'relative', filename: path.join(root, ...segments) });
-    else problem = 'The stored relative path is not valid.'; // i18n: pending
+    else problem = t('native.error.locateInvalidPath');
   }
   const kindExtensions = KINDS[request.kind].extensions;
   const seen = [];
@@ -392,13 +492,13 @@ async function locateOne(request, root, options) {
       continue;
     }
     if (candidate.via === 'relative' && relativeInside(root, canonical) === undefined) {
-      problem ??= 'The relative path leaves the board directory.'; // i18n: pending
+      problem ??= t('native.error.locateOutsideBoard');
       continue;
     }
     if (seen.some((other) => samePath(other, canonical, platform))) continue;
     seen.push(canonical);
     if (!kindExtensions.includes(path.extname(canonical).toLowerCase())) {
-      problem ??= `The file is not a ${request.kind} document.`; // i18n: pending
+      problem ??= t('native.error.locateWrongKind');
       continue;
     }
     let found;
@@ -412,7 +512,7 @@ async function locateOne(request, root, options) {
     const relativePath = relativeInside(root, canonical);
     const where = { path: canonical, ...(relativePath === undefined ? {} : { relativePath }) };
     if (found.key === request.key) return { id: request.id, status: candidate.via === 'relative' ? 'moved' : 'ok', ...where, key: found.key, size: found.size };
-    changed ??= { id: request.id, status: 'changed', ...where, key: found.key, size: found.size, message: 'The file exists but its content differs from the attached document.' }; // i18n: pending
+    changed ??= { id: request.id, status: 'changed', ...where, key: found.key, size: found.size, message: t('native.error.locateContentChanged') };
   }
   if (changed) return changed;
   if (problem) return { id: request.id, status: 'unreadable', message: problem };
@@ -486,13 +586,19 @@ function bundleManifest(manifest, selected, entryNames, boardEntry) {
   };
 }
 
+// The record of the temporaries a writer creates (electron/export-temporaries.cjs). The default records nothing, for callers that keep none.
+const UNRECORDED = Object.freeze({ record: async () => {}, forget: async () => {} });
+
 // Writes the zip next to its destination under a temporary name and renames it into place, so a
 // failed export never leaves a partial file at the chosen path. Entries load lazily, one at a time.
 // The final rename is retried a bounded number of times on EPERM/EACCES/EBUSY (W-win-lifecycle-01: on
 // Windows a scanner or indexer holding the destination makes rename-over-existing fail for a moment);
 // after the last attempt the temporary file is removed and the error is reported as before.
-async function writeZipAtomically(fs, target, entries, fflate, renameDelaysMs) {
+async function writeZipAtomically(fs, target, entries, fflate, renameDelaysMs, t = identity, temporaries = UNRECORDED) {
   const temporary = `${target}.${process.pid}.${randomUUID()}.tmp`;
+  // Recorded before the file exists, so a crash from here on leaves a record for the next start. A record that cannot be written does not stop
+  // the export (electron/export-temporaries.cjs logs it): the export is the user's action, the sweep is housekeeping.
+  await temporaries.record(temporary);
   let handle;
   let bytes = 0;
   const pending = [];
@@ -508,7 +614,7 @@ async function writeZipAtomically(fs, target, entries, fflate, renameDelaysMs) {
       const offered = chunk.byteLength - offset;
       const { bytesWritten } = await handle.write(chunk, offset, offered);
       if (!Number.isSafeInteger(bytesWritten) || bytesWritten <= 0 || bytesWritten > offered) {
-        throw documentError('The export file could not be written completely.', 'EXPORT_WRITE_FAILED'); // i18n: pending
+        throw documentError(t('native.error.exportIncomplete'), 'EXPORT_WRITE_FAILED');
       }
       offset += bytesWritten;
       bytes += bytesWritten;
@@ -533,11 +639,20 @@ async function writeZipAtomically(fs, target, entries, fflate, renameDelaysMs) {
     await flush();
     await handle.close();
     handle = undefined;
-    await renameWithRetry(fs, temporary, target, renameDelaysMs);
+    try {
+      await renameWithRetry(fs, temporary, target, renameDelaysMs);
+    } catch (error) {
+      // Only this step tells a held destination apart: the rename over it fails with EPERM on Windows (see mapExportError).
+      if (error && typeof error === 'object') error.renameTarget = true;
+      throw error;
+    }
+    await temporaries.forget(temporary); // renamed into place: nothing is left to sweep (forget never rejects)
     return bytes;
   } catch (error) {
     if (handle) await handle.close().catch(() => {});
-    await fs.unlink(temporary).catch(() => {});
+    // Forgotten only when the temporary is gone: one that could not be removed stays recorded for the next start.
+    const gone = await fs.unlink(temporary).then(() => true, (unlinkError) => unlinkError?.code === 'ENOENT');
+    if (gone) await temporaries.forget(temporary);
     throw error;
   }
 }
@@ -560,7 +675,7 @@ async function exportBundle(options) {
     return record;
   });
   let target;
-  try { target = localAbsolutePath(options.target, t); } catch (error) { throw mapError(error, t); }
+  try { target = localDocumentPath(options.target, t); } catch (error) { throw mapError(error, t); }
   const fflate = require('fflate');
 
   // Verify every selected document before anything is written.
@@ -568,7 +683,7 @@ async function exportBundle(options) {
   const located = await mapLimit(selected, LOCATE_CONCURRENCY, async (record) => {
     const result = await locateOne({ id: record.id, kind: record.kind, path: record.path, relativePath: record.relativePath, key: record.key }, root, { t, fs, platform });
     if (result.status !== 'ok' && result.status !== 'moved') {
-      throw documentError(`The document "${safeFileName(record.name, 'document')}" cannot be exported (${result.status}${result.message ? `: ${result.message}` : ''}).`, 'EXPORT_DOCUMENT_UNAVAILABLE'); // i18n: pending
+      throw documentError(t('native.error.exportUnavailable', { name: safeFileName(record.name, 'document'), status: statusLabel(result.status, t), detail: result.message ? `: ${result.message}` : '' }), 'EXPORT_DOCUMENT_UNAVAILABLE');
     }
     return result;
   });
@@ -580,7 +695,7 @@ async function exportBundle(options) {
   let total = 0;
   const account = (bytes) => {
     total += bytes;
-    if (total > maxTotalBytes) throw documentError(`The export exceeds ${Math.round(maxTotalBytes / 1048576)} MiB.`, 'EXPORT_TOO_LARGE'); // i18n: pending
+    if (total > maxTotalBytes) throw documentError(t('native.error.exportTooLarge', { mib: Math.round(maxTotalBytes / 1048576) }), 'EXPORT_TOO_LARGE');
   };
   const boardEntries = [];
   if (includeBoard) {
@@ -602,7 +717,9 @@ async function exportBundle(options) {
     entries.push({
       name, deflate: !COMPRESSED_EXTENSIONS.has(path.extname(name).toLowerCase()),
       load: async () => {
-        const changedWhileExporting = (detail) => documentError(`The document "${safeFileName(record.name, 'document')}" changed while it was exported${detail ? ` (${detail})` : ''}.`, 'EXPORT_DOCUMENT_UNAVAILABLE'); // i18n: pending
+        const changedWhileExporting = (detail) => documentError(detail
+          ? t('native.error.documentChangedExportingDetail', { name: safeFileName(record.name, 'document'), detail })
+          : t('native.error.documentChangedExporting', { name: safeFileName(record.name, 'document') }), 'EXPORT_DOCUMENT_UNAVAILABLE');
         let document;
         try { document = await readDocument(found.path, { kinds: [record.kind], t, fs, maxBytes: found.size }); }
         catch (error) { throw changedWhileExporting(error && error.message); }
@@ -623,42 +740,55 @@ async function exportBundle(options) {
   // The bundle may never replace one of the files it was built from.
   const existing = await fs.stat(target).catch((error) => {
     if (error && error.code === 'ENOENT') return null;
-    throw mapExportError(error);
+    throw mapExportError(error, t);
   });
   if (existing) {
     for (const source of sources) {
       const stat = await fs.stat(source).catch(() => null);
       if (samePath(source, target, platform) || (stat && stat.ino !== 0 && stat.dev === existing.dev && stat.ino === existing.ino)) {
-        throw documentError('The export cannot overwrite one of the original files.', 'EXPORT_OVERWRITES_SOURCE'); // i18n: pending
+        throw documentError(t('native.error.exportOverwritesSource'), 'EXPORT_OVERWRITES_SOURCE');
       }
     }
   }
   try {
-    const bytes = await writeZipAtomically(fs, target, ordered, fflate, options.renameRetryDelaysMs);
+    const bytes = await writeZipAtomically(fs, target, ordered, fflate, options.renameRetryDelaysMs, t, options.temporaries ?? UNRECORDED);
     return { path: target, files: ordered.length, bytes };
   } catch (error) {
-    throw mapExportError(error);
+    throw mapExportError(error, t);
   }
 }
 
-function mapExportError(error) {
+function mapExportError(error, t = identity) {
   const code = error && error.code;
   if (typeof code === 'string' && (code.startsWith('DOCUMENT_') || code.startsWith('EXPORT_'))) return error;
-  if (typeof code === 'string' && code.startsWith('STORE_')) return mapError(error);
-  return documentError('The export file could not be written. Check the destination and free space.', 'EXPORT_WRITE_FAILED', error); // i18n: pending
+  if (typeof code === 'string' && code.startsWith('STORE_')) return mapError(error, t);
+  // The destination is held by another program (O-07, W-win-lifecycle-03): the code stays EXPORT_WRITE_FAILED, the text says why.
+  // A held destination fails the final rename with EPERM on Windows, so EPERM counts only from that step; any other EPERM stays generic.
+  if (code === 'EBUSY' || (code === 'EPERM' && error.renameTarget)) return documentError(t('native.error.fileInUse'), 'EXPORT_WRITE_FAILED', error);
+  return documentError(t('native.error.exportWriteFailed'), 'EXPORT_WRITE_FAILED', error);
 }
 
 // Filter definitions for dialog.showOpenDialog. One kind → its filter; several → a combined
-// "All supported documents" entry first, then one per kind.
-function dialogFilters(kinds) {
+// all-documents entry first, then one per kind. The names come from the translator (options.t).
+function dialogFilters(kinds, options = {}) {
+  const { t = identity } = options;
   const list = normalizeKinds(kinds);
-  const filters = list.map((kind) => ({ name: KINDS[kind].label, extensions: KINDS[kind].extensions.map((extension) => extension.slice(1)) }));
-  if (list.length > 1) filters.unshift({ name: 'All supported documents', extensions: filters.flatMap((filter) => filter.extensions) }); // i18n: pending
+  const filters = list.map((kind) => ({ name: kindLabel(kind, t), extensions: KINDS[kind].extensions.map((extension) => extension.slice(1)) }));
+  if (list.length > 1) filters.unshift({ name: t('native.dialog.allDocuments'), extensions: filters.flatMap((filter) => filter.extensions) });
   return filters;
+}
+// The kind names of the dialog filters. The literal keys let the catalogue checks see them.
+function kindLabel(kind, t) {
+  switch (kind) {
+    case 'pdf': return t('native.dialog.kindPdf');
+    case 'image': return t('native.dialog.kindImage');
+    case 'schematic': return t('native.dialog.kindSchematic');
+    default: return kind;
+  }
 }
 
 module.exports = Object.freeze({
   DEFAULT_MAX_BYTES, DEFAULT_MAX_FILES, MAX_SELECTION_FILES, MAX_SELECTION_BYTES, KINDS,
-  readDocument, readSelection, gatherCompanions, locateDocuments, hashFile, exportBundle,
+  readDocument, readSelection, gatherCompanions, locateDocuments, hashFile, exportBundle, relativeSegments,
   dialogFilters, sniffContent, safeFileName,
 });

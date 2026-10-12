@@ -30,10 +30,13 @@ export interface OdbppLimits {
   maxPathLength: number;
   /** Decompressed prefix of a gzip/compress stream that sniffing inspects. */
   sniffBytes: number;
+  /** Layer features and tools files (copper and drill records) kept in total; a file over the budget is dropped and named, never a failure. */
+  maxAuxBytes: number;
 }
 export const DEFAULT_ODBPP_LIMITS: Readonly<OdbppLimits> = Object.freeze({
   maxArchiveBytes: 1024 * 1024 * 1024, maxStreamBytes: 1024 * 1024 * 1024, maxEntries: 200_000, maxEntryBytes: MAX_IMPORT_BYTES,
   maxKeptBytes: 192 * 1024 * 1024, maxMetaBytes: 64 * 1024, maxPathLength: 1024, sniffBytes: 16 * 1024 * 1024,
+  maxAuxBytes: 32 * 1024 * 1024,
 });
 export function resolveLimits(limits: Partial<OdbppLimits> = {}): OdbppLimits {
   const merged = { ...DEFAULT_ODBPP_LIMITS, ...limits };
@@ -57,6 +60,8 @@ export interface OdbppTree {
   endMissing: boolean;
   /** Name of the nested archive that was opened, when the ODB++ model sat inside another archive. */
   nested?: string;
+  /** Paths of layer features and tools files that were not kept (over their file or the layer budget): their layer's copper is not read. */
+  auxDropped: string[];
 }
 
 const fail = (message: string, code: 'INVALID_FORMAT' | 'LIMIT_EXCEEDED' | 'UNSUPPORTED_VARIANT' = 'INVALID_FORMAT'): never => { throw new BoardFormatError(`ODB++ archive: ${message}`, code); };
@@ -92,7 +97,11 @@ export function normalizeEntryPath(raw: string, maxLength = DEFAULT_ODBPP_LIMITS
 }
 
 /** The ODB++ files a board needs, below at most two leading directories (the product model directory and one wrapper). */
-const ODB_TAIL = /^(?:matrix\/matrix|misc\/info|steps\/[^/]+\/(?:stephdr|profile|eda\/data|layers\/[^/]+\/components|netlists\/cadnet\/netlist))(?:\.z)?$/;
+const ODB_TAIL = /^(?:matrix\/matrix|misc\/info|steps\/[^/]+\/(?:stephdr|profile|eda\/data|layers\/[^/]+\/(?:components|features|tools)|netlists\/cadnet\/netlist))(?:\.z)?$/;
+/** Layer features and tools: the copper and drill records. They have their own byte budget (maxAuxBytes), never the main one. */
+const LAYER_FILE_TAIL = /^steps\/[^/]+\/layers\/[^/]+\/(?:features|tools)(?:\.z)?$/;
+export const isLayerFileTail = (tail: string): boolean => LAYER_FILE_TAIL.test(tail);
+const isLayerPath = (path: string): boolean => { const found = odbTail(path); return found !== null && isLayerFileTail(found.tail); };
 /** Shallowest split of `path` into a product-model root ("" or "job/" or "wrap/job/") and an ODB++ tail; null when it is not a needed file. */
 export function odbTail(path: string): { root: string; tail: string } | null {
   let root = '', rest = path;
@@ -111,34 +120,58 @@ const NESTED = /^(?:[^/]+\/){0,2}[^/]+\.(?:tgz|tar\.gz|tar|tar\.z|zip)$/;
 class Collector {
   readonly files = new Map<string, Uint8Array>();
   seen = 0; unsafePaths = 0; links = 0; duplicates = 0; endMissing = false;
+  /** Bytes of the main files kept, and of the layer files kept: each is counted against its own budget. */
+  mainKept = 0; layerKept = 0;
+  /** Layer files not kept, by path without the .Z suffix (bounded). */
+  layerDropped: string[] = [];
   constructor(readonly limits: OdbppLimits) {}
-  /** Normalized path to keep, or null. Counts unsafe names and links. */
-  select(raw: string, type: 'file' | 'directory' | 'link' | 'other'): string | null {
+  /**
+   * Normalized path to keep, or null. Counts unsafe names and links. `size` is the entry's declared size (uncompressed). A main file over
+   * its limit fails the archive; a layer file over its own limit or over the layer budget is dropped and named in layerDropped, so the
+   * rest of the product model still reads.
+   */
+  select(raw: string, type: 'file' | 'directory' | 'link' | 'other', size = 0): string | null {
     const path = normalizeEntryPath(raw, this.limits.maxPathLength);
     if (path === null) { this.unsafePaths++; return null; }
     if (type === 'link') { this.links++; return null; }
     if (type !== 'file') return null;
     this.seen++;
-    return odbTail(path) ? path : null;
+    const found = odbTail(path);
+    if (!found) return null;
+    if (isLayerFileTail(found.tail)) {
+      if (size > this.limits.maxEntryBytes || this.layerKept + size > this.limits.maxAuxBytes) {
+        if (this.layerDropped.length < 512) this.layerDropped.push(path.replace(/\.z$/, ''));
+        return null;
+      }
+      this.layerKept += size;
+      return path;
+    }
+    if (size > this.limits.maxEntryBytes) fail(`entry ${path.slice(0, 120)} is ${size} bytes, over the ${this.limits.maxEntryBytes}-byte limit.`, 'LIMIT_EXCEEDED');
+    if ((this.mainKept += size) > this.limits.maxKeptBytes) fail(`the selected entries exceed ${this.limits.maxKeptBytes} bytes.`, 'LIMIT_EXCEEDED');
+    return path;
   }
   keep(path: string, data: Uint8Array): void {
     if (this.files.has(path)) this.duplicates++; // tar semantics: a later member replaces an earlier one
     this.files.set(path, data);
   }
   tree(container: OdbppContainer, nested?: string): OdbppTree {
-    let compressedMembers = 0, budget = this.limits.maxKeptBytes - [...this.files.values()].reduce((sum, data) => sum + data.length, 0);
+    // Each .Z member decompresses against the budget of its own kind (main or layer files), as the bytes already kept count against it.
+    let mainUsed = 0, layerUsed = 0;
+    for (const [path, data] of this.files) { if (isLayerPath(path)) layerUsed += data.length; else mainUsed += data.length; }
+    let compressedMembers = 0, budget = this.limits.maxKeptBytes - mainUsed, layerBudget = this.limits.maxAuxBytes - layerUsed;
     for (const [path, data] of [...this.files]) {
       if (!path.endsWith('.z')) continue;
+      const layer = isLayerPath(path);
       this.files.delete(path);
       const plain = path.slice(0, -2);
       if (this.files.has(plain)) { this.duplicates++; continue; }
       const chunks: Uint8Array[] = [];
-      const limit = Math.min(this.limits.maxEntryBytes, Math.max(0, budget));
+      const limit = Math.min(this.limits.maxEntryBytes, Math.max(0, layer ? layerBudget : budget));
       const size = unlzw(data, chunk => chunks.push(chunk.slice()), limit);
-      budget -= size;
+      if (layer) layerBudget -= size; else budget -= size;
       this.files.set(plain, concat(chunks, size)); compressedMembers++;
     }
-    return { container, files: this.files, seen: this.seen, unsafePaths: this.unsafePaths, links: this.links, duplicates: this.duplicates, compressedMembers, endMissing: this.endMissing, ...(nested ? { nested } : {}) };
+    return { container, files: this.files, seen: this.seen, unsafePaths: this.unsafePaths, links: this.links, duplicates: this.duplicates, compressedMembers, endMissing: this.endMissing, auxDropped: this.layerDropped, ...(nested ? { nested } : {}) };
   }
 }
 function concat(chunks: Uint8Array[], size: number): Uint8Array {
@@ -361,11 +394,12 @@ const isTarHeader = (data: Uint8Array): boolean => {
 function readTar(feed: (sink: (chunk: Uint8Array) => void) => void, collector: Collector): void {
   const { limits } = collector;
   let pending = '';
+  // Kept bytes are counted by the collector, main and layer files against their own budgets, so the reader's own total is not used.
   const reader = new TarReader(entry => {
-    const path = collector.select(entry.path, entry.type);
+    const path = collector.select(entry.path, entry.type, entry.size);
     if (path === null) return false;
     pending = path; return true;
-  }, (_raw, data) => { collector.keep(pending, data); }, { maxEntries: limits.maxEntries, maxEntryBytes: limits.maxEntryBytes, maxKeptBytes: limits.maxKeptBytes, maxMetaBytes: limits.maxMetaBytes });
+  }, (_raw, data) => { collector.keep(pending, data); }, { maxEntries: limits.maxEntries, maxEntryBytes: limits.maxEntryBytes, maxKeptBytes: Number.MAX_SAFE_INTEGER, maxMetaBytes: limits.maxMetaBytes });
   // Decompression stops at the end-of-archive block: whatever follows it (padding, or a flood of zeros) is never inflated.
   try { feed(chunk => { reader.push(chunk); if (reader.done) throw new Stop(); }); }
   catch (error) { if (!(error instanceof Stop)) throw error; }
@@ -480,14 +514,11 @@ export function readContainer(data: Uint8Array, limits: OdbppLimits, depth = 0):
         if (zipLocalNames(data, Math.min(limits.maxEntries, 4096)).some(path => looksOdb(path, limits))) fail('the ZIP archive is truncated or damaged (its central directory is missing).');
         return null;
       }
-      let kept = 0;
       for (const entry of entries) {
         const type = entry.link ? 'link' : entry.name.endsWith('/') ? 'directory' : 'file';
-        const path = collector.select(entry.name, type);
+        const path = collector.select(entry.name, type, entry.size);
         if (path === null) continue;
-        const output = zipData(data, entry, Math.min(limits.maxEntryBytes, limits.maxKeptBytes - kept));
-        kept += output.length;
-        collector.keep(path, output);
+        collector.keep(path, zipData(data, entry, limits.maxEntryBytes));
       }
       if (!collector.files.size && depth === 0) {
         const nested = nestedArchive(entries, limits);
@@ -506,13 +537,10 @@ export function treeFromFiles(files: Readonly<Record<string, Uint8Array>> | Read
   const collector = new Collector(limits);
   const list = files instanceof Map ? [...files] : Object.entries(files);
   if (list.length > limits.maxEntries) fail(`more than ${limits.maxEntries} files.`, 'LIMIT_EXCEEDED');
-  let kept = 0;
   for (const [raw, data] of list) {
     if (!(data instanceof Uint8Array)) fail('every file of a file set must be a byte array.');
-    const path = collector.select(raw, 'file');
+    const path = collector.select(raw, 'file', data.length);
     if (path === null) continue;
-    if (data.length > limits.maxEntryBytes) fail(`file ${path.slice(0, 120)} exceeds ${limits.maxEntryBytes} bytes.`, 'LIMIT_EXCEEDED');
-    if ((kept += data.length) > limits.maxKeptBytes) fail(`the selected files exceed ${limits.maxKeptBytes} bytes.`, 'LIMIT_EXCEEDED');
     collector.keep(path, data);
   }
   return collector.tree('files');

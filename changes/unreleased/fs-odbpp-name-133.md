@@ -1,0 +1,1 @@
+- On Mac and Linux, an ODB++ archive whose file name contains a backslash keeps its full name as the board name; it was shown without its folder part.

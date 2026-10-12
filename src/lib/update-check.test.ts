@@ -24,10 +24,11 @@ describe('copy', () => {
   const HU = catalogs.hu as Record<string, string>;
   const ALL_KEYS = [...Object.values(UPDATE_KEYS), UPDATE_OPEN_FAILED_KEY];
 
-  it('the keys are named update.setting/settingHint/checkNow/checking/current/available/failed/download/dismiss, plus update.openFailed', () => {
+  it('the keys are named update.setting/settingHint/checkNow/checking/current/available/failed/download/dismiss, the first-start question askText/askYes/askNo/askSkip, plus update.openFailed', () => {
     expect(UPDATE_KEYS).toEqual({
       setting: 'update.setting', settingHint: 'update.settingHint', checkNow: 'update.checkNow', checking: 'update.checking', current: 'update.current',
       available: 'update.available', failed: 'update.failed', download: 'update.download', dismiss: 'update.dismiss',
+      askText: 'update.askText', askYes: 'update.askYes', askNo: 'update.askNo', askSkip: 'update.askSkip',
     });
     expect(UPDATE_OPEN_FAILED_KEY).toBe('update.openFailed');
   });
@@ -225,7 +226,7 @@ describe('the check at start', () => {
     resetUpdateCheckLaunch();
     const desktop = available();
     await Promise.all([beginStartupUpdateCheck(desktop, true), beginStartupUpdateCheck(desktop, true), beginStartupUpdateCheck(desktop, true)]);
-    expect(desktop.log.filter(entry => entry === 'checkForUpdates')).toHaveLength(1);
+    expect(desktop.log.filter(entry => entry === 'checkForStartupUpdates')).toHaveLength(1);
   });
 
   it('with the setting off nothing is requested, and switching it on later in the same launch does not start a request either (Check now is for that)', async () => {
@@ -258,7 +259,7 @@ describe('the check at start', () => {
     }
     resetUpdateCheckLaunch();
     const broken = createFakeDesktop();
-    broken.failures.checkForUpdates = () => new Error('Error invoking remote method');
+    broken.failures.checkForStartupUpdates = () => new Error('Error invoking remote method');
     await expect(beginStartupUpdateCheck(broken, true)).resolves.toBeUndefined();
     expect(startupUpdateToShow(getStartupUpdateState(), true)).toBeNull();
   });
@@ -343,6 +344,8 @@ describe('fake desktop bridge (src/app/testing.ts)', () => {
     const desktop = createFakeDesktop();
     await expect(desktop.checkForUpdates!()).resolves.toEqual({ status: 'current' });
     expect(desktop.log).toEqual(['checkForUpdates']);
+    await expect(desktop.checkForStartupUpdates!()).resolves.toEqual({ status: 'current' });
+    expect(desktop.log).toEqual(['checkForUpdates', 'checkForStartupUpdates']);
     desktop.updateResult = { status: 'available', version: '1.2.1' };
     await expect(desktop.checkForUpdates!()).resolves.toEqual({ status: 'available', version: '1.2.1' });
   });
@@ -352,8 +355,9 @@ describe('fake desktop bridge (src/app/testing.ts)', () => {
     await expect(desktop.openUpdatePage!()).rejects.toThrow('No update available.');
     desktop.updateResult = { status: 'available', version: '1.2.1' };
     await desktop.checkForUpdates!();
+    await desktop.checkForStartupUpdates!();
     await desktop.openUpdatePage!();
-    expect(desktop.log).toEqual(['checkForUpdates', 'openUpdatePage']);
+    expect(desktop.log).toEqual(['checkForUpdates', 'checkForStartupUpdates', 'openUpdatePage']);
     desktop.updateResult = { status: 'current' };
     await desktop.checkForUpdates!();
     await expect(desktop.openUpdatePage!()).rejects.toThrow('No update available.');

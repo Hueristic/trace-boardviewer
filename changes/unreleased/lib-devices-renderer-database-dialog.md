@@ -1,0 +1,1 @@
+- The device database (a read-only scan of chosen folders that links boards, schematics and PDFs to motherboards) is built in but switched off in this release: the top bar shows no Database entry and its dialog cannot be opened. Its folder tree and motherboard list are implemented and are not shown while the switch is off. Nothing leaves the computer and no file is changed.

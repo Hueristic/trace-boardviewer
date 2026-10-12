@@ -53,7 +53,10 @@ function createSupportService({ store, egress, now = Date.now, config = configur
         return { ...status(value), code: value.claim };
       } catch { return { ...unavailable(), code: '' }; }
     },
-    async check() {
+    // Only an explicit user action (the Verify button sends { userAction: true }) may use the network on its own; any other call needs the support opt-in,
+    // which egress checks. A call without the flag is therefore refused without a request while that opt-in is off.
+    async check(options) {
+      const userAction = options?.userAction === true;
       if (pending) return pending;
       const result = await read();
       if (result.kind === 'unreadable' || result.kind === 'damaged') return unavailable();
@@ -63,7 +66,7 @@ function createSupportService({ store, egress, now = Date.now, config = configur
       if (now() < nextCheck) return { ...status(value), status: 'pending' };
       pending = (async () => {
         let answer;
-        try { answer = await egress().request(FEATURE.id, `${config.endpoint}/receipt?claim=${value.claim}`, { userAction: true }); }
+        try { answer = await egress().request(FEATURE.id, `${config.endpoint}/receipt?claim=${value.claim}`, { userAction }); }
         catch { return { ...status(value), status: 'unavailable' }; }
         if (!answer || typeof answer !== 'object' || !answer.ok || ![200, 404].includes(answer.status)) return { ...status(value), status: 'unavailable' };
         if (answer.status === 404) { nextCheck = now() + 10_000; return { ...status(value), status: 'pending' }; }

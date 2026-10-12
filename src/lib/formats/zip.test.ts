@@ -151,16 +151,16 @@ describe('ZIP import: refusals and limits', () => {
   });
   it('refuses damaged archives: no end record, cut data, wrong CRC, sizes that lie, duplicate names, a broken stream', () => {
     const good = rawZip([{ name: 'board.cad', data: GENCAD, method: 8 }]);
-    const damaged = ['INVALID_FORMAT', 'parse.error.archiveDamaged'];
-    expect(code(good.subarray(0, good.length - 1))).toEqual(damaged);
-    expect(code(good.subarray(0, 40))).toEqual(damaged);
-    expect(code(Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]))).toEqual(damaged);
-    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, crc: 1 }]))).toEqual(damaged);
-    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, method: 8, size: GENCAD.length + 5 }]))).toEqual(damaged);
-    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, method: 8, size: GENCAD.length - 5 }]))).toEqual(damaged);
-    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, size: GENCAD.length + 1 }]))).toEqual(damaged);
-    expect(code(rawZip([{ name: 'board.cad', data: GENCAD }, { name: 'BOARD.CAD', data: GENCAD }]))).toEqual(damaged);
-    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, method: 8, compressed: Uint8Array.from([0xff, 0xff, 0xff, 0xff]) }]))).toEqual(damaged);
+    const incomplete = ['INVALID_FORMAT', 'parse.error.zipIncomplete'], entryData = ['INVALID_FORMAT', 'parse.error.zipEntryData'], entryHeader = ['INVALID_FORMAT', 'parse.error.zipEntryHeader'];
+    expect(code(good.subarray(0, good.length - 1))).toEqual(incomplete);
+    expect(code(good.subarray(0, 40))).toEqual(incomplete);
+    expect(code(Uint8Array.from([0x50, 0x4b, 0x03, 0x04, 0, 0, 0, 0]))).toEqual(incomplete);
+    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, crc: 1 }]))).toEqual(entryData);
+    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, method: 8, size: GENCAD.length + 5 }]))).toEqual(entryData);
+    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, method: 8, size: GENCAD.length - 5 }]))).toEqual(entryData);
+    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, size: GENCAD.length + 1 }]))).toEqual(entryData);
+    expect(code(rawZip([{ name: 'board.cad', data: GENCAD }, { name: 'BOARD.CAD', data: GENCAD }]))).toEqual(entryHeader);
+    expect(code(rawZip([{ name: 'board.cad', data: GENCAD, method: 8, compressed: Uint8Array.from([0xff, 0xff, 0xff, 0xff]) }]))).toEqual(entryData);
   });
   it('bounds a decompression bomb: a declared size above the budget, an expansion ratio, and a stream that outgrows its size', () => {
     const zeros = new Uint8Array(16 * 1024 * 1024), bomb = deflateSync(zeros, { level: 9 });
@@ -169,22 +169,22 @@ describe('ZIP import: refusals and limits', () => {
     // with NUL bytes is binary, and no text reader waits for it).
     const noise = Uint8Array.from({ length: 300 * 1024 }, () => 32 + ((seed = seed * 1103515245 + 12345 >>> 0) >>> 24) % 95);
     // 65 MiB declared at a plausible ratio: the member is sniffed (only its head is inflated) and refused before it is unpacked.
-    expect(code(rawZip([{ name: 'board.cad', data: noise, size: 65 * 1024 * 1024, method: 8, compressed: deflateSync(noise, { level: 0 }) }]))).toEqual(['LIMIT_EXCEEDED', 'parse.error.archiveTooLarge']);
-    expect(code(rawZip([{ name: 'board.cad', data: zeros, method: 8, compressed: bomb }]))).toEqual(['LIMIT_EXCEEDED', 'parse.error.archiveRatio']);
+    expect(code(rawZip([{ name: 'board.cad', data: noise, size: 65 * 1024 * 1024, method: 8, compressed: deflateSync(noise, { level: 0 }) }]))).toEqual(['LIMIT_EXCEEDED', 'parse.error.archiveBudget']);
+    expect(failure(() => open(rawZip([{ name: 'board.cad', data: zeros, method: 8, compressed: bomb }])))).toMatchObject({ code: 'LIMIT_EXCEEDED', issue: { key: 'parse.error.archiveRatioDeclared', params: { entry: 'board.cad', declared: Math.round(zeros.length / bomb.length), limit: LIMITS.maxRatio } } });
     // The header claims 64 bytes, the stream would produce 16 MiB: inflation stops at the declared size.
-    expect(code(rawZip([{ name: 'board.fz', data: zeros.subarray(0, 64), size: 64, method: 8, compressed: bomb }]))).toEqual(['INVALID_FORMAT', 'parse.error.archiveDamaged']);
+    expect(code(rawZip([{ name: 'board.fz', data: zeros.subarray(0, 64), size: 64, method: 8, compressed: bomb }]))).toEqual(['INVALID_FORMAT', 'parse.error.zipEntryData']);
     // The cut-off is measured against inflating the whole stream, which is what a missing cut-off would do. The reader stops within the first
     // 4 KiB of the compressed stream (the output of one push), so a stream of 64 MiB costs it a small, fixed part of the whole.
     const huge = deflateSync(new Uint8Array(64 * 1024 * 1024), { level: 9 });
     const lying = rawZip([{ name: 'board.fz', data: zeros.subarray(0, 64), size: 64, method: 8, compressed: huge }]);
-    expect(code(lying)).toEqual(['INVALID_FORMAT', 'parse.error.archiveDamaged']);
+    expect(code(lying)).toEqual(['INVALID_FORMAT', 'parse.error.zipEntryData']);
     expectCostAtMost('refusing a stream that outgrows its declared size', () => code(lying), () => inflateSync(huge), 0.4);
   });
   it('limits the archive size and the entry count', () => {
     expect(code(new Uint8Array(MAX_IMPORT_BYTES + 1))).toEqual(['LIMIT_EXCEEDED', undefined]);
     expect(() => readZip(new Uint8Array(LIMITS.maxArchiveBytes + 1), LIMITS)).toThrow(expect.objectContaining({ code: 'LIMIT_EXCEEDED', issue: { key: 'parse.error.archiveTooLarge', params: { max: 64 } } }));
     const crowded = zipSync(Object.fromEntries(Array.from({ length: LIMITS.maxEntries + 1 }, (_, index) => [`f${index}.txt`, new Uint8Array(0)])));
-    expect(code(crowded)).toEqual(['LIMIT_EXCEEDED', 'parse.error.archiveTooManyEntries']);
+    expect(failure(() => open(crowded))).toMatchObject({ code: 'LIMIT_EXCEEDED', issue: { key: 'parse.error.archiveEntryCount', params: { entries: LIMITS.maxEntries + 1, max: LIMITS.maxEntries } } });
   });
 });
 

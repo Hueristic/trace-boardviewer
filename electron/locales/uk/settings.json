@@ -13,5 +13,10 @@
   "settings.labelsHint": "Позначення, що змінюють розмір разом із масштабом",
   "settings.connections": "Допоміжні лінії з'єднань",
   "settings.connectionsHint": "Прямі лінії від вибраного піна до падів його ланцюга",
-  "settings.autosave": "Налаштування зберігаються автоматично."
+  "settings.autosave": "Налаштування зберігаються автоматично.",
+  "settings.noSandbox.title": "Linux: запуск без пісочниці",
+  "settings.noSandbox.hint": "Якщо ви обрали «Більше не питати», TRACE більше не питатиме. Скасування діє з наступного запуску.",
+  "settings.noSandbox.saved": "Збережено: TRACE більше не питає",
+  "settings.noSandbox.unsaved": "Не збережено: питання з'являється при кожному запуску без пісочниці",
+  "settings.noSandbox.revoke": "Питати знову при наступному запуску"
 }

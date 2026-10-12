@@ -3,7 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { GenCadParseError } from '../gencad';
 import { CERTAIN, defineBoardAdapter, LIKELY, NO_MATCH, SNIFF_BYTES, sniffed, STATUS_VALIDATION, type BoardAdapter, type FormatAdapter } from './adapter';
-import { BoardFormatError, TextDecodeError, type ParseInput } from './common';
+import { BoardFormatError, MAX_IMPORT_BYTES, MAX_NATIVE_ALLEGRO_IMPORT_BYTES, TextDecodeError, type ParseInput } from './common';
 import { detectFormat, parseBoardDetailed, rankAdapters, sniffInputOf } from './dispatch';
 import type { AdapterFixture } from './fixture';
 import { parseWith } from './index';
@@ -105,10 +105,11 @@ describe('capability records: status moves only with evidence', () => {
       expect(c.variants.length && c.notes.length && c.units.length && c.sides.length, c.id).toBeTruthy();
     }
   });
-  it('declares budgets no larger than the import limit of the native side', () => {
+  it('declares budgets no larger than the import limit of the native side (only the native Allegro BRD may exceed the general limit)', () => {
     for (const adapter of BOARD_ADAPTERS) {
-      expect(adapter.limits.maxInputBytes, adapter.id).toBeLessThanOrEqual(64 * 1024 * 1024);
-      expect(adapter.limits.maxTotalBytes, adapter.id).toBeLessThanOrEqual(64 * 1024 * 1024);
+      const cap = adapter.id === 'allegro-brd' ? MAX_NATIVE_ALLEGRO_IMPORT_BYTES : MAX_IMPORT_BYTES;
+      expect(adapter.limits.maxInputBytes, adapter.id).toBeLessThanOrEqual(cap);
+      expect(adapter.limits.maxTotalBytes, adapter.id).toBeLessThanOrEqual(cap);
       expect(adapter.limits.maxComponents > 0 && adapter.limits.maxPins > 0, adapter.id).toBe(true);
     }
   });

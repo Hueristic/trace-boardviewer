@@ -13,8 +13,10 @@ const { isDeepStrictEqual } = require('node:util');
 const { _electron } = require('playwright');
 const { zipSync } = require('fflate');
 const { makeImageOnlyPdf } = require('./qa-ocr.cjs');
+const qaFlavour = require('./qa-flavour.cjs');
 const { reconcileBugReportNetworkEvidence, isReportRecord, isResponseRecord, isCancelOracle, isCancelledAttempt, observerCounts } = require('./packaged-functional/bug-reports.cjs');
 const { launchWithPreMainObservers, waitForPortRelease, withTimeout } = require('./packaged-functional-inspector.cjs');
+const { startReportLoopback } = require('./packaged-functional/report-loopback.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 
@@ -26,6 +28,10 @@ const VERSION_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 const PLATFORMS = new Set(['win32', 'darwin', 'linux']);
 const ARCHES = new Set(['x64', 'arm64']);
 const LANGUAGES = ['hu', 'en', 'de', 'fr', 'it', 'sk', 'pl', 'uk'];
+// Shutdown gate (U-29 / TB-315, PARITY-09). A packaged quit must end within 10 s of app.close(). A slower quit is a product defect (the store quit path): the step FAILs, the harness stops the process, and the run continues with the next steps so their results are kept. The time from
+// app.close() to the observed exit is recorded for every exit (closeMs) and for every step.
+const CLOSE_GATE_MS = 10000;
+const FORCED_EXIT_WAIT_MS = 10000;
 const STRIPE_BASE = 'https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00';
 const REQUIRED_MODULES = Object.freeze(['imports', 'viewers', 'workspaces', 'support-updates', 'bug-reports']);
 const REQUIRED_SCREENSHOTS = Object.freeze(['board-loaded.png', 'ocr-recognized.png']);
@@ -43,9 +49,14 @@ const REQUIRED_CORE_STEPS = Object.freeze([
   'no uncaught renderer errors or CSP violations',
 ]);
 const SCENARIO_MANIFEST = Object.freeze({ schema: 'trace-packaged-functional-scenarios/1', modules: REQUIRED_MODULES, coreSteps: REQUIRED_CORE_STEPS });
-const CHECKS = [], FAILURES = [], NETWORK = [], PAGE_ERRORS = [], CONSOLE_ERRORS = [], CSP_ERRORS = [];
+const CHECKS = [], FAILURES = [], NETWORK = [], PAGE_ERRORS = [], CONSOLE_ERRORS = [], CSP_ERRORS = [], SHUTDOWN_GATE_FAILURES = [];
 let reportPrivacyActive = false;
 let app = null, page = null, evidence = null, launchNumber = 0;
+// The offline loopback stand-in for the bug-report receiver; set for the whole functional run (see report-loopback.cjs).
+let reportLoopback = null;
+// Diagnostic only: TRACE_QA_SHUTDOWN_LOG=<file> appends the main-process quit events, the step boundaries and the harness close timing.
+const SHUTDOWN_LOG = process.env.TRACE_QA_SHUTDOWN_LOG || null;
+async function logShutdown(line) { if (SHUTDOWN_LOG) await fs.appendFile(SHUTDOWN_LOG, `${new Date().toISOString()} ${line}\n`).catch(() => {}); }
 const OBSERVED_PAGES = new WeakSet();
 let failureScreenshot = null;
 
@@ -130,6 +141,8 @@ function parseArgs(argv) {
     options[name] = path.resolve(options[name]);
   }
   if (!VERSION_RE.test(options.version)) throw new Error('--version is not a valid release version');
+  // The flavour of the tested build: release (the default) or qa (the inspector-on identity that these runs attach through).
+  qaFlavour.flavour(options.flavour || 'release');
   if (!PLATFORMS.has(options.os)) throw new Error('--os must be win32, darwin or linux');
   if (!ARCHES.has(options.arch)) throw new Error('--arch must be x64 or arm64');
   if (options.os !== process.platform) throw new Error('Requested OS does not match this runner');
@@ -300,12 +313,14 @@ async function runRequiredScenarioModules(context, directory = path.join(ROOT, '
 }
 
 async function assertArtifactPayloadLinkage(options, { asarSha256, executableSha256, payloadManifest }) {
+  // The names inside the package follow the flavour of the tested build (release or qa), never a fixed product name.
+  const identity = qaFlavour.flavour(options.flavour || 'release');
   if (appImageMode(options)) {
     assert.ok(canonicalIdentity(options.executable, options.artifact, options.os), 'AppImage QA launches the exact checksummed wrapper');
   }
   if (options.os === 'win32') {
     assert.ok(options.manifest, 'Windows QA requires the unpacked-payload manifest');
-    const fuses = await inspectFuses(options.executable);
+    const fuses = await inspectFuses(options.executable, options);
     return { method: 'unpacked payload manifest plus portable-isolation runtime parity', asarSha256, executableSha256,
       manifestDigest: payloadManifest.digest, portableArtifact: path.basename(options.artifact), fuses };
   }
@@ -314,14 +329,14 @@ async function assertArtifactPayloadLinkage(options, { asarSha256, executableSha
     if (options.os === 'darwin') {
       const result = spawnSync('ditto', ['-x', '-k', options.artifact, temporary], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
       assert.equal(result.status, 0, `ditto extracted the checksummed macOS ZIP: ${result.stderr || result.error || ''}`);
-      const packagedAsar = path.join(temporary, 'TRACE Boardviewer.app', 'Contents', 'Resources', 'app.asar');
+      const packagedAsar = path.join(temporary, `${identity.productName}.app`, 'Contents', 'Resources', 'app.asar');
       const extractedSha256 = await fileSha(packagedAsar);
       assert.equal(extractedSha256, asarSha256, 'the QA ASAR is byte-identical to app.asar inside the checksummed macOS ZIP');
-      const packagedExecutable = path.join(temporary, 'TRACE Boardviewer.app', 'Contents', 'MacOS', 'TRACE Boardviewer');
+      const packagedExecutable = path.join(temporary, `${identity.productName}.app`, 'Contents', 'MacOS', identity.productName);
       const extractedExecutableSha256 = await fileSha(packagedExecutable);
       assert.equal(extractedExecutableSha256, executableSha256, 'the tested macOS executable is byte-identical to the executable inside the checksummed ZIP');
       return { method: 'ditto extraction from checksummed ZIP', asarSha256: extractedSha256, executableSha256: extractedExecutableSha256,
-        fuses: await inspectFuses(packagedExecutable) };
+        fuses: await inspectFuses(packagedExecutable, options) };
     }
     const appImage = /\.AppImage$/i.test(options.artifact);
     const result = appImage
@@ -329,26 +344,28 @@ async function assertArtifactPayloadLinkage(options, { asarSha256, executableSha
       : spawnSync('dpkg-deb', ['-x', options.artifact, temporary], { encoding: 'utf8', maxBuffer: 1024 * 1024 });
     assert.equal(result.status, 0, `${appImage ? 'AppImage' : 'Debian package'} extracted: ${result.stderr || result.error || ''}`);
     const packageRoot = appImage ? path.join(temporary, 'squashfs-root') : temporary;
-    const packagedAsar = path.join(packageRoot, appImage ? 'resources' : path.join('opt', 'TRACE Boardviewer', 'resources'), 'app.asar');
+    const packagedAsar = path.join(packageRoot, appImage ? 'resources' : path.join('opt', identity.productName, 'resources'), 'app.asar');
     const extractedSha256 = await fileSha(packagedAsar);
     assert.equal(extractedSha256, asarSha256, `the ${appImage ? 'AppImage' : 'installed DEB'} ASAR is byte-identical to app.asar inside the checksummed artifact`);
-    const packagedExecutable = path.join(packageRoot, appImage ? 'trace-boardviewer' : path.join('opt', 'TRACE Boardviewer', 'trace-boardviewer'));
+    const packagedExecutable = path.join(packageRoot, appImage ? identity.executableName : path.join('opt', identity.productName, identity.executableName));
     const extractedExecutableSha256 = await fileSha(packagedExecutable);
     if (!appImage) assert.equal(extractedExecutableSha256, executableSha256, 'the tested DEB executable is byte-identical to the executable inside the checksummed DEB');
     return { method: appImage ? 'AppImage squashfs extraction' : 'dpkg-deb extraction from installed-package artifact', asarSha256: extractedSha256,
-      executableSha256: extractedExecutableSha256, fuses: await inspectFuses(packagedExecutable),
+      executableSha256: extractedExecutableSha256, fuses: await inspectFuses(packagedExecutable, options),
       ...(appImage ? { wrapperIdentity: { executable: path.basename(options.executable), artifact: path.basename(options.artifact), equal: true,
         extractedRuntime: path.basename(packagedExecutable), appRun: 'squashfs-root/AppRun' } } : {}) };
   } finally { await fs.rm(temporary, { recursive: true, force: true }); }
 }
 
-async function inspectFuses(binary) {
+async function inspectFuses(binary, options) {
   const builderRequire = createRequire(require.resolve('electron-builder/package.json'));
   const libraryRequire = createRequire(builderRequire.resolve('app-builder-lib/package.json'));
   const fuses = libraryRequire('@electron/fuses');
   const observedRaw = await fuses.getCurrentFuseWire(binary);
-  const packageJson = JSON.parse(await fs.readFile(path.join(ROOT, 'package.json'), 'utf8'));
-  const configured = packageJson.build?.electronFuses || {};
+  // The expected wire is the one of the flavour the run was asked to test, read from the config that flavour is built with.
+  const selected = qaFlavour.flavour(options.flavour || 'release');
+  const platform = { win32: 'win', linux: 'linux', darwin: 'mac' }[options.os];
+  const configured = qaFlavour.expectedFuses(selected, platform) || {};
   const smoke = require(path.join(ROOT, 'scripts', 'linux-smoke.cjs'));
   const observed = smoke.describeFuseWire(observedRaw);
   const expected = smoke.expectedFuseWire(configured);
@@ -412,13 +429,30 @@ async function captureArtifact(options) {
 async function step(name, action) {
   const fallbackStage = evidence?.failureStage || 'functional-run';
   if (evidence) evidence.failureStage = 'functional-step:' + name;
+  await logShutdown(`step start ${name}`);
+  const gatesBefore = SHUTDOWN_GATE_FAILURES.length;
+  const exitsBefore = evidence?.processExits?.length || 0;
   try {
     const result = await action();
-    CHECKS.push({ name, status: 'pass', result: result === undefined ? null : result });
-    console.log('PASS ' + name);
+    const closeMs = (evidence?.processExits || []).slice(exitsBefore).map((exit) => exit.closeMs);
+    const gates = SHUTDOWN_GATE_FAILURES.slice(gatesBefore);
+    if (gates.length) {
+      // A slow quit fails this step, but the step returns so that the run continues (the process was already stopped by the harness).
+      const message = gates.map((gate) => gate.reason
+        ? `shutdown evidence incomplete: ${gate.reason}`
+        : `shutdown exceeded the ${CLOSE_GATE_MS / 1000} s close gate (closeMs ${gate.closeMs}); the harness stopped the process`).join('; ') + ' — the run continued';
+      CHECKS.push({ name, status: 'fail', error: message, closeMs });
+      FAILURES.push({ name, message, diagnostics: { status: 'unavailable', error: 'shutdown gate: no UI diagnostics after a stopped process' } });
+      console.error('FAIL ' + name + ': ' + message);
+    } else {
+      await logShutdown(`step pass ${name}`);
+      CHECKS.push({ name, status: 'pass', result: result === undefined ? null : result, closeMs });
+      console.log('PASS ' + name);
+    }
     if (evidence) evidence.failureStage = fallbackStage;
     return result;
   } catch (error) {
+    await logShutdown(`step fail ${name}`);
     const reportFailure = reportPrivacyActive || /^(?:bug report|support reminder report)/i.test(name);
     const failure = { name, message: reportFailure ? 'Bug-report acceptance step failed; diagnostic text was withheld.' : error && error.message || String(error) };
     try {
@@ -521,8 +555,27 @@ async function launch(options, profile, board) {
   delete env.ELECTRON_RUN_AS_NODE;
   delete env.VITE_DEV_SERVER_URL;
   const started = await launchWithPreMainObservers({ executablePath: options.executable,
-    args: ['--user-data-dir=' + profile, ...(board ? ['--board=' + board] : [])], env, timeout: 60000 });
+    args: ['--user-data-dir=' + profile, ...(board ? ['--board=' + board] : []), ...(reportLoopback ? reportLoopback.launchArgs : [])], env, timeout: 60000 });
   app = started.app;
+  if (SHUTDOWN_LOG) {
+    await logShutdown(`launch ${launchNumber + 1} started`);
+    await app.evaluate(({ app: electronApp, BrowserWindow }, { logPath, label }) => {
+      const fsNode = process.getBuiltinModule('node:fs');
+      process.on('exit', (code) => fsNode.appendFileSync(logPath, `${new Date().toISOString()} main ${label} process-exit code=${code}\n`));
+      for (const event of ['before-quit', 'will-quit', 'window-all-closed', 'quit']) {
+        electronApp.on(event, () => fsNode.appendFileSync(logPath, `${new Date().toISOString()} main ${label} ${event} windows=${BrowserWindow.getAllWindows().length}\n`));
+      }
+      // app.exit() skips will-quit; record who calls app.exit / app.quit, and from where (the first stack frames), before they run.
+      for (const method of ['exit', 'quit']) {
+        const original = electronApp[method].bind(electronApp);
+        electronApp[method] = (...args) => {
+          const frames = (new Error().stack || '').split('\n').slice(2, 6).map(frame => frame.trim()).join(' | ');
+          fsNode.appendFileSync(logPath, `${new Date().toISOString()} main ${label} app.${method}(${args.join(', ')}) windows=${BrowserWindow.getAllWindows().length} at ${frames}\n`);
+          return original(...args);
+        };
+      }
+    }, { logPath: SHUTDOWN_LOG, label: `launch ${launchNumber + 1}` });
+  }
   if (reportPrivacyActive) await app.evaluate(() => globalThis.__traceQaSetBugReportPrivacy?.(true));
   launchNumber++;
   const startup = { ...started.proof, inspectorPort: started.port };
@@ -619,37 +672,58 @@ async function closeNormally() {
     }
   }
   const exited = new Promise((resolve) => child.once('exit', (code) => resolve(code)));
+  child.once('exit', (code, signal) => { logShutdown(`harness child-exit launch ${launchNumber} code ${code} signal ${signal}`); });
   let closeError = null;
-  try { await withTimeout(app.close(), 10000, 'Packaged Electron app.close() did not settle during cleanup'); }
+  await logShutdown(`harness close-start launch ${launchNumber}`);
+  const closeStarted = Date.now();
+  const gateDeadline = closeStarted + CLOSE_GATE_MS;
+  try { await withTimeout(app.close(), CLOSE_GATE_MS, 'Packaged Electron app.close() did not settle within the close gate'); }
   catch (error) { closeError = error; }
+  await logShutdown(`harness close-settled launch ${launchNumber} error ${closeError ? closeError.message : 'none'}`);
   let exitWaitError = null;
   let exitCode = child.exitCode;
   if (exitCode === null) {
-    try { exitCode = await withTimeout(exited, 10000, 'Packaged Electron process did not exit normally'); }
+    try { exitCode = await withTimeout(exited, Math.max(1, gateDeadline - Date.now()), 'Packaged Electron process did not exit within the close gate'); }
     catch (error) { exitWaitError = error; }
   }
-  const exit = { launch: launchNumber, exitCode, signal: child.signalCode || null, forced: false };
+  // Still running at the gate: the harness stops the process. The step FAILs (see step()); the run goes on with the next steps.
+  const gateStopped = child.exitCode === null;
+  if (gateStopped) {
+    child.kill();
+    try { exitCode = await withTimeout(exited, FORCED_EXIT_WAIT_MS, 'Packaged Electron process did not stop after the harness stopped it'); }
+    catch (error) { exitWaitError = error; }
+  }
+  // closeMs is the measured time from app.close() to the observed process exit, kept in the evidence for every exit.
+  const closeMs = Date.now() - closeStarted;
+  const exit = { launch: launchNumber, exitCode, signal: child.signalCode || null, forced: gateStopped, closeMs };
+  if (gateStopped) SHUTDOWN_GATE_FAILURES.push({ launch: launchNumber, closeMs });
   evidence.processExits = evidence.processExits || [];
   evidence.processExits.push(exit);
   if (launchRecord) launchRecord.exit = exit;
   if (exitCode !== null) app = null;
   if (launchRecord) {
     const cleanupProblems = [];
+    if (gateStopped) cleanupProblems.push(`shutdown exceeded the ${CLOSE_GATE_MS / 1000} s close gate (closeMs ${closeMs}); the harness stopped the process`);
     if (closeError) cleanupProblems.push(cleanupErrorClass('application close', closeError));
     if (exitWaitError) cleanupProblems.push(cleanupErrorClass('process exit wait', exitWaitError));
     if (observationError) cleanupProblems.push(cleanupErrorClass('shutdown observation', observationError));
-    if (exitCode !== 0 || child.signalCode) cleanupProblems.push(`process exit was not normal (code ${exitCode}, signal ${child.signalCode || 'none'})`);
-    cleanupProblems.push(...await collectShutdownEvidence({ launchRecord, readStderr: () => evidence.stderr || '',
-      pageErrors: PAGE_ERRORS, consoleErrors: CONSOLE_ERRORS, cspErrors: CSP_ERRORS }));
+    if (!gateStopped && (exitCode !== 0 || child.signalCode)) cleanupProblems.push(`process exit was not normal (code ${exitCode}, signal ${child.signalCode || 'none'})`);
+    const hardProblemCount = cleanupProblems.length;
+    // Shutdown evidence (the pre-main observer's will-quit snapshot and the rest) fails its step, as the close gate does, and the run goes on:
+    // the step() wrapper reports it. The process is already gone, so nothing here can be retried.
+    const evidenceProblems = await collectShutdownEvidence({ launchRecord, readStderr: () => evidence.stderr || '',
+      pageErrors: PAGE_ERRORS, consoleErrors: CONSOLE_ERRORS, cspErrors: CSP_ERRORS });
+    if (evidenceProblems.length) SHUTDOWN_GATE_FAILURES.push({ launch: launchNumber, closeMs, reason: evidenceProblems.join('; ') });
+    cleanupProblems.push(...evidenceProblems);
     launchRecord.exit = exit;
     delete launchRecord.pageErrorStart;
     delete launchRecord.consoleErrorStart;
     delete launchRecord.cspErrorStart;
     if (cleanupProblems.length) launchRecord.cleanup = { ...(launchRecord.cleanup || {}), problems: cleanupProblems };
-    if (cleanupProblems.length) throw new Error('Packaged shutdown evidence incomplete: ' + cleanupProblems.join('; '),
+    if (hardProblemCount && !gateStopped) throw new Error('Packaged shutdown evidence incomplete: ' + cleanupProblems.join('; '),
       { cause: closeError || exitWaitError || observationError || undefined });
   }
-  if (closeError || exitWaitError || observationError || exitCode !== 0 || child.signalCode) {
+  if (!gateStopped && (closeError || exitWaitError || observationError || exitCode !== 0 || child.signalCode)) {
     throw new Error(`Packaged shutdown evidence incomplete for launch ${launchNumber}`, { cause: closeError || exitWaitError || observationError || undefined });
   }
   return exit;
@@ -924,14 +998,26 @@ async function withDialogOverride(method, value, action) {
   await app.evaluate(({ dialog }, { methodName, tokenName, dialogValue }) => {
     if (globalThis[tokenName]) throw new Error(`A ${methodName} chooser is already active`);
     const original = dialog[methodName];
-    const replacement = methodName === 'showOpenDialog'
+    const state = { called: false };
+    const answer = methodName === 'showOpenDialog'
       ? async () => ({ canceled: false, filePaths: dialogValue })
       : async () => ({ canceled: false, filePath: dialogValue });
-    globalThis[tokenName] = { original, replacement };
+    const replacement = async (...args) => { state.called = true; return answer(...args); };
+    globalThis[tokenName] = { original, replacement, state };
     dialog[methodName] = replacement;
   }, { methodName: method, tokenName: token, dialogValue: value });
-  try { return await action(); }
+  let completed = false;
+  let result;
+  try { result = await action(); completed = true; }
   finally {
+    // The renderer click returns before the main process asks for the path: keep the override until that request arrived.
+    if (app && completed) {
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const requested = await app.evaluate((_electron, { tokenName }) => !!globalThis[tokenName]?.state.called, { tokenName: token });
+        if (requested) break;
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
     if (app) await app.evaluate(({ dialog }, { methodName, tokenName }) => {
       const saved = globalThis[tokenName];
       if (saved) {
@@ -940,6 +1026,7 @@ async function withDialogOverride(method, value, action) {
       }
     }, { methodName: method, tokenName: token });
   }
+  return result;
 }
 
 async function withOpenDialog(files, action) {
@@ -950,6 +1037,53 @@ async function withOpenDialog(files, action) {
 async function withSaveDialog(destination, action) {
   assert.equal(typeof destination, 'string', 'save chooser requires a destination path');
   return withDialogOverride('showSaveDialog', destination, action);
+}
+
+async function clearBoardSearch(page, timeout = 15000) {
+  const input = page.locator('[data-testid=search-input]');
+  await input.waitFor({ state: 'visible', timeout });
+  await input.fill('');
+  await page.waitForFunction(() => {
+    const field = document.querySelector('[data-testid=search-input]');
+    const pending = document.querySelector('.wsp-search-field .spin');
+    const componentRows = document.querySelectorAll('[data-testid=search-row][data-source="board-components"]');
+    return field?.value === '' && !pending && componentRows.length === 0;
+  }, null, { timeout });
+}
+
+async function prepareBoardSearch(page, query, timeout = 15000) {
+  assert.equal(typeof query, 'string');
+  assert.ok(query.trim(), 'board search query must not be empty');
+  const boardTab = page.locator('#wsp-tab-board');
+  await boardTab.waitFor({ state: 'visible', timeout });
+  await boardTab.click();
+  await page.waitForFunction(() => document.querySelector('#wsp-tab-board')?.getAttribute('aria-selected') === 'true', null, { timeout });
+  await page.locator('[data-testid=search-input]').waitFor({ state: 'visible', timeout });
+  await clearBoardSearch(page, timeout);
+  const input = page.locator('[data-testid=search-input]');
+  await input.fill(query);
+  return input;
+}
+
+async function selectBoardComponentResult(page, reference, timeout = 15000) {
+  assert.match(reference, /^[A-Za-z0-9_-]+$/, 'component reference is a plain identifier');
+  await prepareBoardSearch(page, reference, timeout);
+  const exactReference = new RegExp(`^${reference}$`);
+  const row = page.locator('[data-testid=search-row][data-source="board-components"]')
+    .filter({ has: page.locator('.component-ref', { hasText: exactReference }) });
+  await row.waitFor({ state: 'visible', timeout });
+  await page.waitForFunction((expected) => {
+    const input = document.querySelector('[data-testid=search-input]');
+    const rows = [...document.querySelectorAll('[data-testid=search-row][data-source="board-components"]')];
+    return input?.value === expected && rows.some((item) => {
+      const ref = item.querySelector('.component-ref');
+      const rect = item.getBoundingClientRect();
+      const style = getComputedStyle(item);
+      return ref?.textContent?.trim() === expected && rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+    });
+  }, reference, { timeout });
+  await row.click();
+  await page.waitForFunction((expected) => document.querySelector('[data-testid=hero-ref]')?.textContent?.trim() === expected, reference, { timeout });
 }
 
 async function waitBoard(expected = [3, 6, 2]) {
@@ -1212,8 +1346,7 @@ async function runFunctional(options) {
       await openDialog([path.join(fixtureDir, 'format.asc')]);
       await page.waitForFunction(() => /format\.asc/i.test(document.querySelector('.project-subtitle')?.textContent || ''), null, { timeout: 20000 });
       const counts = await waitBoard([1, 1, 1]);
-      await page.fill('[data-testid=search-input]', 'U1');
-      await page.press('[data-testid=search-input]', 'Enter');
+      await selectBoardComponentResult(page, 'U1');
       await page.waitForSelector('[data-testid=pin-row]', { timeout: 15000 });
       await page.locator('[data-testid=pin-row]').first().click();
       await page.click('[data-testid=add-note]');
@@ -1226,8 +1359,7 @@ async function runFunctional(options) {
       await waitBoard([1, 1, 1]);
       await settleStartupSupportNotice();
       await page.waitForFunction(() => /pins\.asc/i.test(document.querySelector('.project-subtitle')?.textContent || ''), null, { timeout: 20000 });
-      await page.fill('[data-testid=search-input]', 'U1');
-      await page.press('[data-testid=search-input]', 'Enter');
+      await selectBoardComponentResult(page, 'U1');
       await page.waitForSelector('[data-testid=pin-row]', { timeout: 15000 });
       await page.locator('[data-testid=pin-row]').first().click();
       await page.waitForFunction(() => /companion identity note/.test(document.querySelector('[data-testid=inspector]')?.textContent || ''), null, { timeout: 15000 });
@@ -1264,11 +1396,15 @@ async function runFunctional(options) {
         return match[1];
       });
       evidence.ocrAssetRuntimeProof = { assets: observedAssets, loadedFrom: 'resources/app.asar/dist/assets', archiveSha256: evidence.artifact.asarSha256 };
-      await page.fill('[data-testid=search-input]', 'PU301');
-      await page.waitForFunction(() => [...document.querySelectorAll('[data-testid=search-row]')].some((node) => /manual\.pdf|document/i.test(node.textContent || '')), null, { timeout: 30000 });
+      await prepareBoardSearch(page, 'PU301', 30000);
+      const pdfSearchResult = page.locator('[data-testid=search-row][data-source="documents"]').filter({ hasText: /manual\.pdf/i }).first();
+      await pdfSearchResult.waitFor({ state: 'visible', timeout: 30000 });
       assert.equal(await page.locator('.pdfv-error').count(), 0);
+      await clearBoardSearch(page, 30000);
+      await page.click('#wsp-tab-documents');
+      await page.waitForFunction(() => document.querySelector('#wsp-tab-documents')?.getAttribute('aria-selected') === 'true', null, { timeout: 15000 });
+      await page.waitForSelector('[data-testid=documents-tab] .pdfv-page[data-render=done]', { state: 'visible', timeout: 15000 });
       await screenshot('ocr-recognized');
-      await page.fill('[data-testid=search-input]', '');
       await page.locator('[data-testid=document-row] .wsp-doc-main', { hasText: 'wiring.kicad_sch' }).click();
       await page.waitForFunction(() => document.querySelector('.schv-canvas') || document.querySelector('.wsp-state[role=alert]'), null, { timeout: 30000 }).catch(() => {});
       const schematicState = await page.evaluate(() => ({ canvasCount: document.querySelectorAll('.schv-canvas').length,
@@ -1279,11 +1415,9 @@ async function runFunctional(options) {
       return { attachments, recognizedWords: words, exactReferenceLabels: labels, ocrAssetRuntimeProof: evidence.ocrAssetRuntimeProof, schematic: schematicState };
     });
     await step('typed pin note, measurement, attachments and settings survive normal quit and restart', async () => {
-      await page.fill('[data-testid=search-input]', 'PU301');
-      await page.press('[data-testid=search-input]', 'Enter');
+      await selectBoardComponentResult(page, 'PU301');
       await page.waitForSelector('[data-testid=pin-row]', { timeout: 15000 });
       await page.locator('[data-testid=pin-row]').first().click();
-      await page.click('#wsp-tab-board');
       await page.click('[data-testid=add-note]');
       await page.fill('#note-draft', 'packaged fixture note');
       await page.fill('[data-testid=measure-voltage]', '0.42 V');
@@ -1300,8 +1434,7 @@ async function runFunctional(options) {
       await launch(options, profile, boardPath);
       await waitBoard();
       await settleStartupSupportNotice();
-      await page.fill('[data-testid=search-input]', 'PU301');
-      await page.press('[data-testid=search-input]', 'Enter');
+      await selectBoardComponentResult(page, 'PU301');
       await page.waitForSelector('[data-testid=pin-row]');
       await page.locator('[data-testid=pin-row]').first().click();
       await page.waitForFunction(() => /0\.42 V/.test(document.querySelector('[data-testid=inspector]')?.textContent || ''), null, { timeout: 20000 });
@@ -1372,10 +1505,11 @@ async function runFunctional(options) {
         const fixtureRoot = await fs.realpath(fixtureDir);
         const real = await fs.realpath(filename);
         assert.ok(isPathWithin(fixtureRoot, real), 'synthetic native board delivery stays inside the generated fixture root');
-        const delivered = await app.evaluate(({ app: electronApp }, value) => {
+        const boardDirectory = path.dirname(real);
+        const delivered = await app.evaluate(({ app: electronApp }, { value, directory }) => {
           if (process.platform === 'darwin') return electronApp.emit('open-file', { preventDefault() {} }, value);
-          return electronApp.emit('second-instance', {}, [process.execPath, '--board=' + value], require('node:path').dirname(value));
-        }, real);
+          return electronApp.emit('second-instance', {}, [process.execPath, '--board=' + value], directory);
+        }, { value: real, directory: boardDirectory });
         assert.equal(delivered, true, 'the actual main process has a listener for the platform native-delivery event');
         return { delivered: true };
       },
@@ -1590,6 +1724,7 @@ async function main(argv = process.argv) {
     Object.assign(evidence, { runtime: null, profileIsolated: true, sessionCacheOnly: true, providerUrlsVisited: null, normalQuit: false });
     await writeEvidence(options.out);
     evidence.failureStage = 'functional-run';
+    reportLoopback = await startReportLoopback();
     await runFunctional(options);
     if (evidence.status !== 'pass') throw new Error('functional run did not satisfy the required evidence manifest');
   } catch (error) {
@@ -1602,6 +1737,7 @@ async function main(argv = process.argv) {
       message: reportFailure ? 'Bug-report acceptance failed; details withheld.' : error && error.message || String(error) }];
     process.exitCode = 1;
   } finally {
+    if (reportLoopback) { await reportLoopback.close().catch(() => {}); reportLoopback = null; }
     const output = evidence.output || requestedOutput(argv);
     try { await writeEvidence(output); }
     catch (error) { console.error(reportPrivacyActive ? 'Could not write bug-report failure evidence; details withheld.'

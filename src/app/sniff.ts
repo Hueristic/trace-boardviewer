@@ -10,6 +10,8 @@ export interface SniffedDocument {
 }
 
 const HEAD_BYTES = 256 * 1024;
+/** The TextDecoder label of a byte-order-marked UTF-16 file (FF FE little endian, FE FF big endian), or null. */
+const utf16Label = (data: Uint8Array): string | null => (data[0] === 0xff && data[1] === 0xfe ? 'utf-16le' : data[0] === 0xfe && data[1] === 0xff ? 'utf-16be' : null);
 const text = (data: Uint8Array, length: number) => {
   let start = data.length >= 3 && data[0] === 0xef && data[1] === 0xbb && data[2] === 0xbf ? 3 : 0;
   const end = Math.min(data.length, start + length);
@@ -22,7 +24,8 @@ const text = (data: Uint8Array, length: number) => {
  * Browser-fallback twin of the native content sniffing (electron/documents.cjs): the kind comes from the BYTES, never from
  * the extension. A PDF is a document, not a boardview or a netlist. EAGLE XML is recognized by its root element after the
  * prolog (the scanner is shared with the native side) and counts as a schematic only when it contains a `<schematic`
- * element (a board or a library is not one). Returns `null` for anything else.
+ * element (a board or a library is not one). Byte-order-marked UTF-16 is decoded for the same schematic signatures as in the
+ * native sniffer (O-27); UTF-16 SVG is refused, as sniffImage refuses it. Returns `null` for anything else.
  */
 export function sniffDocument(data: Uint8Array): SniffedDocument | null {
   if (data.length < 5) return null;
@@ -31,7 +34,8 @@ export function sniffDocument(data: Uint8Array): SniffedDocument | null {
   if (isSchDoc(data)) return { kind: 'schematic', format: 'altium-sch' };
   const image = sniffImage(data);
   if (image) return { kind: 'image', format: image };
-  const head = text(data, HEAD_BYTES);
+  const label = utf16Label(data);
+  const head = label ? new TextDecoder(label).decode(data.subarray(0, HEAD_BYTES)) : text(data, HEAD_BYTES);
   const trimmed = head.replace(/^[\s\0]+/, '');
   if (/^\(kicad_sch[\s(]/.test(trimmed)) return { kind: 'schematic', format: 'kicad_sch' };
   if (/^EESchema Schematic File Version\b/.test(trimmed)) return { kind: 'schematic', format: 'eeschema' };

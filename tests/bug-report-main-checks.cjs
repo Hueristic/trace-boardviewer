@@ -6,7 +6,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const contract = require('../shared/bug-report-contract.cjs');
-const { createBugReportService, FEATURE, STATE_NAME, STATE_MAX_BYTES, RETENTION_MS, transportError } = require('../electron/bug-reports.cjs');
+const { createBugReportService, FEATURE, STATE_NAME, STATE_MAX_BYTES, RETENTION_MS, transportError, resolveEndpoint, featureFor, QA_ENDPOINT_ENV } = require('../electron/bug-reports.cjs');
 
 const ENDPOINT = 'https://trace-bug-report.trace-boardviewer.workers.dev/v1/reports';
 const INPUT = Object.freeze({
@@ -35,12 +35,12 @@ function ack(body, status = 201) {
     payloadHash: crypto.createHash('sha256').update(body, 'utf8').digest('hex'), status: 'received',
   })) };
 }
-function setup({ store = memoryStore(), replies, enabled = true, now = () => 10_000_000, random = (() => { let n = 0; return () => uuid(++n); })(), egressCall, version = '1.3.1', language = 'hu' } = {}) {
+function setup({ store = memoryStore(), replies, enabled = true, now = () => 10_000_000, random = (() => { let n = 0; return () => uuid(++n); })(), egressCall, version = '1.3.1', language = 'hu', flavour, env = {} } = {}) {
   const calls = [];
   const egress = { request: async (...args) => { calls.push(args); return egressCall ? egressCall(...args) : (replies?.shift?.() ?? ack(args[2].body)); } };
   const service = createBugReportService({
     store, egress, getVersion: () => version, platform: 'linux', arch: 'x64', locale: () => language, now, randomUUID: random,
-    config: { enabled, endpoint: ENDPOINT },
+    config: { enabled, endpoint: ENDPOINT }, flavour, env,
   });
   return { service, store, calls };
 }
@@ -203,7 +203,7 @@ test('cancel aborts only the current prepared send and reports post-attempt unce
   assert.equal((await client.service.discardDraft()).error, 'busy');
   assert.equal((await client.service.send({ prepareId: 'b'.repeat(48) })).error, 'busy');
   assert.deepEqual(client.service.cancel({ prepareId: preview.prepareId }), { status: 'cancelled', uncertain: true });
-  assert.equal((await sending).error, 'cancelled');
+  assert.deepEqual(await sending, { status: 'cancelled', uncertain: true });
   assert.ok(client.store.files.get(STATE_NAME).pending);
 });
 
@@ -245,9 +245,33 @@ test('window invalidation during deferred journal write prevents the transport r
   await enteredWrite;
   client.service.invalidateWindow();
   release();
-  assert.equal((await sending).error, 'cancelled');
+  assert.deepEqual(await sending, { status: 'cancelled', uncertain: false });
   assert.equal(client.calls.length, 0);
   assert.ok(store.files.get(STATE_NAME).pending);
+});
+
+test('explicit cancel during the deferred journal write is not uncertain because the request never left', async () => {
+  let release;
+  let entered;
+  let shouldBlock = false;
+  const enteredWrite = new Promise((resolve) => { entered = resolve; });
+  const gate = new Promise((resolve) => { release = resolve; });
+  const base = memoryStore();
+  const store = { ...base, async update(name, updater, options) {
+    const next = await updater(base.files.has(name) ? structuredClone(base.files.get(name)) : null);
+    if (shouldBlock && next.pending) { entered(); await gate; }
+    base.files.set(name, structuredClone(next));
+    return structuredClone(next);
+  } };
+  const client = setup({ store });
+  const preview = await client.service.prepare(INPUT);
+  shouldBlock = true;
+  const sending = client.service.send({ prepareId: preview.prepareId });
+  await enteredWrite;
+  assert.deepEqual(client.service.cancel({ prepareId: preview.prepareId }), { status: 'cancelled', uncertain: false });
+  release();
+  assert.deepEqual(await sending, { status: 'cancelled', uncertain: false });
+  assert.equal(client.calls.length, 0);
 });
 
 test('draft storage failures report storage and keep the existing recoverable draft', async () => {
@@ -368,7 +392,7 @@ test('acknowledgement racing cancellation keeps the retry journal and never clai
   await started;
   client.service.cancel({ prepareId: preview.prepareId });
   release(ack(preview.canonicalText));
-  assert.equal((await sent).error, 'cancelled');
+  assert.deepEqual(await sent, { status: 'cancelled', uncertain: true });
   assert.equal(client.store.files.get(STATE_NAME).pending.canonicalText, preview.canonicalText);
 });
 
@@ -406,6 +430,41 @@ test('malformed saved state is reported unavailable and preserved byte-for-byte'
   const client = setup({ store });
   assert.equal((await client.service.getDraft()).error, 'storage');
   assert.deepEqual(store.files.get(STATE_NAME), corrupted);
+});
+
+const OVERRIDE = 'https://127.0.0.1:8443/v1/reports';
+
+test('the release receiver endpoint is fixed; only the QA flavour accepts a loopback override, and only a well-formed one', () => {
+  const env = { [QA_ENDPOINT_ENV]: OVERRIDE };
+  assert.equal(QA_ENDPOINT_ENV, 'TRACE_QA_BUG_REPORT_ENDPOINT');
+  assert.equal(resolveEndpoint({ config: { enabled: true, endpoint: ENDPOINT }, flavour: undefined, env }), ENDPOINT, 'the release ignores the override');
+  assert.equal(resolveEndpoint({ config: { enabled: true, endpoint: ENDPOINT }, flavour: 'release', env }), ENDPOINT, 'an unknown flag is the release');
+  assert.equal(resolveEndpoint({ config: { enabled: true, endpoint: ENDPOINT }, flavour: 'qa', env }), OVERRIDE, 'the QA flavour uses the loopback mock');
+  for (const bad of ['http://127.0.0.1:8080/v1/reports', 'https://example.test:8443/v1/reports', 'https://127.0.0.1/v1/reports',
+    'https://127.0.0.1:8443/v1/reports?x=1', 'https://user@127.0.0.1:8443/v1/reports', 'https://127.0.0.1:8443/other', 'https://127.0.0.1:8443/v1/reports/']) {
+    assert.equal(resolveEndpoint({ config: { enabled: true, endpoint: ENDPOINT }, flavour: 'qa', env: { [QA_ENDPOINT_ENV]: bad } }), ENDPOINT, bad);
+  }
+  assert.equal(resolveEndpoint({ config: { enabled: true, endpoint: ENDPOINT }, flavour: 'qa', env: {} }), ENDPOINT, 'no override set');
+  assert.equal(resolveEndpoint({ config: { enabled: false, endpoint: ENDPOINT }, flavour: 'qa', env }), null, 'a disabled feature has no endpoint');
+  assert.equal(resolveEndpoint({ config: { enabled: true, endpoint: OVERRIDE }, flavour: 'qa', env }), null, 'the shipped config endpoint itself must be the fixed one');
+});
+
+test('the egress feature allows only the fixed host in the release; the QA flavour adds the loopback host of its override', () => {
+  assert.deepEqual(featureFor({ flavour: undefined, env: { [QA_ENDPOINT_ENV]: OVERRIDE } }).hosts, ['trace-bug-report.trace-boardviewer.workers.dev']);
+  assert.deepEqual(featureFor({ flavour: 'qa', env: { [QA_ENDPOINT_ENV]: OVERRIDE } }).hosts, ['trace-bug-report.trace-boardviewer.workers.dev', '127.0.0.1']);
+  assert.equal(featureFor({ flavour: 'qa', env: {} }), FEATURE, 'without an override the feature is the shipped descriptor');
+});
+
+test('a QA send uses the loopback override through the same send path; a release send ignores the same variable', async () => {
+  const qa = setup({ flavour: 'qa', env: { [QA_ENDPOINT_ENV]: OVERRIDE } });
+  const preview = await qa.service.prepare(INPUT);
+  assert.equal((await qa.service.send({ prepareId: preview.prepareId })).status, 'received');
+  assert.equal(qa.calls[0][1], OVERRIDE);
+
+  const release = setup({ env: { [QA_ENDPOINT_ENV]: OVERRIDE } });
+  const released = await release.service.prepare(INPUT);
+  assert.equal((await release.service.send({ prepareId: released.prepareId })).status, 'received');
+  assert.equal(release.calls[0][1], ENDPOINT);
 });
 
 test('source wiring keeps all six IPC handlers main-owned, enables only the fixed report receiver and packages only the shared contract', async () => {

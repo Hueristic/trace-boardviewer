@@ -5,6 +5,7 @@
   "common.delete": "Usuń",
   "common.note": "Notatka",
   "common.skip": "Pomiń",
+  "common.cancel": "Anuluj",
 
   "unit.components": {
     "one": "{count} element",

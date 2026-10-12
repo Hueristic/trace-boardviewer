@@ -127,6 +127,22 @@ const waitForStableBoardPaint = async (page, { baseline = null, timeoutMs = 5000
 }), { baseline, timeoutMs });
   assert.equal(settled, true, 'the current registered board canvases produced a new draw and reached stable consecutive frames');
 };
+// After a restart the raster observer is installed on a page whose board may already have drawn, so a draw after the install is not
+// guaranteed: the first paint can finish before the observer exists. The restarted board is therefore awaited by its pixels instead:
+// the base canvas must reach the frame that was painted before the restart. The condition is checked once per animation frame and
+// the 5000 ms bound is unchanged; the final camera assertion compares the same frame.
+const waitForRestoredBoardFrame = async (page, expectedPaint, { timeoutMs = 5000 } = {}) => {
+  const reached = await page.waitForFunction(expected => {
+    const canvas = document.querySelector('[data-testid=board-pane] canvas');
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) return false;
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+    let hash = 2166136261;
+    for (let index = 0; index < pixels.length; index++) hash = Math.imul(hash ^ pixels[index], 16777619);
+    return `${canvas.width}x${canvas.height}:${hash >>> 0}` === expected;
+  }, expectedPaint, { polling: 'raf', timeout: timeoutMs }).then(() => true, () => false);
+  assert.equal(reached, true, 'the restarted board canvas reached the frame that was painted before the restart');
+};
 async function sameCanonicalPath(actualPath, expectedPath, platform = process.platform) {
   const [actual, expected] = await Promise.all([fs.realpath(actualPath), fs.realpath(expectedPath)]);
   return sameCanonicalPathStrings(actual, expected, platform);
@@ -324,6 +340,11 @@ const restoreCameraDebounceHold = async page => page.evaluate(() => {
   delete window.__traceViewerCameraDebounceHold;
   return hold.held.length;
 });
+// Case-insensitive token match with explicit boundaries: "U10" matches "U10" and "u10", never "U1", "U100", "O10" or a glued "XU10".
+const ocrTokenMatches = (text, token) => {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, 'iu').test(text);
+};
 const fileInput = page => page.locator('[data-testid=document-file-input]');
 function makeTextPdf(text) {
   const content = value => Buffer.from(`BT /F1 28 Tf 40 220 Td (${value}) Tj ET\n`, 'ascii');
@@ -369,12 +390,47 @@ const attachFromDialog = async (ctx, files) => {
     return expected.every(name => rows.some(row => row.textContent.includes(name) && row.getAttribute('data-status') === 'ready'));
   }, names, { timeout: 45000 });
 };
+// Settlement gate: the viewer that is already on screen (the previous document) must not satisfy the open, so the diagnostics read below belongs
+// to THIS document. A PDF or image keeps the Documents list on screen: its row must be the selected one and its viewer must be present.
+// A schematic pick reveals the Schematic tab, which replaces the Documents list (the row is no longer in the DOM), so the schematic gate reads
+// that tab instead: the tab is selected, its picker names the requested file, and its viewer is mounted. On a timeout the picker's actual
+// choice is reported, so a stale cross-probe shows up as the file it showed instead of an anonymous timeout.
 const openDocument = async (ctx, name) => {
   const page = ctx.getPage();
+  if (await page.locator('[data-testid=documents-tab]').count() === 0) {
+    await page.click('[data-testid=tab-documents]');
+    await requireSelector(page, '[data-testid=documents-tab]');
+  }
   await page.locator('[data-testid=document-row]').filter({ hasText: name }).locator('.wsp-doc-main').click();
-  await page.waitForSelector('[data-testid=document-viewer]', { state: 'visible', timeout: 30000 });
+  if (/\.(?:kicad_sch|sch)$/i.test(name)) {
+    try {
+      await page.waitForFunction(expected => {
+        const picked = document.querySelector('[data-testid=schematic-picker]')?.selectedOptions?.[0]?.textContent ?? '';
+        return document.querySelector('[data-testid=tab-schematic]')?.getAttribute('aria-selected') === 'true' && picked.includes(expected)
+          && !!document.querySelector('[data-testid=schematic-tab] [data-testid=document-viewer]');
+      }, name, { timeout: 30000 });
+    } catch (error) {
+      const shown = await page.locator('[data-testid=schematic-picker]').evaluate(el => el.selectedOptions[0]?.textContent ?? '').catch(() => '(no schematic picker)');
+      throw new Error(`The Documents-list pick of ${name} did not show that schematic; the Schematic tab shows "${shown}" (${String(error.message).split('\n')[0]})`);
+    }
+  } else {
+    await page.waitForSelector('[data-testid=document-viewer]', { state: 'visible', timeout: 30000 });
+    await page.waitForFunction(expected => {
+      const row = [...document.querySelectorAll('[data-testid=document-row]')].find(candidate => candidate.textContent.includes(expected));
+      return !!row?.querySelector('.wsp-doc-main[aria-current="true"]') && !!document.querySelector('[data-testid=document-viewer]');
+    }, name, { timeout: 30000 });
+  }
   await settle(page);
 };
+// What the Schematic tab shows right now, read from the DOM only: the picker's selected option, the canvas summary, the diagnostics line and the
+// sheet-navigator file names (rendered while the sheet list is open). Returned as evidence as well as for the assertions.
+const shownSchematic = async page => ({
+  picked: await page.locator('[data-testid=schematic-picker]').evaluate(el => el.selectedOptions[0]?.textContent ?? ''),
+  canvas: await page.evaluate(() => document.querySelector('.schv-canvas')?.getAttribute('aria-label') ?? ''),
+  diagnostics: await page.locator('[data-testid=schematic-diagnostics]').innerText(),
+  navFiles: await page.locator('.schv-row-file').allInnerTexts(),
+  viewer: await page.locator('[data-testid=schematic-tab] [data-testid=document-viewer]').innerText(),
+});
 const camera = (page, { paint: includePaint = false } = {}) => page.evaluate(includePaint => {
   const canvas = document.querySelector('[data-testid=board-pane] canvas');
   const rect = canvas?.getBoundingClientRect();
@@ -610,7 +666,7 @@ async function run(ctx) {
       const startup = await settleBoardStartup(restarted);
       await settle(restarted);
       await settleBoardSelection(restarted, { clearWithCanvas: true });
-      await waitForStableBoardPaint(restarted);
+      await waitForRestoredBoardFrame(restarted, pendingArrowFrame.paint);
       const afterRestart = await camera(restarted, { paint: true });
       const rasterHistoryAfterRestart = await boardRasterHistory(restarted);
       const afterProfileRestart = await waitForPersistedCamera(ctx, knownBoard, buildKnownBoardFixture(), expectedCamera, { timeout: 20000 });
@@ -841,10 +897,24 @@ async function run(ctx) {
     const eagleDiag = await page.locator('[data-testid=schematic-diagnostics]').innerText();
     assert.match(eagleDiag, /EAGLE/i, 'the second synthetic multi-sheet schematic was parsed as EAGLE');
     await page.locator('[data-testid=search-input]').fill('U1');
-    const eagleSymbol = page.locator('[data-testid=search-row][data-source="schematic-symbols"]').filter({ hasText: 'U1' }).first();
-    await eagleSymbol.waitFor({ state: 'visible', timeout: 20000 });
-    await eagleSymbol.click();
-    assert.match(await page.locator('[data-testid=inspector]').innerText(), /U1/, 'the EAGLE U1 reference is matched to the current board target');
+    // The attached KiCad board also has a U1 on its page 1: keep the EAGLE sheet's row, never the KiCad row.
+    const eagleSheet1Symbol = page.locator('[data-testid=search-row][data-source="schematic-symbols"]').filter({ hasText: 'U1' }).filter({ hasText: 'Sheet 1' }).filter({ hasNotText: 'viewer-known-board' }).first();
+    await eagleSheet1Symbol.waitFor({ state: 'visible', timeout: 20000 });
+    await eagleSheet1Symbol.click();
+    // The EAGLE U1 is placed on both sheets, and the KiCad board attached above carries a U1 too. The product never links a repeated
+    // reference silently: the banner asks for an explicit board choice and offers the one board U1. The choice is then made here.
+    const boardMapping = page.locator('[data-testid=board-mapping]');
+    await boardMapping.waitFor({ state: 'visible', timeout: 15000 });
+    assert.equal(await boardMapping.getAttribute('data-mapping'), 'ambiguous', 'the repeated EAGLE U1 asks for an explicit board choice');
+    // The EAGLE U1 is one multi-gate part (gate A on sheet 1, gate B on sheet 2): one placement, not a repeat inside this file. The
+    // repeat is the KiCad board's U1 in another attached schematic, so that is the reason the banner gives (O-42).
+    assert.match(await boardMapping.innerText(), /placed in another attached schematic/i, 'the banner gives the cross-document repeat as the reason');
+    const boardChoices = boardMapping.locator('[data-testid=board-candidate]');
+    assert.equal(await boardChoices.count(), 1, 'exactly one board U1 is offered for the choice');
+    assert.match(await boardChoices.first().innerText(), /U1/, 'the offered board part is the U1 reference');
+    await boardChoices.first().click();
+    await page.waitForFunction(() => /\bU1\b/.test(document.querySelector('[data-testid=inspector]')?.textContent || ''), null, { timeout: 15000 });
+    assert.match(await page.locator('[data-testid=inspector]').innerText(), /U1/, 'the chosen EAGLE U1 reference is matched to the current board target');
     const sheets = page.locator('.schv-nav .schv-row-main');
     await sheets.nth(1).waitFor({ state: 'visible', timeout: 15000 });
     await sheets.nth(1).click();
@@ -861,6 +931,40 @@ async function run(ctx) {
     const hierarchySymbolText = await childSymbol.innerText();
     assert.match(hierarchySymbolText, /Channel/i, 'the child sheet name is present on its own R1 instance in the packaged hierarchy');
     return { structuredCanvas: true, exactReferenceCrossProbe: 'U1', exactNetCrossProbe: 'VCC', exactSchematicPin: pinAnnouncement, kicadDiagnostics: state.slice(0, 180), eagleDiagnostics: eagleDiag.slice(0, 160), eagleSheetNavigation: 2, eagleReferenceCrossProbe: 'U1', kicadHierarchyReference: 'U10', kicadHierarchySheet: hierarchySymbolText.slice(0, 120), hierarchyDiagnostics: hierarchyDiagnostics.slice(0, 180), canvas: bounds };
+  });
+
+  // Settlement regression (the Documents-list pick of a schematic after a cross-probe). The KiCad board is cross-probed from the search (VCC is a
+  // net of that board only), so the Schematic tab shows it through the cross-probe. The second schematic (two-sheet EAGLE) is then picked from the
+  // Documents list and must be the one shown: the picker, the diagnostics and the canvas summary all name it. Before the pick settled, the list
+  // click left the cross-probed KiCad board on screen. Then the list picks the KiCad board again, so the pick works in both directions.
+  await ctx.step('a Documents-list pick of the second schematic replaces the cross-probed one, in both directions', async () => {
+    const page = ctx.getPage();
+    const kicadName = 'viewer-known-board.kicad_sch', eagleName = 'viewer-hierarchical.eagle.sch';
+    await openDocument(ctx, kicadName);
+    await page.locator('[data-testid=search-input]').fill('VCC');
+    const vccRow = page.locator('[data-testid=search-row][data-source="schematic-nets"]').filter({ hasText: 'VCC' }).first();
+    await vccRow.waitFor({ state: 'visible', timeout: 20000 });
+    await vccRow.click();
+    await page.waitForFunction(() => document.querySelector('[data-testid=tab-schematic]')?.getAttribute('aria-selected') === 'true', null, { timeout: 15000 });
+    const probed = await shownSchematic(page);
+    assert.match(probed.picked, /viewer-known-board\.kicad_sch/, `the VCC cross-probe shows the KiCad board: ${probed.picked}`);
+
+    await openDocument(ctx, eagleName);
+    const eagle = await shownSchematic(page);
+    assert.match(eagle.picked, /viewer-hierarchical\.eagle\.sch/, `the Documents-list pick shows the EAGLE schematic: ${eagle.picked}`);
+    assert.match(eagle.diagnostics, /EAGLE schematic/, `the diagnostics of the picked schematic name EAGLE: ${eagle.diagnostics.slice(0, 160)}`);
+    // The sheet count is the catalogue line "Sheets: {count}" (workspace.sheetCount, d023a1d0), not the older English phrase.
+    assert.match(eagle.diagnostics, /\bSheets: 2\b/, `the EAGLE schematic has its two sheets in the diagnostics: ${eagle.diagnostics.slice(0, 160)}`);
+    await page.waitForFunction(() => /page 1 of 2/.test(document.querySelector('.schv-canvas')?.getAttribute('aria-label') || ''), null, { timeout: 20000 });
+    // The viewer names the file in its sheet navigator while the list is open; when it is collapsed (narrow pane) the picker above is the name.
+    if (eagle.navFiles.length > 0) assert.ok(eagle.navFiles.every(text => text.includes(eagleName)), `the sheet navigator names the EAGLE file: ${eagle.navFiles.join(' | ')}`);
+
+    await openDocument(ctx, kicadName);
+    const back = await shownSchematic(page);
+    assert.match(back.picked, /viewer-known-board\.kicad_sch/, `the Documents-list pick shows the KiCad board again: ${back.picked}`);
+    assert.match(back.diagnostics, /KiCad schematic/, `the KiCad board is named in the diagnostics: ${back.diagnostics.slice(0, 160)}`);
+    assert.match(back.diagnostics, /\bSheets: 1\b/, `the KiCad board has one sheet: ${back.diagnostics.slice(0, 160)}`);
+    return { probedPicker: probed.picked, eaglePicker: eagle.picked, eagleCanvas: eagle.canvas, eagleDiagnostics: eagle.diagnostics.slice(0, 160), eagleNavFiles: eagle.navFiles, eagleViewerNamesFile: eagle.viewer.includes(eagleName), backPicker: back.picked, backDiagnostics: back.diagnostics.slice(0, 160) };
   });
 
   await ctx.step('PDF actual text search, scanned OCR text, page navigation, bookmark and page annotation work', async () => {
@@ -891,16 +995,47 @@ async function run(ctx) {
     await page.waitForSelector('.pdfv-ocr-badge', { timeout: 120000 });
     const recognized = await page.locator('.pdfv-text-ocr').innerText();
     assert.match(recognized, /TRACE-VIEWER-OCR/i);
-    assert.match(recognized, /U10/);
-    const exactProbe = page.locator('.pdfv-probe.is-ocr[aria-label^="U10,"]').first();
-    await exactProbe.waitFor({ state: 'visible', timeout: 15000 });
-    await exactProbe.click();
-    await page.waitForFunction(() => /U10/.test(document.querySelector('[data-testid=inspector]')?.textContent || ''));
+    // Negative controls first: the U10 contract accepts only the token itself, in any letter case.
+    for (const token of ['U10', 'u10', 'U10,']) assert.equal(ocrTokenMatches(token, 'U10'), true, `${token} satisfies the case-insensitive U10 token`);
+    for (const decoy of ['U1', 'U100', 'O10', 'XU10', 'U10X', 'TRACE-VIEWER-OCR']) assert.equal(ocrTokenMatches(decoy, 'U10'), false, `${decoy} does not satisfy the U10 token`);
+    assert.ok(ocrTokenMatches(recognized, 'U10'), `the recognized OCR text contains the exact U10 token, case-insensitively: ${JSON.stringify(recognized.slice(0, 160))}`);
+    // Measured contract (docs/SUPPORT.md: "misread names are misses, never wrong links"; the link floor is 60 %). The fixture's U10 token
+    // is read twice on Windows: once at or above the floor (an exact link, read as "U10" after case normalization) and once at about 21 %,
+    // marked low, which is neither a candidate nor a link. The candidate is therefore chosen by its reading state, never by the first
+    // text match, which can be the exact reading.
+    const ocrWords = await page.locator('.pdfv-text-ocr .pdfv-ocr-word').evaluateAll(els => els.map(el => ({
+      text: el.textContent, low: el.classList.contains('is-low'), confidence: Number((el.title.match(/confidence (\d+)%/) || [])[1]),
+    })));
+    const floor = 60;
+    const u10Words = ocrWords.filter(word => ocrTokenMatches(word.text, 'U10'));
+    assert.ok(u10Words.length > 0, `the recognized U10 token is in the OCR layer: ${JSON.stringify(ocrWords)}`);
+    const u10Candidates = u10Words.filter(word => word.low);
+    assert.equal(u10Candidates.length, 1, `exactly one U10 occurrence is low confidence (the ~21 % candidate): ${JSON.stringify(u10Words)}`);
+    const [u10Word] = u10Candidates;
+    assert.ok(Number.isFinite(u10Word.confidence) && u10Word.confidence < floor, `U10 candidate confidence ${u10Word.confidence}% is below the ${floor}% link floor`);
+    for (const exact of u10Words.filter(word => !word.low)) assert.ok(exact.confidence >= floor, `an exact U10 reading is at or above the ${floor}% link floor: ${JSON.stringify(exact)}`);
+    const exactHitCount = u10Words.length - u10Candidates.length;
+    const controlWord = ocrWords.find(word => word.text === 'TRACE-VIEWER-OCR');
+    assert.ok(controlWord && controlWord.low === false && controlWord.confidence >= floor, 'control: a word at or above the floor is not marked low');
+    const u10Row = await waitForExactComponentRow(page, 'U10');
+    await u10Row.click();
+    const scannedCard = page.locator('[data-testid=document-hits-card]').filter({ hasText: 'viewer-scanned-text.pdf' });
+    await scannedCard.waitFor({ state: 'visible', timeout: 20000 });
+    const cardText = await scannedCard.innerText();
+    assert.match(cardText, /Recognized text/, `the card reports that the recognized words are indexed: ${JSON.stringify(cardText.slice(0, 200))}`);
+    if (exactHitCount === 0) assert.match(cardText, /No exact match in this document./, `the low-confidence U10 is neither a link nor a candidate: ${JSON.stringify(cardText.slice(0, 200))}`);
+    else assert.doesNotMatch(cardText, /No exact match in this document./, 'an exact U10 reading is linked, so the card does not say that no match exists');
+    assert.doesNotMatch(cardText, /Differs only in letter case/, 'no case-only candidate is listed for a word below the floor');
+    assert.equal(await scannedCard.locator('[data-testid=document-hit]').count(), exactHitCount, 'one hit row per exact reading at or above the floor, and none for the low-confidence word');
+    await openDocument(ctx, 'viewer-scanned-text.pdf');
+    await page.waitForSelector('.pdfv-page[data-page="1"][data-render="done"]', { timeout: 30000 });
+    await page.waitForSelector('.pdfv-ocr-badge', { timeout: 30000 });
+    assert.equal(await page.locator('.pdfv-probe.is-ocr[aria-label^="U10," i]').count(), 0, 'no probe links the case-only OCR text: the probe selector count is 0');
     const beforeRotate = await page.locator('.pdfv').getAttribute('data-rotation');
     await page.getByRole('button', { name: /rotate clockwise/i }).click();
     await page.waitForFunction(value => document.querySelector('.pdfv')?.getAttribute('data-rotation') !== value, beforeRotate);
     await ctx.screenshot('viewers-pdf-text-and-ocr');
-    return { nativeTextSearch: true, pageNavigation: '1→2→1', scannedOcr: recognized.slice(0, 160), exactOcrClickThrough: 'U10', pageAnnotation: true, bookmarkCount: 1, rotationChanged: true };
+    return { nativeTextSearch: true, pageNavigation: '1→2→1', scannedOcr: recognized.slice(0, 160), lowConfidenceOcr: { token: 'u10', confidence: u10Word.confidence, floor }, exactOcrProbeCount: 0, pageAnnotation: true, bookmarkCount: 1, rotationChanged: true };
   });
 
   await ctx.step('PNG, JPEG, and WebP decode through the packaged image viewer', async () => {
@@ -926,6 +1061,11 @@ async function run(ctx) {
     const decoded = [];
     for (const [index, name] of ['viewer-raster.png', 'viewer-raster.jpg', 'viewer-raster.webp'].entries()) {
       await openDocument(ctx, name);
+      // The viewer may still show the previous image: wait for THIS file's label with its decoded size, and the ready phase.
+      await page.waitForFunction(expected => {
+        const label = document.querySelector('.imgv-surface')?.getAttribute('aria-label') || '';
+        return label.startsWith(expected) && /pixels/.test(label) && document.querySelector('.imgv')?.getAttribute('data-phase') === 'ready';
+      }, name, { timeout: 30000 });
       const info = await page.locator('.imgv-surface').getAttribute('aria-label');
       assert.match(info || '', /240 by 160 pixels/i, `${name} reports its actual decoded dimensions`);
       const rendered = await page.locator('.imgv-canvas').evaluate(canvas => ({ width: canvas.width, height: canvas.height }));
@@ -947,8 +1087,11 @@ async function run(ctx) {
     await page.getByRole('button', { name: /rotate clockwise/i }).click();
     const rotated = await surface.getAttribute('aria-label');
     assert.match(rotated || '', /240 by 160/i);
-    await page.getByRole('button', { name: /bookmark/i }).click();
-    await page.getByRole('button', { name: /bookmarks and notes/i }).click();
+    // Exact accessible names: /bookmark/i also matches the "Bookmarks and notes" panel toggle, which made the locator ambiguous.
+    await page.getByRole('button', { name: 'Add bookmark at the view centre (B)', exact: true }).click();
+    // The panel is open by default (aria-expanded="true"): clicking its toggle would close it, so open it only when it is closed.
+    const panelToggle = page.getByRole('button', { name: 'Bookmarks and notes', exact: true });
+    if (await panelToggle.getAttribute('aria-expanded') !== 'true') await panelToggle.click();
     await page.waitForFunction(() => document.querySelectorAll('.imgv-row').length >= 1);
     const calib = page.getByRole('button', { name: /calibrat/i });
     await calib.click();
@@ -959,10 +1102,14 @@ async function run(ctx) {
     await page.locator('.imgv-input').first().fill('100');
     await page.getByRole('button', { name: /set scale/i }).click();
     await page.getByRole('button', { name: /note/i }).first().click();
-    await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.5);
+    // The bookmark above sits at the view centre: a note click there would select that marker instead of opening the editor.
+    await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.3);
     const editor = page.getByRole('dialog', { name: /new note/i });
     await editor.locator('textarea').fill('image viewer annotation');
     await editor.getByRole('button', { name: /^save$/i }).click();
+    // Drawing tools close the overlay panel (narrow viewer): reopen it to list the bookmark and note rows.
+    const panelToggleAgain = page.getByRole('button', { name: 'Bookmarks and notes', exact: true });
+    if (await panelToggleAgain.getAttribute('aria-expanded') !== 'true') await panelToggleAgain.click();
     await page.waitForFunction(() => document.querySelectorAll('.imgv-row').length >= 2);
     await ctx.screenshot('viewers-sanitized-svg');
     return { svgSecurity: security, rotation: rotated, bookmarkCreated: true, calibrationApplied: true, noteCreated: true };

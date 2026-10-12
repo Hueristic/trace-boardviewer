@@ -184,8 +184,8 @@ export function createMockWorkspace(options: MockOptions = {}): MockWorkspace {
     sessions.set('pdf1', makePdf('pdf1'));
     docs.push({ record: record('pdf1', 'pdf', 'service-manual.pdf', { pageCount: 3, bookmarks: [{ id: 'b1', page: 2, label: 'Power tree' }, { id: 'b2', page: 3, label: 'Connector pinout' }] }), status: 'ready', pdf: sessions.get('pdf1') });
     docs.push({ record: record('img1', 'image', 'board-photo.png', { size: 380_000 }), status: 'loading' });
-    docs.push({ record: record('miss1', 'pdf', 'old-datasheet.pdf', { missing: true }), status: 'missing', message: 'C:/service/old-datasheet.pdf was not found. Notes and bookmarks are kept; relink the same file to continue.' });
-    docs.push({ record: record('chg1', 'pdf', 'changed-notes.pdf'), status: 'changed', message: 'The file changed on disk since it was attached.' });
+    docs.push({ record: record('miss1', 'pdf', 'old-datasheet.pdf', { missing: true }), status: 'missing', message: { text: 'C:/service/old-datasheet.pdf was not found. Notes and bookmarks are kept; relink the same file to continue.' } });
+    docs.push({ record: record('chg1', 'pdf', 'changed-notes.pdf'), status: 'changed', message: { text: 'The file changed on disk since it was attached.' } });
   }
   const notes: BoardNote[] = options.empty ? [] : [
     { id: 'n1', target: { ref: 'U1' }, text: 'Replaced after short on VIN. Check the inductor next.', measurements: { voltage: '3.28 V', resistance: '4.7 kΩ to GND' }, updatedAt: '2026-10-05T09:00:00.000Z' },
@@ -359,8 +359,8 @@ export function createMockWorkspace(options: MockOptions = {}): MockWorkspace {
     },
     setSchematicInstance: (documentId, instancePath) => { record_('setSchematicInstance', documentId, instancePath); set({ probe: { ...state.probe, schematic: { documentId, instancePath, selection: {} } } }); },
     clearSelection: () => { record_('clearSelection'); set({ selection: { componentId: null, pinId: null, net: null } }); },
-    setAlias: (kind, from, to) => { record_('setAlias', kind, from, to); aliases = { ...aliases, [kind]: { ...aliases[kind], [from]: to } }; aliasesChanged(); },
-    removeAlias: (kind, from) => { record_('removeAlias', kind, from); const next = { ...aliases[kind] }; delete next[from]; aliases = { ...aliases, [kind]: next }; aliasesChanged(); },
+    setAlias: (kind, from, to) => { record_('setAlias', kind, from, to); aliases = { ...aliases, [kind]: { ...aliases[kind], [from]: to } }; aliasesChanged(); return null; },
+    removeAlias: (kind, from) => { record_('removeAlias', kind, from); const next = { ...aliases[kind] }; delete next[from]; aliases = { ...aliases, [kind]: next }; aliasesChanged(); return true; },
     setSearchQuery: query => { record_('setSearchQuery', query); runSearch(query); },
     activateSearchRow: (row: SearchRow) => {
       record_('activateSearchRow', row);

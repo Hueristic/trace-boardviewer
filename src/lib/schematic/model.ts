@@ -16,6 +16,7 @@
  */
 
 import { boundText } from '../bounded-text';
+import type { SourcePlatform } from '../formats/source-name';
 
 export type SchematicFormat = 'kicad-sch' | 'kicad-legacy-sch' | 'eagle-sch' | 'altium-sch';
 
@@ -283,10 +284,14 @@ export const SCHEMATIC_LIMITS = Object.freeze({
   maxCoordinateMm: 1e6,
 });
 
-/** Input of every schematic parser: the primary file plus sibling files from the SAME directory (lowercase basename keys). */
+/**
+ * Input of every schematic parser: the primary file plus sibling files from the SAME directory (lowercase basename keys).
+ * `platform`: the platform the primary file's name came from (see formats/source-name.ts); absent when unknown.
+ */
 export interface SchematicInput {
   name: string;
   data: Uint8Array;
   companions?: Record<string, Uint8Array>;
+  platform?: SourcePlatform;
 }
 export type SchematicParser = (input: SchematicInput) => Schematic | null;

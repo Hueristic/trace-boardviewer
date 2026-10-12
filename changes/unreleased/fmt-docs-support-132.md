@@ -1,0 +1,2 @@
+- The support table now says exactly what the IPC-2581, IPC-D-356 and ODB++ readers were checked with: files written by the KiCad 9 command-line export (kicad-cli) from open designs (IPC-2581: 27; IPC-D-356 and ODB++: 39 each). No file written by a vendor's own software was tested, and these formats are no longer listed under real-file validation.
+- Nothing changes in how these files open.

@@ -51,7 +51,7 @@ export function generateLibrary(input: Partial<LibraryOptions> & { preset?: Libr
   const specialShare = options.hostile ? 0.07 : 0.04;
   const run: FamilyRun = { collections: makeCollections(rng.fork('collections'), clamp(Math.round(fileCount / 700), 2, 12)), chains: new Map(), numbers: new Set(), recent: [], families: [] };
 
-  // phase 1: families
+  // families
   const familyLimit = fileCount - fillerSlots - Math.round(fileCount * specialShare);
   e.limit = familyLimit;
   e.scale = clamp(options.bytes / fileCount / INITIAL_BYTES_PER_FILE, 0.1, 10);

@@ -5,6 +5,7 @@
 import type { Board } from '../types';
 import { BoardFormatError, decodeText, type ParseInput } from './common';
 import { assemble, readFormat, readNails, readPins, reject, splitLines, Tally, type Model, type Row, type Source } from './bdv';
+import { sourceBaseName, sourceSegments, type SourcePlatform } from './source-name';
 
 export const ASC_FORMAT = 'ASC companion trio';
 type Role = 'format' | 'pins' | 'nails';
@@ -13,10 +14,10 @@ const FILES: Readonly<Record<Role, string>> = { format: 'format.asc', pins: 'pin
 /** Header lines before the first record, counted from the first non-blank line (ASCFile.cpp: 7+1, 7+1 and 6+1). */
 const HEADER: Readonly<Record<Role, number>> = { format: 8, pins: 8, nails: 7 };
 
-const baseName = (name: string) => (name.split(/[\\/]/).pop() ?? '').toLowerCase();
+const baseName = (name: string, platform?: SourcePlatform) => sourceBaseName(name, platform).toLowerCase();
 /** Identical whichever of the three files was chosen: the folder name when the path has one, otherwise the format file. */
-function boardName(path: string): string {
-  const folders = path.split(/[\\/]/); folders.pop();
+function boardName(path: string, platform?: SourcePlatform): string {
+  const folders = sourceSegments(path, platform); folders.pop();
   const folder = folders.pop()?.trim();
   return `${folder && !/^[A-Za-z]:$/.test(folder) ? folder : 'format'}.asc`;
 }
@@ -75,10 +76,10 @@ function plausible(role: Role, file: Prepared): boolean {
   return true;
 }
 /** Companion lookup by lowercase basename; keys may carry a path or any case. */
-function companion(companions: ParseInput['companions'], filename: string): Uint8Array | undefined {
+function companion(companions: ParseInput['companions'], filename: string, platform?: SourcePlatform): Uint8Array | undefined {
   let found: Uint8Array | undefined;
   for (const [key, bytes] of Object.entries(companions ?? {})) {
-    if (baseName(key) !== filename) continue;
+    if (baseName(key, platform) !== filename) continue;
     if (!(bytes instanceof Uint8Array)) throw new BoardFormatError(`ASC: companion ${key} must be a byte array.`, 'INVALID_FORMAT', ASC_FORMAT);
     if (found && (found.length !== bytes.length || found.some((byte, index) => byte !== bytes[index]))) throw new BoardFormatError(`ASC: companion ${filename} is given twice with different contents.`, 'INVALID_FORMAT', ASC_FORMAT);
     found = bytes;
@@ -92,7 +93,7 @@ function companion(companions: ParseInput['companions'], filename: string): Uint
  * Recognition is by the file role (the trio has no magic number) plus the layout of the first record.
  */
 export function parseAsc(input: ParseInput): Board | null {
-  const entryName = baseName(input.name);
+  const entryName = baseName(input.name, input.platform);
   const entry = entryName === '@format.asc' ? 'format' : ROLES.find(role => FILES[role] === entryName);
   if (!entry || looksBinary(input.data)) return null;
   const sourceNames = new Map<Role, string>([[entry, entryName]]);
@@ -102,8 +103,8 @@ export function parseAsc(input: ParseInput): Board | null {
   const missing: string[] = [];
   for (const role of ROLES) {
     if (role === entry) continue;
-    let filename = FILES[role], bytes = companion(input.companions, filename);
-    if (!bytes && role === 'format') { filename = '@format.asc'; bytes = companion(input.companions, filename); }
+    let filename = FILES[role], bytes = companion(input.companions, filename, input.platform);
+    if (!bytes && role === 'format') { filename = '@format.asc'; bytes = companion(input.companions, filename, input.platform); }
     if (bytes) { sources.set(role, bytes); sourceNames.set(role, filename); } else missing.push(FILES[role]);
   }
   if (missing.length) {
@@ -120,7 +121,7 @@ export function parseAsc(input: ParseInput): Board | null {
   const pins = file('pins');
   if (!pins.rows.length) reject(pins.source, undefined, 'the file contains no component records.');
   const model: Model = { outline: readFormat(file('format').rows, file('format').source, tally), parts: readPins(pins.rows, pins.source, tally, true), nails: readNails(file('nails').rows, file('nails').source, tally) };
-  const board = assemble({ ...input, name: boardName(input.name) }, { label: 'ASC', format: ASC_FORMAT }, model, tally);
+  const board = assemble({ ...input, name: boardName(input.name, input.platform) }, { label: 'ASC', format: ASC_FORMAT }, model, tally);
   if (pins.headerLines! < HEADER.pins || prepared.get('nails')!.headerLines! < HEADER.nails) board.legacyPositionalNotesUnsafe = true;
   return board;
 }

@@ -1,6 +1,6 @@
 {
   "name": "trace-boardviewer",
-  "version": "1.3.1",
+  "version": "1.3.3",
   "private": true,
   "type": "module",
   "description": "Free, offline boardviewer and repair workspace for boards, schematics and PDFs",
@@ -21,7 +21,8 @@
     "test:bug-report-main": "node --test tests/bug-report-main-checks.cjs",
     "fuzz": "node scripts/fuzz-parsers.cjs",
     "fuzz:long": "node scripts/fuzz-parsers.cjs --mode long --minutes 30 --save",
-    "test:desktop": "node --test tests/desktop-checks.cjs tests/store-checks.cjs tests/workspace-checks.cjs tests/portable-config-checks.cjs tests/portable-isolation-checks.cjs tests/payload-manifest-checks.cjs tests/portable-startup-measurement-checks.cjs tests/release-version-checks.cjs tests/support-verification-checks.cjs tests/stable-update-regression-checks.cjs tests/stable-support-regressions.cjs tests/stable-lifecycle-regressions.cjs tests/packaged-functional-qa-checks.cjs tests/packaged-functional-imports-checks.cjs tests/packaged-functional-workspaces-checks.cjs tests/packaged-functional-support-updates-checks.cjs tests/packaged-viewers-fixture-contract-checks.cjs tests/mac-config-checks.cjs tests/linux-config-checks.cjs tests/linux-workflow-checks.cjs",
+    "test:desktop": "node --test tests/desktop-checks.cjs tests/store-checks.cjs tests/store-sweep-checks.cjs tests/export-temporaries-checks.cjs tests/workspace-checks.cjs tests/portable-config-checks.cjs tests/portable-isolation-checks.cjs tests/payload-manifest-checks.cjs tests/auto-publish-checks.cjs tests/win-provenance-checks.cjs tests/profile-location-checks.cjs tests/release-notes-checks.cjs tests/build-sidecars-checks.cjs tests/report-loopback-checks.cjs tests/portable-startup-measurement-checks.cjs tests/release-version-checks.cjs tests/support-verification-checks.cjs tests/stable-update-regression-checks.cjs tests/stable-support-regressions.cjs tests/stable-lifecycle-regressions.cjs tests/packaged-functional-qa-checks.cjs tests/packaged-functional-imports-checks.cjs tests/packaged-functional-workspaces-checks.cjs tests/packaged-functional-support-updates-checks.cjs tests/packaged-viewers-fixture-contract-checks.cjs tests/mac-config-checks.cjs tests/linux-config-checks.cjs tests/linux-workflow-checks.cjs tests/library-bridge-checks.cjs tests/library-directory-adapter-checks.cjs tests/bug-report-contract-checks.cjs tests/bug-report-egress-checks.cjs tests/bug-report-observer-checks.cjs tests/bug-report-worker-checks.cjs tests/bug-report-mock-receiver-checks.cjs tests/dist-freshness-checks.cjs",    "library:core": "node scripts/library-devices-core.cjs",
+    "library:core:check": "node scripts/library-devices-core.cjs --check",
     "qa:browser": "node scripts/qa-smoke.cjs --browser",
     "qa:electron": "node scripts/qa-smoke.cjs --electron",
     "qa:packaged": "node scripts/qa-smoke.cjs --packaged",
@@ -36,6 +37,7 @@
     "gen:board": "node scripts/gen-synthetic-board.cjs",
     "qa:workspace": "node scripts/qa-workspace-ui.cjs",
     "qa:e2e": "node scripts/qa-workspace-e2e.cjs",
+    "qa:library": "node scripts/packaged-functional-library.cjs",
     "start": "electron .",
     "package": "pnpm run build && electron-builder --win portable --x64 --publish never",
     "package:dir": "pnpm run build && electron-builder --win dir --x64 --publish never"
@@ -71,22 +73,26 @@
       "output": "release"
     },
     "publish": null,
+    "beforePack": "scripts/before-pack.cjs",
     "electronDist": "node_modules/electron/dist",
     "files": [
       "dist/**/*",
       "electron/**/*",
       "shared/bug-report-contract.cjs",
+      "shared/import-limits.json",
       "package.json",
       "assets/**/*",
       "LICENSE",
       "THIRD_PARTY_NOTICES.md",
-      "!node_modules/@napi-rs/**"
+      "node_modules/fflate/**/*",
+      "!node_modules/@napi-rs/**",
+      "!node_modules/!(fflate)/**/*"
     ],
     "asar": true,
     "electronFuses": {
       "runAsNode": false,
       "enableNodeOptionsEnvironmentVariable": false,
-      "enableNodeCliInspectArguments": true,
+      "enableNodeCliInspectArguments": false,
       "onlyLoadAppFromAsar": true,
       "enableEmbeddedAsarIntegrityValidation": true,
       "enableCookieEncryption": true,

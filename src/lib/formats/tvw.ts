@@ -5,7 +5,7 @@
  * No external TVW implementation is linked or translated.
  */
 import type { Board } from '../types';
-import { BoardFormatError, buildBoard, MAX_IMPORT_BYTES, type ParseInput, type RawPin } from './common';
+import { BoardFormatError, buildBoard, localizedFormatError, MAX_IMPORT_BYTES, type ParseInput, type RawPin } from './common';
 import { readTvwLayers, type TvwLayer, type TvwLayerResult } from './tvw-layers';
 import { readTvwComponents } from './tvw-components';
 
@@ -124,13 +124,20 @@ function layerFor(kind: number, layers: TvwLayerResult): TvwLayer {
 
 export function parseTvw(input: ParseInput): Board | null {
   if (input.data.length > MAX_IMPORT_BYTES) fail('file exceeds the import limit.', true);
-  if (isAppleDouble(input.data)) fail('this is an AppleDouble companion file (a "._" resource-fork stub written by macOS next to the real file), not a boardview.');
+  // The AppleDouble check reads the magic bytes only, the same on every platform; the explanation is the catalog message, shown in the active language.
+  if (isAppleDouble(input.data)) throw localizedFormatError(`${FORMAT}: this is an AppleDouble companion file (a "._" resource-fork stub written by macOS next to the real file), not a boardview.`, 'INVALID_FORMAT', { key: 'parse.error.appleDoubleMetadata' }, 'tvw');
   if (input.data.length < 100) return null;
   const bytes = new Bytes(input.data), table = netTable(bytes);
   if (!table) return null;
   const layers = readTvwLayers(input.data.subarray(0, table.start), table.names.length);
-  if (layers.skippedLayers) fail('physical layer tables are incomplete or unsupported.');
-  if (!layers.layers.length) fail('no top or bottom layer header with a known prefix was found before the net table; this export uses a layer-header variant that is not supported.', false, true);
+  if (layers.skippedLayers) {
+    if (layers.rangeSkipped) throw localizedFormatError(`${FORMAT}: a top or bottom layer has a coordinate or dimension outside the supported range, so the file is refused.`, 'INVALID_FORMAT', { key: 'parse.error.tvwLayerRange' }, 'tvw');
+    fail('physical layer tables are incomplete or unsupported.');
+  }
+  if (!layers.layers.length) {
+    if (layers.headers.length) throw localizedFormatError(`${FORMAT}: ${layers.headers.length} layer headers precede the net table, but none is a top or bottom physical layer, so no pads can be placed; the file is refused.`, 'UNSUPPORTED_VARIANT', { key: 'parse.error.tvwNoPhysicalLayer', params: { headers: layers.headers.length } }, 'tvw');
+    fail('no top or bottom layer header with a known prefix was found before the net table; this export uses a layer-header variant that is not supported.', false, true);
+  }
   // A pin list may name any top or bottom header of the full list, plus the first established numbers.
   const references = new Set<number>([LEGACY_TOP, ...LEGACY_BOTTOM].filter(index => !layers.headers[index]));
   for (const header of layers.headers) if (header.layer) references.add(header.index);

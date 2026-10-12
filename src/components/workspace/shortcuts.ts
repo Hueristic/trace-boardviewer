@@ -10,6 +10,8 @@ export interface ShortcutContext {
   modal: boolean;
   /** The note editor is open. */
   note: boolean;
+  /** The bug-report draft is open: Esc belongs to its own close guard (the leave prompt), so the shell does not close it. */
+  modalGuard?: boolean;
   /** An encryption key is being asked for (the dialog may still wait behind the support notice): nothing may disturb the request. */
   keyRequest: boolean;
   hasBoard: boolean;
@@ -23,8 +25,11 @@ export interface ShortcutContext {
   pdf: boolean;
 }
 
+/** Window event that opens the Settings dialog from outside the keyboard (the macOS app-menu "Settings…" item sends it). */
+export const OPEN_SETTINGS_EVENT = 'trace:open-settings';
+
 export type ShortcutAction =
-  | 'close-modal' | 'open' | 'search' | 'pdf-search' | 'help' | 'layout-workshop' | 'layout-focus' | 'split'
+  | 'close-modal' | 'open' | 'search' | 'pdf-search' | 'help' | 'settings' | 'layout-workshop' | 'layout-focus' | 'split'
   | 'tab-board' | 'tab-schematic' | 'tab-documents' | 'fit' | 'rotate' | 'measure' | 'labels' | 'note' | 'zoom-in' | 'zoom-out' | 'clear';
 
 /** What the shell does with the key: the action (null = nothing, the key is only swallowed) and whether the browser default is suppressed. */
@@ -43,21 +48,25 @@ export function resolveShortcut(event: ShortcutKey, ctx: ShortcutContext): Short
   // A modal dialog owns the keyboard. The key dialog and the note editor handle Esc themselves (the dialog's cancel); the other
   // modals also close through the shell, which covers a key that reaches the window from outside the dialog.
   if (ctx.keyRequest || ctx.note) return null;
-  if (ctx.modal) return event.key === 'Escape' ? act('close-modal') : null;
+  if (ctx.modal) return event.key === 'Escape' && !ctx.modalGuard ? act('close-modal') : null;
   const mod = event.ctrlKey || event.metaKey;
   const key = event.key.toLowerCase();
   if (mod && key === 'o') return act('open');
   if (mod && key === 'f') return act(ctx.pdf ? 'pdf-search' : ctx.hasBoard ? 'search' : null);
+  // Ctrl+, / Cmd+, opens Settings with or without a board, and also while a text field has focus: the chord types nothing (the
+  // top bar's gear is there too). A typed comma stays text.
+  if (mod && key === ',') return act('settings');
   // Without a board only the help shortcut remains; a "?" typed into a text field is text.
   if (!ctx.hasBoard) return key === 'f1' || (key === '?' && !ctx.editable) ? act('help') : null;
   if (mod && key === '1') return act('layout-workshop');
   if (mod && key === '2') return act('layout-focus');
   if (mod && event.key === '\\') return act('split');
+  // A text field keeps its keys: Alt+digit types a symbol on a Mac and would switch the tab away from a note being typed (O-39).
+  if (ctx.editable) return null;
   if (event.altKey && !mod) {
     const digit = tabDigit(event);
     if (digit) return act(digit === '1' ? 'tab-board' : digit === '2' ? 'tab-schematic' : 'tab-documents');
   }
-  if (ctx.editable) return null;
   if (key === '?' || key === 'f1') return act('help');
   // The viewers own their keys (pan, zoom, page navigation); the board shortcuts apply to the board only.
   if (!ctx.boardVisible || ctx.viewer || mod || event.altKey) return null;
@@ -91,4 +100,9 @@ export function isApplePlatform(nav: PlatformSource = currentNavigator()): boole
 /** The modifier names shown in shortcut hints: the handlers accept Ctrl and Cmd alike, the labels name the keys of the platform. */
 export function modifierLabels(nav: PlatformSource = currentNavigator()): { mod: string; alt: string } {
   return isApplePlatform(nav) ? { mod: 'Cmd', alt: 'Option' } : { mod: 'Ctrl', alt: 'Alt' };
+}
+
+/** The key hint of the search field: the search shortcut is Cmd+F on Apple platforms and Ctrl+F elsewhere (the Control glyph was wrong on macOS). */
+export function searchShortcutLabel(nav: PlatformSource = currentNavigator()): string {
+  return isApplePlatform(nav) ? '⌘F' : `${modifierLabels(nav).mod}+F`;
 }

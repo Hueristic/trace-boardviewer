@@ -1,0 +1,5 @@
+{
+  "maxImportBytes": 67108864,
+  "maxNativeAllegroImportBytes": 251658240,
+  "maxNativeAllegroRecords": 4000000
+}

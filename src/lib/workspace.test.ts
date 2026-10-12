@@ -505,6 +505,17 @@ describe('boardIdentityKey', () => {
     expect(await boardIdentityKey([{ name: 'whatever.name', data: new Uint8Array(0) }])).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
   });
 
+  it('the platform of the names decides the separator: on win32 a backslash splits the directories, on POSIX it is part of the file name', async () => {
+    const first = bytes('one');
+    const second = bytes('two');
+    await expect(boardIdentityKey([{ name: 'x\\y.lib', data: first }, { name: 'y.lib', data: second }], 'win32')).rejects.toMatchObject({ code: 'IDENTITY_DUPLICATE_NAME' });
+    await expect(boardIdentityKey([{ name: 'x\\y.lib', data: first }, { name: 'y.lib', data: second }], 'linux')).resolves.toMatch(/^[0-9a-f]{64}$/);
+    await expect(boardIdentityKey([{ name: 'x\\y.lib', data: first }, { name: 'y.lib', data: second }], 'darwin')).resolves.toMatch(/^[0-9a-f]{64}$/);
+    // The slash splits the directories on every platform: a directory prefix does not change the key.
+    const withDirectories = await boardIdentityKey([{ name: 'dir/Pins.asc', data: bytes('p') }, { name: 'NAILS.asc', data: bytes('n') }], 'darwin');
+    expect(withDirectories).toBe(await boardIdentityKey([{ name: 'pins.asc', data: bytes('p') }, { name: 'nails.asc', data: bytes('n') }], 'darwin'));
+  });
+
   it('the complete companion set follows the documented encoding (known answer)', async () => {
     const { format, pins, nails } = trio();
     const key = await boardIdentityKey([format, pins, nails]);
@@ -629,7 +640,9 @@ describe('relativeToBoard / resolveRelative', () => {
     expect(relativeToBoard('\\\\server\\share\\main.brd', '\\\\server\\share\\x.pdf')).toBeNull();
     expect(relativeToBoard('/a/b/main.brd', '/a/b/x\0.pdf')).toBeNull();
     expect(relativeToBoard('/a/b/main.brd', '')).toBeNull();
-    expect(relativeToBoard('/a/b/main.brd', '/a/b/dir\\evil.pdf')).toBeNull();
+    // A backslash is part of a POSIX name (MAC-TEST-20261011-03); on win32 it separates directories, so a traversal through it is refused.
+    expect(relativeToBoard('/a/b/main.brd', '/a/b/dir\\evil.pdf')).toBe('dir\\evil.pdf');
+    expect(relativeToBoard('C:\\a\\b\\main.brd', 'C:\\a\\b\\..\\evil.pdf')).toBeNull();
   });
 
   it('handles Windows paths: drive letters, both separators, case-insensitive prefix, original casing of the document', () => {
@@ -668,10 +681,14 @@ describe('relativeToBoard / resolveRelative', () => {
   });
 
   it('resolveRelative rejects traversal, absolute and malformed relative paths', () => {
-    for (const bad of ['../x.pdf', 'docs/../../x.pdf', '..', '.', './x.pdf', 'docs//x.pdf', '/etc/passwd', 'C:/x.pdf', 'C:\\x.pdf', '\\x.pdf', 'docs\\x.pdf', 'x\0.pdf', '', 'docs/', 'a/\n/b']) {
+    for (const bad of ['../x.pdf', 'docs/../../x.pdf', '..', '.', './x.pdf', 'docs//x.pdf', '/etc/passwd', 'C:/x.pdf', 'C:\\x.pdf', 'x\0.pdf', '', 'docs/', 'a/\n/b']) {
       expect({ bad, posix: resolveRelative('/a/b/main.brd', bad) }).toEqual({ bad, posix: null });
       expect({ bad, windows: resolveRelative('C:\\a\\main.brd', bad) }).toEqual({ bad, windows: null });
     }
+    // A backslash separates the directories on win32 only; on POSIX it is part of the name (MAC-TEST-20261011-03).
+    for (const bad of ['\\x.pdf', 'docs\\x.pdf']) expect({ bad, windows: resolveRelative('C:\\a\\main.brd', bad) }).toEqual({ bad, windows: null });
+    expect(resolveRelative('/a/b/main.brd', 'docs\\x.pdf')).toBe('/a/b/docs\\x.pdf');
+    expect(resolveRelative('/a/b/main.brd', '\\x.pdf')).toBe('/a/b/\\x.pdf');
     expect(resolveRelative('/a/b/main.brd', 'docs/x:y.pdf')).toBe('/a/b/docs/x:y.pdf');
     expect(resolveRelative('C:\\a\\main.brd', 'docs/x:y.pdf')).toBeNull();
     expect(resolveRelative('C:\\a\\main.brd', 'docs/CON.pdf')).toBeNull();
@@ -1137,6 +1154,22 @@ describe('manifest operations', () => {
       expectCode(() => setAlias(full, 'refs', 'NEW', 'B'), 'LIMIT_EXCEEDED');
       expect(setAlias(full, 'refs', 'R5', 'OTHER').aliases!.refs.R5).toBe('OTHER');
       expect(setAlias(full, 'nets', 'N', 'M').aliases!.nets).toEqual({ N: 'M' });
+    });
+
+    it('names the rule a rejected alias broke, so the dialog can say why (none for an invalid kind)', () => {
+      const manifest = base();
+      const reasonOf = (change: () => unknown) => {
+        try { change(); }
+        catch (error) { return (error as { aliasReason?: unknown }).aliasReason; }
+        throw new Error('the alias change was expected to be rejected');
+      };
+      expect(reasonOf(() => setAlias(manifest, 'refs', '', 'U1'))).toBe('name');
+      expect(reasonOf(() => setAlias(manifest, 'refs', '__proto__', 'U1'))).toBe('name');
+      expect(reasonOf(() => setAlias(manifest, 'refs', 'U1A', '   '))).toBe('target');
+      expect(reasonOf(() => setAlias(manifest, 'refs', 'U1', 'U1'))).toBe('same');
+      expect(reasonOf(() => setAlias(manifest, 'bogus' as never, 'A', 'B'))).toBeUndefined();
+      const full = { ...manifest, aliases: { refs: Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`R${i}`, `B${i}`])), nets: {} } };
+      expect(reasonOf(() => setAlias(full, 'refs', 'NEW', 'B'))).toBe('limit');
     });
   });
 

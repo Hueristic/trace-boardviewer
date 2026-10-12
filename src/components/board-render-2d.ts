@@ -2,11 +2,13 @@ import { distance, expandBounds, orientPoint } from '../lib/geometry';
 import type { Bounds2, Point2, ViewTransform } from '../lib/geometry';
 import { createFormatters } from '../lib/i18n';
 import { clipSegmentToBounds } from '../lib/render-geometry';
-import type { BoardPin, ViewSide } from '../lib/types';
+import type { BoardCopper, BoardPin, ViewSide } from '../lib/types';
 import { anyContextLost } from './board-canvas-recovery';
+import { buildCopperLayers, copperIsEmpty } from './board-copper';
+import type { CopperLayers } from './board-copper';
 import { strokeMeasurementLine } from './board-measure-line';
-import { boundsCover, buildPadLayers, PAD_REGION_SLACK, PAD_VIEW_MARGIN_PX, planPadLayers, samePadPlan } from './board-pad-layers';
-import type { PadLayerPlan, PadLayers } from './board-pad-layers';
+import { boundsCover, PAD_REGION_SLACK, PAD_VIEW_MARGIN_PX, PadBatchCache, planPadLayers, samePadPlan } from './board-pad-layers';
+import type { PadLayers } from './board-pad-layers';
 import { BOARD_PALETTES } from './board-palette';
 import type { BoardPalette } from './board-palette';
 import { LAYER_ORDER } from './board-renderer';
@@ -19,6 +21,7 @@ import type { BoardPane } from './board-view';
 /**
  * Canvas2D backend of the board renderer. Each surface is a stack of layers drawn per pane; the built-in layers below draw exactly
  * what the single draw function of the board canvas drew (same calls in the same order), feature layers plug in between them.
+ * The one addition: a board with copper (Board.copper, from ODB++) gets its copper drawn in the outline layer; without copper nothing changes.
  */
 
 /** What a layer of the Canvas2D backend draws with: one pane of one surface in one frame. */
@@ -73,20 +76,26 @@ interface ConnectionCache {
   bounds: Bounds2;
   clipped?: { bounds: Bounds2; path: Path2D };
 }
-/** Display paths of the pads of the viewport region (plus a pan margin) at one zoom and selection; rebuilt when any of them or the region changes. */
+/** The pad paths of one pane for one zoom, selection and region (rebuilt when any of them or the region changes). */
 interface PadPathCache {
   side: ViewSide; scale: number; net: string | null; component: string | null; region: Bounds2; paths: PadLayers<Path2D>;
+}
+/** Copper paths of one pane: the side and the board copper they were built from, and the region they cover (rebuilt when the view leaves it). */
+interface CopperPathCache {
+  side: ViewSide; copper: BoardCopper; region: Bounds2; layers: CopperLayers<Path2D>;
 }
 interface SceneCaches {
   readonly scene: BoardScene;
   readonly partPaths: Array<Path2D | undefined>;
   outline: Path2D | null;
   readonly pads: Map<string, PadPathCache>;
-  readonly plans: Partial<Record<ViewSide, PadLayerPlan>>;
+  readonly copper: Map<string, CopperPathCache>;
+  /** The batched pads of each side for the current selection; replaced when the selection changes. */
+  readonly padBatches: Partial<Record<ViewSide, PadBatchCache<Path2D>>>;
   readonly connections: Partial<Record<ViewSide, ConnectionCache>>;
   readonly selections: Partial<Record<ViewSide, { input: SelectionInput; value: SideSelection }>>;
 }
-const newCaches = (scene: BoardScene): SceneCaches => ({ scene, partPaths: [], outline: null, pads: new Map(), plans: {}, connections: {}, selections: {} });
+const newCaches = (scene: BoardScene): SceneCaches => ({ scene, partPaths: [], outline: null, pads: new Map(), copper: new Map(), padBatches: {}, connections: {}, selections: {} });
 
 export function buildConnections(pins: readonly BoardPin[], source: BoardPin): ConnectionCache {
   const path = new Path2D();
@@ -167,6 +176,42 @@ function drawOutline(f: Frame2D): void {
   ctx.stroke(path);
 }
 
+/**
+ * The copper of the viewed side (pads, tracks and arcs) and the drilled holes of the board, on both sides. It is drawn in the outline
+ * layer, after the board fill and before the connection lines and the parts: the parts cover the copper as they cover the board, and the
+ * holes show the board colour through. A board without copper draws nothing here and leaves the context alone, so its view is unchanged.
+ */
+function drawCopper(f: Frame2D, caches: SceneCaches): void {
+  const copper = f.scene.board.copper;
+  if (!copper || copperIsEmpty(copper)) return;
+  const { ctx, view, state, palette, pane, width, height } = f;
+  // The same culling and batching as the pads: paths are built for the viewport plus a pan margin and kept while the view stays in it.
+  const needed = f.viewport(PAD_VIEW_MARGIN_PX);
+  let cache = caches.copper.get(pane.id);
+  if (!cache || cache.side !== pane.side || cache.copper !== copper || !boundsCover(cache.region, needed)) {
+    const region = f.viewport(PAD_VIEW_MARGIN_PX + Math.max(width, height) * PAD_REGION_SLACK);
+    cache = { side: pane.side, copper, region, layers: buildCopperLayers(copper, pane.side, region, () => new Path2D()) };
+    caches.copper.set(pane.id, cache);
+  }
+  const colour = pane.side === 'top' ? palette.copperTop : palette.copperBottom;
+  ctx.save();
+  f.toBoardSpace();
+  ctx.lineCap = 'round';
+  ctx.globalAlpha = state.selectedNet ? 0.44 : 1;
+  ctx.fillStyle = colour;
+  for (const path of cache.layers.pads) ctx.fill(path);
+  ctx.strokeStyle = colour;
+  for (const stroke of cache.layers.strokes) {
+    // A track is never thinner than one device pixel, so it stays visible when the board is zoomed far out.
+    ctx.lineWidth = Math.max(stroke.width, 1 / view.scale);
+    ctx.stroke(stroke.path);
+  }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = palette.background;
+  for (const path of cache.layers.holes) ctx.fill(path);
+  ctx.restore();
+}
+
 /** Every straight link is an exact logical relation, never a copper trace. Dense nets use thin solid lines. */
 function drawConnections(f: Frame2D, caches: SceneCaches): void {
   const { ctx, view, state, palette, selection } = f;
@@ -192,6 +237,8 @@ function drawBodies(f: Frame2D): void {
   const { ctx, view, state, palette, dpr } = f;
   const netComponents = f.selection.components;
   f.toBoardSpace();
+  // The values the context holds now: a style setter is skipped when it would set the same value (most parts share a style with the one before).
+  let alphaSet = NaN, fillSet = '', strokeSet = '', widthSet = NaN;
   for (const part of f.visibleParts) {
     const component = part.component;
     const selected = component.id === state.selectedComponentId;
@@ -203,10 +250,14 @@ function drawBodies(f: Frame2D): void {
     const kind = part.group;
     const fill = kind === 'chip' ? palette.chip : kind === 'connector' ? palette.connector : palette.body;
     const line = kind === 'chip' ? palette.chipLine : kind === 'connector' ? palette.connectorLine : palette.bodyLine;
-    ctx.globalAlpha = state.selectedNet && !linked && !selected ? 0.48 : 1;
-    ctx.fillStyle = selected ? palette.amberFill : linked ? palette.netFill : fill;
-    ctx.strokeStyle = selected ? palette.amber : linked ? palette.cyan : line;
-    ctx.lineWidth = (selected ? 2 : linked ? 1.4 : 0.95) / view.scale;
+    const alpha = state.selectedNet && !linked && !selected ? 0.48 : 1;
+    if (alpha !== alphaSet) ctx.globalAlpha = alphaSet = alpha;
+    const fillStyle = selected ? palette.amberFill : linked ? palette.netFill : fill;
+    if (fillStyle !== fillSet) ctx.fillStyle = fillSet = fillStyle;
+    const strokeStyle = selected ? palette.amber : linked ? palette.cyan : line;
+    if (strokeStyle !== strokeSet) ctx.strokeStyle = strokeSet = strokeStyle;
+    const lineWidth = (selected ? 2 : linked ? 1.4 : 0.95) / view.scale;
+    if (lineWidth !== widthSet) ctx.lineWidth = widthSet = lineWidth;
     if (projectedSize < TINY_PART_PX) {
       // Display-only footprint markers keep tiny parts visible without changing geometry.
       const center = part.center;
@@ -241,7 +292,7 @@ function drawBodies(f: Frame2D): void {
 /**
  * Each pad keeps its physical shape plus the same screen-size fallback marker. Cached batches replace thousands of fill calls during
  * panning; only the pads of the viewport (plus a pan margin) get display paths (P04), and the layer/batch assignment is per selection
- * and zoom-independent (board-pad-layers.ts).
+ * and zoom-independent. The batch cache (board-pad-layers.ts) builds the same paths as before and keeps the whole-batch paths it can.
  */
 function drawPads(f: Frame2D, caches: SceneCaches): void {
   const { ctx, view, state, palette, pane, width, height } = f;
@@ -251,15 +302,15 @@ function drawPads(f: Frame2D, caches: SceneCaches): void {
   const needed = f.viewport(PAD_VIEW_MARGIN_PX);
   if (!pinCache || pinCache.side !== pane.side || pinCache.scale !== view.scale
     || pinCache.net !== state.selectedNet || pinCache.component !== state.selectedComponentId || !boundsCover(pinCache.region, needed)) {
-    let plan = caches.plans[pane.side] ?? null;
-    if (!samePadPlan(plan, sidePins, state.selectedNet, state.selectedComponentId)) {
-      plan = planPadLayers(sidePins, state.selectedNet, state.selectedComponentId);
-      caches.plans[pane.side] = plan;
+    let batches = caches.padBatches[pane.side];
+    if (!batches || !samePadPlan(batches.plan, sidePins, state.selectedNet, state.selectedComponentId)) {
+      batches = new PadBatchCache(planPadLayers(sidePins, state.selectedNet, state.selectedComponentId), () => new Path2D());
+      caches.padBatches[pane.side] = batches;
     }
     const region = f.viewport(PAD_VIEW_MARGIN_PX + Math.max(width, height) * PAD_REGION_SLACK);
     pinCache = {
       side: pane.side, scale: view.scale, net: state.selectedNet, component: state.selectedComponentId, region,
-      paths: buildPadLayers(plan, region, view.scale, () => new Path2D()),
+      paths: batches.build(region, view.scale),
     };
     caches.pads.set(pane.id, pinCache);
   }
@@ -417,7 +468,8 @@ export class Canvas2DBoardRenderer implements BoardRenderer<Frame2D> {
     const stats = this.frameStats;
     this.builtIns = [
       { id: 'background', surface: 'base', order: LAYER_ORDER.background, draw: drawBackground },
-      { id: 'outline', surface: 'base', order: LAYER_ORDER.outline, draw: drawOutline },
+      // The outline layer also draws the board's copper, when the board has any (no layer of its own: the layer list is unchanged).
+      { id: 'outline', surface: 'base', order: LAYER_ORDER.outline, draw: f => { drawOutline(f); drawCopper(f, caches()); } },
       { id: 'connections', surface: 'base', order: LAYER_ORDER.connections, draw: f => drawConnections(f, caches()) },
       { id: 'bodies', surface: 'base', order: LAYER_ORDER.bodies, draw: drawBodies },
       { id: 'pads', surface: 'base', order: LAYER_ORDER.pads, draw: f => drawPads(f, caches()) },

@@ -3,28 +3,43 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'reac
 import type { Translator } from '../lib/i18n';
 import {
   UPDATE_KEYS, beginStartupUpdateCheck, checkNowOffersDownload, checkNowStatus, createUpdateActions, currentDesktop, dismissStartupUpdate,
-  getStartupUpdateState, startupUpdateToShow, subscribeStartupUpdate, updateCheckAllowed,
+  getStartupUpdateState, startupUpdateToShow, subscribeStartupUpdate, updateCheckAllowed, updateCheckSupported,
 } from '../lib/update-check';
-import type { CheckNowState, UpdateActions } from '../lib/update-check';
+import type { CheckNowState, UpdateActions, UpdateAnswer } from '../lib/update-check';
 import './update-notice.css';
 
 /**
  * Update notification (the logic is in src/lib/update-check.ts, the main-process half in electron/updates.cjs). Two small pieces of markup:
  *  - UpdateNotice: one check per launch, once the shell is ready and the setting is on, and a dismissible strip under the top bar when a newer
  *    release exists. The strip waits until the support dialog is out of the way (`after`), so the two never compete. A failed check is silent.
+ *    Until the first-start question is answered (`asked` false), the same place shows the question instead: yes, no or skip. Skip leaves the check off.
  *  - UpdateSettings: the switch and the "Check now" row of the Settings dialog (the caller shows them only when the desktop bridge has the update calls).
  * Nothing is ever downloaded or installed: Download asks the main process to open the release page in the browser.
  */
-export default function UpdateNotice({ enabled, ready, after, t, onOpenFailed }: { enabled: boolean; ready: boolean; after: boolean; t: Translator; onOpenFailed?: () => void }) {
+export default function UpdateNotice({ enabled, asked = true, ready, after, t, onOpenFailed, onAnswer }: {
+  enabled: boolean; asked?: boolean; ready: boolean; after: boolean; t: Translator; onOpenFailed?: () => void; onAnswer?: (answer: UpdateAnswer) => void;
+}) {
   const state = useSyncExternalStore(subscribeStartupUpdate, getStartupUpdateState, getStartupUpdateState);
   const actions = useMemo(() => createUpdateActions(currentDesktop()), []);
   // The decision is made at the moment the shell becomes ready, with the setting as it is then (the launch's one claim is taken either way).
   const enabledNow = useRef(enabled);
   enabledNow.current = enabled;
   useEffect(() => { if (ready) void beginStartupUpdateCheck(currentDesktop(), enabledNow.current && updateCheckAllowed()); }, [ready]);
+  if (!asked && ready && after && onAnswer && updateCheckSupported(currentDesktop())) return <UpdateQuestion t={t} onAnswer={onAnswer} />;
   const version = startupUpdateToShow(state, enabled && after);
   if (version === null) return null;
   return <UpdateStrip t={t} version={version} onDownload={() => { void actions.open().then(opened => { if (!opened) onOpenFailed?.(); }); }} onDismiss={dismissStartupUpdate} />;
+}
+
+/** The first-start question (exported for the markup test): yes, no, or skip. Nothing is requested before an answer; skip leaves the check off. */
+export function UpdateQuestion({ t, onAnswer }: { t: Translator; onAnswer: (answer: UpdateAnswer) => void }) {
+  return <div className="update-strip update-question" role="group" aria-label={t(UPDATE_KEYS.askText)} data-testid="update-question">
+    <Download size={14} aria-hidden="true" />
+    <span className="update-strip-text" data-testid="update-question-text">{t(UPDATE_KEYS.askText)}</span>
+    <button type="button" className="primary-button" data-testid="update-question-yes" onClick={() => onAnswer('on')}>{t(UPDATE_KEYS.askYes)}</button>
+    <button type="button" className="outline-button" data-testid="update-question-no" onClick={() => onAnswer('off')}>{t(UPDATE_KEYS.askNo)}</button>
+    <button type="button" className="tool-button" data-testid="update-question-skip" onClick={() => onAnswer('skip')}>{t(UPDATE_KEYS.askSkip)}</button>
+  </div>;
 }
 
 /** The strip itself (exported for the markup test). */

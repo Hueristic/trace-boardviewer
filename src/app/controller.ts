@@ -1,13 +1,17 @@
 import type { ViewerCamera, ViewerHighlight } from '../components/viewer-contracts';
-import { companionNames } from '../lib/formats';
+import { SUPPORTED_EXTENSIONS, companionNames } from '../lib/formats';
+import { MAX_NATIVE_ALLEGRO_IMPORT_BYTES } from '../lib/formats/common';
+import { mebibytes } from '../lib/formats/import-limits';
+import { sourceBaseName } from '../lib/formats/source-name';
 import { boardIndexOf } from '../lib/board-index';
 import {
   buildSchematicIndex, linkBoardSchematic, normalizeQuery, resolvePdfRefHits, searchAll, searchBoardGroups, DEFAULT_SEARCH_LIMITS,
 } from '../lib/crossprobe';
 import type { BoardIndex, BoardSearchGroups, DocumentSearchSource, SchematicIndex, SchematicSource, SearchRow } from '../lib/crossprobe';
 import { MODEL_PROTOCOL } from '../lib/model-protocol';
-import { ERROR_CODES, EXTENSIONS, FORMAT_IDS } from '../lib/diagnostics/report';
-import type { DocumentAnnotation, DocumentBookmark, DocumentCalibration, DocumentKind, DocumentLocateResult, DocumentPayload, WorkspaceExportResult, WorkspaceManifest, WorkspaceTab } from '../lib/documents';
+import { ERROR_CODES, EXTENSIONS, FORMAT_IDS, type OsFamily } from '../lib/diagnostics/report';
+import type { DocumentAnnotation, DocumentBookmark, DocumentCalibration, DocumentKind, DocumentLocateResult, DocumentPayload, AliasRejection, WorkspaceExportOutcome, WorkspaceManifest, WorkspaceTab } from '../lib/documents';
+import { WORKSPACE_LIMITS } from '../lib/documents';
 import type { Message, MessageKey, MessageParam, ParseIssue } from '../lib/i18n';
 import { assertStorable, migrateNotes, noteKeyIndex, unresolvedNotes } from '../lib/note-keys';
 import type { NoteSubject } from '../lib/note-keys';
@@ -48,10 +52,10 @@ import { createStatusStore } from './statusStore';
  * captures the generation (or the board key) when it starts and drops its result when it no longer matches, so nothing of an old
  * board can attach to, overwrite or notify a new one. Imports use a second token (`sequence`): the latest request wins.
  */
-// i18n: pending — every `{ text }` message below is an English constant; the catalogs are frozen this phase.
+// i18n: pending — every `{ text }` message below is an English constant; the catalogs do not cover them yet.
 
-/** Primary file plus every companion together, the same bound the native process enforces. */
-const MAX_IMPORT_BYTES = 64 * 1024 * 1024;
+/** Primary file plus every companion together, read before the format is known: the largest limit a board may have (the dispatcher then applies the limit of its format). */
+const MAX_READ_BYTES = MAX_NATIVE_ALLEGRO_IMPORT_BYTES;
 /** Browser fallback mirrors the native bounds of one attach call (electron/documents.cjs). */
 const MAX_DOCUMENT_BYTES = 64 * 1024 * 1024;
 const MAX_ATTACH_FILES = 16;
@@ -120,8 +124,8 @@ type ContextOutcome = SafeImportContext['outcome'];
 type ContextStage = SafeImportContext['stage'];
 const CONTEXT_STAGES: readonly ContextStage[] = ['read', 'detect', 'unpack', 'parse', 'done', 'unknown'];
 const CONTEXT_CODES = [...ERROR_CODES, 'READ_FAILED', 'WORKER_FAILED', 'TIMEOUT', 'CANCELLED', 'UNKNOWN'] as const;
-function extensionClassOf(name: string): string {
-  const base = name.split(/[\\/]/).pop() ?? '';
+export function extensionClassOf(name: string, os: OsFamily): string {
+  const base = sourceBaseName(name, os);
   const dot = base.lastIndexOf('.');
   if (dot <= 0 && !(dot === 0 && base.length > 1)) return 'none';
   const extension = base.slice(dot).toLowerCase();
@@ -135,7 +139,7 @@ function safeErrorCode(value: unknown): string | null {
 }
 function safeStage(value: unknown): ContextStage { return CONTEXT_STAGES.includes(value as ContextStage) ? value as ContextStage : 'unknown'; }
 function importContext(name: string, outcome: ContextOutcome, stage: ContextStage, formatId: unknown = null, errorCode: unknown = null): SafeImportContext {
-  return { outcome, stage, formatId: safeFormatId(formatId), extensionClass: extensionClassOf(name), errorCode: safeErrorCode(errorCode) };
+  return { outcome, stage, formatId: safeFormatId(formatId), extensionClass: extensionClassOf(name, rendererOsFamily()), errorCode: safeErrorCode(errorCode) };
 }
 class ImportContextError extends UiError {
   constructor(readonly outcome: 'timeout' | 'worker-failed', readonly code: 'TIMEOUT' | 'WORKER_FAILED', message: Message) { super(message); }
@@ -144,7 +148,7 @@ class ImportContextError extends UiError {
 interface Entry {
   version: number;
   status: DocumentStatus;
-  message?: string;
+  message?: Message;
   pdf?: PdfSession;
   bytes?: Uint8Array;
   design?: SchematicDesign;
@@ -171,14 +175,16 @@ interface Entry {
  * green chip next to an error panel. A password prompt stays `ready`: that interactive state belongs to the viewer (api.ts: the session
  * is present while it asks for one). `null` (a closed session) leaves the status as it is.
  */
-function pdfStatusOf(snapshot: PdfSessionSnapshot): { status: DocumentStatus; message: string | undefined } | null {
+function pdfStatusOf(snapshot: PdfSessionSnapshot): { status: DocumentStatus; message: Message | undefined } | null {
   switch (snapshot.status) {
     case 'opening': return { status: 'loading', message: undefined };
     case 'ready': case 'password-required': case 'invalid-password': return { status: 'ready', message: undefined };
-    case 'error': return { status: 'error', message: snapshot.error?.message };
+    case 'error': { const error = snapshot.error?.message; return { status: 'error', message: error === undefined ? undefined : { text: error } }; }
     default: return null;
   }
 }
+/** Two status messages with the same content: the status row is rewritten only when its message changes. */
+const sameMessage = (a: Message | undefined, b: Message | undefined): boolean => JSON.stringify(a) === JSON.stringify(b);
 
 const NO_DOCUMENTS: DocumentRuntime[] = [];
 const NO_NOTES: BoardNote[] = [];
@@ -197,12 +203,56 @@ const NO_HIGHLIGHTS: readonly ViewerHighlight[] = Object.freeze([]);
 
 const say = (key: MessageKey, params?: Readonly<Record<string, MessageParam>>): Message => (params ? { key, params } : { key });
 const text = (value: string): Message => ({ text: value });
-const baseName = (name: string) => name.split(/[\\/]/).pop() || name;
+
+/** A board-format file name (an extension of a board or schematic adapter, never a document such as a PDF). */
+const isBoardFileName = (name: string): boolean => { const dot = name.lastIndexOf('.'); return dot >= 0 && SUPPORTED_EXTENSIONS.includes(name.slice(dot).toLowerCase()); };
+/**
+ * The board of a multi-file drop (HUNT-WIN-20261011-03: a PDF dropped first was taken for the board): a file with sidecars, else the first
+ * board-format file, else the first file.
+ */
+export const primaryOf = (list: readonly File[], os: OsFamily): File | undefined => list.find(value => companionNames(value.name, undefined, os).length > 0) ?? list.find(value => isBoardFileName(value.name)) ?? list[0];
+/** The dropped files that are neither the board nor its sidecars: documents, attached once the board is open. */
+export const documentsOf = (list: readonly File[], primary: File, os: OsFamily): File[] => {
+  const sidecars = new Set(companionNames(primary.name, undefined, os));
+  return list.filter(value => value !== primary && !sidecars.has(baseName(value.name, os).toLowerCase()));
+};
+/** The picked files that are companions of the primary: the sidecars of its name, in the same directory. */
+export const siblingsOf = (list: readonly File[], primary: File, os: OsFamily): File[] => {
+  const wanted = new Set(companionNames(primary.name, undefined, os));
+  return list.filter(value => value !== primary && wanted.has(baseName(value.name, os).toLowerCase()));
+};
+/** The name of a picked or opened file, by the separators of its OS family: on POSIX a backslash is part of the name. */
+const baseName = (name: string, os: OsFamily) => sourceBaseName(name, os) || name;
 const hex = (digest: ArrayBuffer) => Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 const sha256Hex = async (data: Uint8Array) => hex(await crypto.subtle.digest('SHA-256', data as Uint8Array<ArrayBuffer>));
 const bufferOf = (bytes: Uint8Array) => bytes.buffer as ArrayBuffer;
 const workspaceMessage = (error: unknown): Message => (error instanceof WorkspaceError ? text(error.message) : nativeFailure(error, text('The change could not be applied.')));
+/** The toast of a rejected alias names the rule it broke as a catalog sentence in the UI language; the dialog repeats it in its own words. */
+const aliasToastMessage = (error: unknown, kind: 'refs' | 'nets'): Message => {
+  if (!(error instanceof WorkspaceError)) return nativeFailure(error, say('linkDialog.toastFailed'));
+  switch (error.aliasReason) {
+    case 'name': return say('linkDialog.toastNameInvalid');
+    case 'target': return say('linkDialog.toastTargetInvalid');
+    case 'same': return say('linkDialog.toastSame');
+    case 'limit': return say(kind === 'refs' ? 'linkDialog.toastLimitRefs' : 'linkDialog.toastLimitNets', { max: String(WORKSPACE_LIMITS.aliases) });
+    default: return text(error.message);
+  }
+};
 const sameSelection = (a: BoardSelectionState, b: BoardSelectionState) => a.componentId === b.componentId && a.pinId === b.pinId && a.net === b.net;
+
+/**
+ * The OS family of a navigator platform string. The renderer runs on the machine the picked files are on, so the family says which
+ * separators a file name can hold (shortcuts.ts reads the same value for Apple platforms). Empty or unknown: 'other'.
+ */
+export function osFamilyOf(platform: string): OsFamily {
+  if (/^Win/i.test(platform)) return 'win32';
+  if (/^Mac/i.test(platform)) return 'darwin';
+  if (/Linux/i.test(platform)) return 'linux';
+  return 'other';
+}
+
+/** The OS family of this renderer: the separators of the file names it picks follow it. */
+const rendererOsFamily = (): OsFamily => osFamilyOf(typeof navigator === 'undefined' ? '' : navigator.platform);
 
 export function createWorkspaceController(deps: ControllerDeps): WorkspaceController {
   return new Controller(deps).api();
@@ -236,6 +286,8 @@ class Controller {
   private sources: SchematicSource[] = [];
   private linkKey: { board: BoardIndex | null; schematic: SchematicIndex | null; aliases: unknown } | null = null;
   private ws: WorkspaceManifest | null = null;
+  /** The workspace of the board being opened: a dropped document waits for it (HUNT-WIN-20261011-03). */
+  private workspaceOpened: Promise<void> = Promise.resolve();
   private saver: WorkspaceSaver<WorkspaceManifest> | null = null;
   private saveBlocked = false;
   private saveFailureNotified = false;
@@ -335,11 +387,12 @@ class Controller {
     this.patch({ probe: { ...current, ...changes } });
   }
   /** A native failure as an error notice, except `*_CLOSING` (the application is quitting): then nothing is reported. */
-  private notifyFailure(error: unknown, fallback: Message): void {
-    if (!isClosingError(error)) this.notify(nativeFailure(error, fallback), 'error');
+  private notifyFailure(error: unknown, fallback: Message, sticky = false): void {
+    if (!isClosingError(error)) this.notify(nativeFailure(error, fallback), 'error', sticky);
   }
-  private notify(message: Message, kind: NoticeKind = 'info'): void {
-    this.patch({ notices: [...this.state.notices, { id: ++this.noticeId, kind, message }].slice(-MAX_NOTICES) });
+  /** `sticky`: stays until the user closes it (see Notice). */
+  private notify(message: Message, kind: NoticeKind = 'info', sticky = false): void {
+    this.patch({ notices: [...this.state.notices, { id: ++this.noticeId, kind, message, ...(sticky ? { sticky } : {}) }].slice(-MAX_NOTICES) });
   }
   private iso = () => new Date(this.now()).toISOString();
 
@@ -447,7 +500,7 @@ class Controller {
         const data = new Uint8Array(payload.data);
         const companions = payload.companions && Object.fromEntries(Object.entries(payload.companions).map(([name, bytes]) => [name, new Uint8Array(bytes)]));
         const transfer = [bufferOf(data), ...Object.values(companions ?? {}).map(bytes => bufferOf(bytes))];
-        port.post({ name: payload.name, data, companions, options: this.sessionOptions }, transfer);
+        port.post({ name: payload.name, data, companions, options: this.sessionOptions, platform: rendererOsFamily() }, transfer);
         if (port) arm(); // a worker that already answered (or failed) has released the import
       } catch (error) {
         release();
@@ -463,7 +516,8 @@ class Controller {
     this.sessionOptions = options;
   }
 
-  private async loadPayload(payload: FilePayload, token: number): Promise<ImportOutcome> {
+  /** `sticky`: a failure to open this file stays on screen until the user closes it (start-up and external opens). */
+  private async loadPayload(payload: FilePayload, token: number, sticky = false): Promise<ImportOutcome> {
     if (token !== this.sequence) return 'failed';
     this.patchImport({ phase: 'processing', progress: { fraction: null, stalled: false } });
     this.setReportContext(token, importContext(payload.name, 'processing', 'detect'));
@@ -509,14 +563,14 @@ class Controller {
         if (error.failure.code === 'INVALID_KEY') this.forgetKey(error.failure.keyKind);
         // The previous board stays on screen; a newer import (beginImport) dismisses this request.
         this.waitingKey = { payload, kind: error.failure.keyKind };
-        this.patchImport({ keyRequest: { fileName: payload.name, kind: error.failure.keyKind, code: error.failure.code, message: error.failure.message } });
+        this.patchImport({ keyRequest: { fileName: payload.name, kind: error.failure.keyKind, code: error.failure.code, message: error.failure.message, ...(error.failure.issue ? { reason: { issue: error.failure.issue } } : {}) } });
         this.setReportContext(token, importContext(payload.name, 'key-required', this.state.import.reportContext?.stage ?? 'unknown', null, error.failure.code));
         return 'key-required';
       }
       if (error instanceof ImportContextError) this.setReportContext(token, importContext(payload.name, error.outcome, this.state.import.reportContext?.stage ?? 'unknown', null, error.code));
       else this.setReportContext(token, importContext(payload.name, 'failed', this.state.import.reportContext?.stage ?? 'unknown', null,
         error instanceof FormatFailureError ? error.failure.code : 'UNKNOWN'));
-      this.notifyFailure(error, say('toast.openFailed'));
+      this.notifyFailure(error, say('toast.openFailed'), sticky);
       return 'failed';
     } finally {
       model?.dispose();
@@ -526,14 +580,13 @@ class Controller {
 
   /** `token` comes from the caller when the intent was declared earlier (the chooser); a dropped selection takes its own. */
   private async readBrowserFiles(list: File[], token = this.beginImport()): Promise<void> {
-    const primary = list.find(value => companionNames(value.name).length > 0) ?? list[0];
+    const primary = primaryOf(list, rendererOsFamily());
     if (!primary) return;
     this.setReportContext(token, importContext(primary.name, 'reading', 'read'));
-    const wanted = new Set(companionNames(primary.name));
-    const siblings = list.filter(value => value !== primary && wanted.has(value.name.toLowerCase()));
-    if (primary.size + siblings.reduce((sum, value) => sum + value.size, 0) > MAX_IMPORT_BYTES) {
+    const siblings = siblingsOf(list, primary, rendererOsFamily());
+    if (primary.size + siblings.reduce((sum, value) => sum + value.size, 0) > MAX_READ_BYTES) {
       this.setReportContext(token, importContext(primary.name, 'failed', 'read', null, 'LIMIT_EXCEEDED'));
-      this.notify(say('toast.fileTooLarge', { max: 64 }), 'error'); return;
+      this.notify(say('toast.fileTooLarge', { max: mebibytes(MAX_READ_BYTES) }), 'error'); return;
     }
     this.patchImport({ phase: 'reading' });
     try {
@@ -547,9 +600,9 @@ class Controller {
         total += companions[name].byteLength;
       }
       if (token !== this.sequence) return;
-      if (total > MAX_IMPORT_BYTES) { this.patchImport({ phase: 'idle' }); this.setReportContext(token, importContext(primary.name, 'failed', 'read', null, 'LIMIT_EXCEEDED')); this.notify(say('toast.fileTooLarge', { max: 64 }), 'error'); return; }
+      if (total > MAX_READ_BYTES) { this.patchImport({ phase: 'idle' }); this.setReportContext(token, importContext(primary.name, 'failed', 'read', null, 'LIMIT_EXCEEDED')); this.notify(say('toast.fileTooLarge', { max: mebibytes(MAX_READ_BYTES) }), 'error'); return; }
       const withCompanions = Object.keys(companions).length > 0;
-      const key = await boardIdentityKey([{ name: primary.name, data }, ...(withCompanions ? Object.entries(companions).map(([name, bytes]) => ({ name, data: bytes })) : [])]);
+      const key = await boardIdentityKey([{ name: primary.name, data }, ...(withCompanions ? Object.entries(companions).map(([name, bytes]) => ({ name, data: bytes })) : [])], rendererOsFamily());
       if (token !== this.sequence) return;
       await this.loadPayload({ name: primary.name, path: '', data, ...(withCompanions ? { companions } : {}), key }, token);
     } catch {
@@ -561,12 +614,16 @@ class Controller {
     const desktop = this.desktop;
     let active = true;
     const token = this.beginImport();
-    const unopen = desktop?.onOpenBoard(payload => { void this.track(this.loadPayload(payload, this.beginImport())); });
+    const unopen = desktop?.onOpenBoard(payload => { void this.track(this.loadPayload(payload, this.beginImport(), true)); });
+    // An external open the main process could not read: the notice of a failed interactive open, kept until the user closes it.
+    const unfailed = desktop?.onOpenFailed?.(message => { if (active) this.notify({ text: message }, 'error', true); });
+    // The settings file was read again after a lock ended: the main process adopted its recent boards too, so the list is read again.
+    const unsettled = desktop && desktop.onSettingsChanged ? desktop.onSettingsChanged(() => { void desktop.recentBoards().then(recents => { if (active) this.patchImport({ recents }); }).catch(() => {}); }) : undefined;
     if (desktop) {
       void this.track(desktop.recentBoards().then(recents => { if (active && token === this.sequence) this.patchImport({ recents }); }).catch(() => {}));
       void this.track(desktop.initialBoard().then(async payload => {
         if (!active || !payload || token !== this.sequence) return;
-        const outcome = await this.loadPayload(payload, token);
+        const outcome = await this.loadPayload(payload, token, true);
         // A key request counts as handled: the user decides, the other recents are not tried behind the dialog.
         if (outcome !== 'failed' || payload.startupSource !== 'recent' || !active || token !== this.sequence) return;
         const alternatives = await desktop.recentBoards();
@@ -579,7 +636,7 @@ class Controller {
           try {
             const candidate = await desktop.readBoard(recent.path);
             if (!active || token !== this.sequence) return;
-            if (await this.loadPayload(candidate, token) !== 'failed') return;
+            if (await this.loadPayload(candidate, token, true) !== 'failed') return;
           } catch {
             if (active && token === this.sequence) this.setReportContext(token, importContext(recent.path, 'failed', 'read', null, 'READ_FAILED'));
             /* A missing legacy recent must not prevent trying the next one. */
@@ -588,13 +645,15 @@ class Controller {
       }).catch(error => {
         if (active && token === this.sequence) {
           this.setReportContext(token, importContext('', 'failed', 'read', null, 'READ_FAILED'));
-          this.notifyFailure(error, say('toast.startupFailed'));
+          this.notifyFailure(error, say('toast.startupFailed'), true);
         }
       }));
     }
     return () => {
       active = false;
       unopen?.();
+      unfailed?.();
+      unsettled?.();
       this.sequence++;
       this.parser?.cancel();
       this.parser = null;
@@ -658,9 +717,10 @@ class Controller {
     this.searchText = '';
     this.statusStore.setSource(`${board.format} · ${board.units}`);
     const generation = this.generation;
-    void this.track(this.openWorkspace(generation, payload, board).catch(error => {
+    this.workspaceOpened = this.openWorkspace(generation, payload, board).catch(error => {
       if (generation === this.generation && !isClosingError(error)) this.notify(workspaceMessage(error), 'error');
-    }));
+    });
+    void this.track(this.workspaceOpened);
   }
 
   private closeBoard(): void {
@@ -689,7 +749,7 @@ class Controller {
   private get native(): boolean { return this.desktop !== undefined; }
 
   private async openWorkspace(generation: number, payload: FilePayload, board: Board): Promise<void> {
-    const identity = { key: payload.key, name: baseName(payload.name) || 'board', path: payload.path || `/${baseName(payload.name) || 'board'}`, format: board.format || 'board' };
+    const identity = { key: payload.key, name: baseName(payload.name, rendererOsFamily()) || 'board', path: payload.path || `/${baseName(payload.name, rendererOsFamily()) || 'board'}`, format: board.format || 'board' };
     const desktop = this.desktop;
     if (!desktop) {
       this.ws = createManifest(identity, this.iso());
@@ -759,9 +819,10 @@ class Controller {
       results = await desktop.locateDocuments(boardPath, manifest.documents.map(({ id, kind, path, relativePath, key }) => ({ id, kind, path, ...(relativePath ? { relativePath } : {}), key })));
     } catch (error) {
       if (generation !== this.generation || isClosingError(error)) return;
-      const message = errorText(error, 'The documents could not be located.');
-      for (const record of manifest.documents) this.setEntry(record.id, { status: 'unreadable', message: `The document could not be located: ${message}` });
-      this.notifyFailure(error, text('The attached documents could not be located.'));
+      const detail = errorText(error, '');
+      const message = say('workspace.locate.failed', { detail: detail ? { text: detail } : { key: 'workspace.locate.plain' } });
+      for (const record of manifest.documents) this.setEntry(record.id, { status: 'unreadable', message });
+      this.notifyFailure(error, say('workspace.locate.attached'));
       return;
     }
     if (generation !== this.generation || !this.ws) return;
@@ -772,7 +833,7 @@ class Controller {
       const entry = this.entries.get(change.id);
       if (!entry) continue;
       entry.change = change;
-      this.setEntry(change.id, { status: 'changed', message: `The file at ${change.path} has different content than the one that was attached. Accept the changed file to use it, or relink the original.` });
+      this.setEntry(change.id, { status: 'changed', message: say('workspace.changed.file', { path: change.path }) });
     }
     const changed = new Set(outcome.changed.map(change => change.id));
     const missing = new Set(outcome.missing);
@@ -780,8 +841,8 @@ class Controller {
     for (const record of this.ws!.documents) {
       if (changed.has(record.id)) continue;
       const result = results.find(candidate => candidate.id === record.id);
-      if (missing.has(record.id)) this.setEntry(record.id, { status: 'missing', message: `The file was not found at its remembered location (${record.path}). Relink it to the same file, or remove it from the workspace.` });
-      else if (unreadable.has(record.id) || !answered.has(record.id)) this.setEntry(record.id, { status: 'unreadable', message: `The file could not be read${result?.message ? `: ${result.message}` : '.'} Relink it, or remove it from the workspace.` });
+      if (missing.has(record.id)) this.setEntry(record.id, { status: 'missing', message: say('workspace.unreadable.missing', { path: record.path }) });
+      else if (unreadable.has(record.id) || !answered.has(record.id)) this.setEntry(record.id, { status: 'unreadable', message: result?.message ? say('workspace.unreadable.located', { detail: result.message }) : say('workspace.unreadable.bare') });
       else this.enqueueLoad(generation, record.id);
     }
   }
@@ -812,16 +873,17 @@ class Controller {
     catch (error) {
       if (stale() || isClosingError(error)) return;
       const code = nativeCode(error);
-      const detail = errorText(error, 'The file could not be read.');
+      const detail = errorText(error, '');
+      // A file another program holds open (O-07) is not a relink case: its reason alone is the advice.
       this.setEntry(id, code === 'DOCUMENT_NOT_FOUND'
-        ? { status: 'missing', message: `The file was not found at its remembered location (${record.path}). Relink it to the same file, or remove it from the workspace.` }
-        : { status: 'unreadable', message: `${detail} Relink it, or remove it from the workspace.` });
+        ? { status: 'missing', message: say('workspace.unreadable.missing', { path: record.path }) }
+        : { status: 'unreadable', message: code === 'DOCUMENT_IN_USE' ? (detail ? { text: detail } : say('workspace.unreadable.plain')) : (detail ? say('workspace.unreadable.open', { detail: { text: detail } }) : say('workspace.unreadable.bare')) });
       return;
     }
     if (stale()) return;
     if (payload.key !== record.key) {
       entry.change = { id, name: record.name, path: payload.path, key: payload.key, size: payload.size, expectedKey: record.key };
-      this.setEntry(id, { status: 'changed', message: `The file at ${payload.path} has different content than the one that was attached. Accept the changed file to use it, or relink the original.` });
+      this.setEntry(id, { status: 'changed', message: say('workspace.changed.file', { path: payload.path }) });
       return;
     }
     this.installPayload(generation, id, payload);
@@ -894,7 +956,7 @@ class Controller {
       // caller, and a transferred buffer is detached on this side. The payload itself is never handed over.
       const data = payload.data.slice();
       const companions = payload.companions && Object.fromEntries(Object.entries(payload.companions).map(([name, bytes]) => [name, bytes.slice()]));
-      entry.worker.post({ requestId, name: payload.name, data, ...(companions ? { companions } : {}) }, [bufferOf(data), ...Object.values(companions ?? {}).map(bufferOf)]);
+      entry.worker.post({ requestId, name: payload.name, data, platform: rendererOsFamily(), ...(companions ? { companions } : {}) }, [bufferOf(data), ...Object.values(companions ?? {}).map(bufferOf)]);
     } catch (error) {
       this.onSchematicFailure(generation, id, requestId, { code: 'UNKNOWN', message: errorText(error, 'The schematic could not be processed.') });
     }
@@ -913,7 +975,7 @@ class Controller {
   private onSchematicFailure(generation: number, id: string, requestId: number, failure: { code: string; message: string }): void {
     const entry = this.entries.get(id);
     if (!entry || generation !== this.generation || requestId !== entry.requestId) return;
-    this.setEntry(id, { status: 'error', message: failure.message, design: undefined, designState: 'error', designError: { code: failure.code, message: failure.message } });
+    this.setEntry(id, { status: 'error', message: { text: failure.message }, design: undefined, designState: 'error', designError: { code: failure.code, message: failure.message } });
     entry.finishRequest?.();
     this.refreshSchematicIndex();
   }
@@ -976,6 +1038,17 @@ class Controller {
     catch (error) { this.notify(workspaceMessage(error), 'error'); return false; }
     this.setManifest(next);
     return true;
+  }
+
+  /** Sets an alias. A rejected one leaves the manifest as it was: its error notice says why, and the rule it broke is returned so the dialog can say it too. */
+  private changeAlias(kind: 'refs' | 'nets', from: string, to: string): AliasRejection | null {
+    const current = this.ws;
+    if (!current) return 'other';
+    let next: WorkspaceManifest;
+    try { next = setAlias(current, kind, from, to); }
+    catch (error) { this.notify(aliasToastMessage(error, kind), 'error'); return error instanceof WorkspaceError && error.aliasReason ? error.aliasReason : 'other'; }
+    this.setManifest(next);
+    return null;
   }
 
   private async flushActive(): Promise<void> {
@@ -1093,7 +1166,8 @@ class Controller {
   }
 
   private selectComponent(id: string | null, options?: { center?: boolean; origin?: SelectionOrigin }): void {
-    if (id !== null && !this.boardIndex?.componentById.has(id)) return;
+    // U-24: an id the open board does not have selects nothing, and the user is told why (a board that is not open has nothing to say).
+    if (id !== null && !this.boardIndex?.componentById.has(id)) { if (this.boardIndex) this.notify(say('toast.componentMissing'), 'info'); return; }
     this.applyBoardSelection(id === null ? EMPTY_SELECTION : { componentId: id, pinId: null, net: null }, options?.origin ?? 'board', !!options?.center);
   }
   private selectPin(id: string, options?: { center?: boolean; origin?: SelectionOrigin }): void {
@@ -1205,7 +1279,7 @@ class Controller {
     const snapshot = session.getSnapshot();
     // The row follows the session before anything else reacts to it (the unified search below only takes `ready` documents).
     const implied = pdfStatusOf(snapshot);
-    if (implied && (entry.status !== implied.status || entry.message !== implied.message)) this.setEntry(id, implied);
+    if (implied && (entry.status !== implied.status || !sameMessage(entry.message, implied.message))) this.setEntry(id, implied);
     if (!entry.pageRecorded && snapshot.pageCount > 0) {
       entry.pageRecorded = true;
       this.mutate(manifest => setPageCount(manifest, id, snapshot.pageCount));
@@ -1358,9 +1432,11 @@ class Controller {
   private activateSearchRow(row: SearchRow): void {
     switch (row.source) {
       case 'board-components':
+        this.routeBoardTab();
         this.selectComponent(row.componentId, { center: true, origin: 'search' });
         break;
       case 'board-nets':
+        this.routeBoardTab();
         this.selectNet(row.name, 'search');
         break;
       case 'schematic-symbols':
@@ -1393,6 +1469,11 @@ class Controller {
     if (split?.enabled && split.right?.id === documentId) return;
     this.mutate(manifest => setActiveTab(manifest, tab));
   }
+  /** S-08: a board search row brings the Board tab forward. In the split view the board is already on screen, so the tab stays. */
+  private routeBoardTab(): void {
+    if (this.ws?.split.enabled) return;
+    this.mutate(manifest => setActiveTab(manifest, 'board'));
+  }
 
   // =============================================================================================================
   // Documents
@@ -1415,11 +1496,11 @@ class Controller {
       const siblings = sniffed.filter(item => item.kind === 'schematic');
       const payloads: DocumentPayload[] = [];
       for (const item of documents) {
-        const name = baseName(item.file.name) || 'document';
+        const name = baseName(item.file.name, rendererOsFamily()) || 'document';
         const payload: DocumentPayload = { name, path: '', kind: item.kind, format: item.format, data: item.data, key: await sha256Hex(item.data), size: item.data.byteLength };
         if (item.kind === 'schematic') {
           const companions: Record<string, Uint8Array> = {};
-          for (const sibling of siblings) if (sibling !== item) companions[baseName(sibling.file.name).toLowerCase()] = sibling.data;
+          for (const sibling of siblings) if (sibling !== item) companions[baseName(sibling.file.name, rendererOsFamily()).toLowerCase()] = sibling.data;
           if (Object.keys(companions).length) payload.companions = companions;
         }
         payloads.push(payload);
@@ -1446,7 +1527,7 @@ class Controller {
   private summarizeAttach(outcomes: Array<{ name: string; outcome: AttachOutcome }>): void {
     const count = (kind: string) => outcomes.filter(item => item.outcome === kind);
     const added = count('added').length + count('restored').length;
-    if (added) this.notify(text(added === 1 ? `Attached "${[...count('added'), ...count('restored')][0].name}".` : `Attached ${added} documents.`), 'success');
+    if (added) this.notify(added === 1 ? say('toast.attachedOne', { name: [...count('added'), ...count('restored')][0].name }) : say('toast.attachedMany', { count: added }), 'success');
     const duplicates = count('duplicate');
     if (duplicates.length) this.notify(text(duplicates.length === 1 ? `"${duplicates[0].name}" is already attached to this workspace.` : `${duplicates.length} of the files are already attached to this workspace.`), 'info');
   }
@@ -1464,6 +1545,13 @@ class Controller {
       if (this.desktop) {
         const payloads = await this.desktop.pickDocuments({ ...(kinds ? { kinds } : {}), multiple: true });
         await this.attachPayloads(generation, payloads);
+        // A companion file that only exists online was not read: say so and name it, so the user sees which sheets are missing and
+        // opens or attaches it by hand (no download here).
+        const online = payloads.flatMap(payload => (payload.skipped ?? []).filter(skip => skip.reason === 'online-only').map(skip => skip.name));
+        if (online.length > 0) {
+          this.notify(say('toast.companionOnlineOnly'), 'info');
+          this.notify(say('toast.companionOnlineOnlyNames', { names: online.join(', ') }), 'info');
+        }
       } else {
         const files = await this.deps.pickFiles?.({ multiple: true });
         if (files?.length) await this.attachBrowser(generation, files);
@@ -1474,6 +1562,15 @@ class Controller {
   }
   private async attachBrowser(generation: number, files: File[]): Promise<void> {
     await this.attachPayloads(generation, await this.readBrowserDocuments(files));
+  }
+  /**
+   * HUNT-WIN-20261011-03: the documents dropped with a board attach once that board is open. A load that waits for a key has not opened it yet,
+   * so the user is told to drop them again; a failed or superseded load attaches nothing (its own message already says why).
+   */
+  private async attachAfterBoard(documents: readonly File[], outcome: ImportOutcome): Promise<void> {
+    if (!documents.length) return;
+    if (outcome === 'loaded') { await this.workspaceOpened; await this.attachFiles([...documents]); }
+    else if (outcome === 'key-required') this.notify(say('toast.documentsAfterBoard'), 'info');
   }
   private async attachFiles(files: File[]): Promise<void> {
     if (!this.ws) { this.notify(text('Open a board before attaching documents.'), 'info'); return; }
@@ -1487,7 +1584,7 @@ class Controller {
         if (!path) { this.notify(text(`"${file.name}" has no file path, so it cannot be attached.`), 'error'); continue; }
         let payload: DocumentPayload;
         try { payload = await desktop.readDocument(path); }
-        catch (error) { this.notifyFailure(error, text(`"${file.name}" could not be read.`)); continue; }
+        catch (error) { this.notifyFailure(error, say('workspace.unreadable.fileNamed', { name: file.name })); continue; }
         if (generation !== this.generation) return;
         outcomes.push({ name: payload.name, outcome: this.attachOne(generation, payload) });
       }
@@ -1540,7 +1637,7 @@ class Controller {
       }
       this.setManifest(result.manifest);
       this.installPayload(generation, id, payload);
-      this.notify(text(`Relinked "${record.name}".`), 'success');
+      this.notify(say('workspace.relink.done', { name: record.name }), 'success');
     } catch (error) {
       if (generation === this.generation) this.notifyFailure(error, text('The document could not be relinked.'));
     }
@@ -1559,9 +1656,9 @@ class Controller {
       const ok = this.mutate(manifest => acceptChangedDocument(manifest, id, { path: payload.path, ...(change.relativePath ? { relativePath: change.relativePath } : {}), key: payload.key, size: payload.size }));
       if (!ok) return;
       this.installPayload(generation, id, payload);
-      this.notify(text(`Now using the changed file for "${record.name}". Bookmarks and annotations were kept; a calibration was cleared.`), 'success');
+      this.notify(say('workspace.changed.accepted', { name: record.name }), 'success');
     } catch (error) {
-      if (generation === this.generation) this.notifyFailure(error, text('The changed file could not be read.'));
+      if (generation === this.generation) this.notifyFailure(error, say('workspace.unreadable.changedFile'));
     }
   }
 
@@ -1585,25 +1682,27 @@ class Controller {
     });
   }
 
-  private async exportWorkspace(options: { documentIds: string[]; includeBoard: boolean; includeNotes: boolean }): Promise<WorkspaceExportResult | null> {
+  private async exportWorkspace(options: { documentIds: string[]; includeBoard: boolean; includeNotes: boolean }): Promise<WorkspaceExportOutcome> {
     const desktop = this.desktop;
     const key = this.state.boardKey;
-    if (!desktop || !key || !this.ws) { this.notify(text('Exporting a workspace needs the desktop app and an open board.'), 'info'); return null; }
+    if (!desktop || !key || !this.ws) { this.notify(text('Exporting a workspace needs the desktop app and an open board.'), 'info'); return 'failed'; }
     const generation = this.generation;
     try {
       const saver = this.saver;
       if (saver) {
         try { await saver.flush(); }
-        catch { this.notify(text('The workspace could not be saved first, so nothing was exported.'), 'error'); return null; }
+        catch { this.notify(text('The workspace could not be saved first, so nothing was exported.'), 'error'); return 'failed'; }
       }
-      if (generation !== this.generation) return null;
+      if (generation !== this.generation) return 'cancelled';
       const known = new Set(this.ws.documents.map(document => document.id));
       const result = await desktop.exportWorkspace({ boardKey: key, documentIds: options.documentIds.filter(id => known.has(id)), includeBoard: options.includeBoard, includeNotes: options.includeNotes });
-      if (result && generation === this.generation) this.notify(text(`Exported ${result.files} file${result.files === 1 ? '' : 's'} to ${result.path}.`), 'success');
+      // The desktop side resolves null only when the save dialog was dismissed; a failure there throws instead.
+      if (!result) return 'cancelled';
+      if (generation === this.generation) this.notify(text(`Exported ${result.files} file${result.files === 1 ? '' : 's'} to ${result.path}.`), 'success');
       return result;
     } catch (error) {
       if (generation === this.generation) this.notifyFailure(error, text('The workspace could not be exported.'));
-      return null;
+      return 'failed';
     }
   }
 
@@ -1755,8 +1854,9 @@ class Controller {
       openDropped: async files => {
         const desktop = this.desktop;
         if (!desktop) { if (files.length) await this.track(this.readBrowserFiles(files)); return; }
-        const primary = files.find(file => companionNames(file.name).length > 0) ?? files[0];
+        const primary = primaryOf(files, rendererOsFamily());
         if (!primary) return;
+        const documents = documentsOf(files, primary, rendererOsFamily());
         const token = this.beginImport();
         const path = desktop.droppedFilePath(primary);
         if (!path) {
@@ -1766,7 +1866,7 @@ class Controller {
         this.patchImport({ phase: 'reading' });
         this.setReportContext(token, importContext(primary.name, 'reading', 'read'));
         await this.track((async () => {
-          try { await this.loadPayload(await desktop.readBoard(path), token); }
+          try { await this.attachAfterBoard(documents, await this.loadPayload(await desktop.readBoard(path), token)); }
           catch (error) { if (token === this.sequence) { this.patchImport({ phase: 'idle' }); this.setReportContext(token, importContext(primary.name, 'failed', 'read', null, 'READ_FAILED')); this.notifyFailure(error, say('toast.fileUnavailable')); } }
         })());
       },
@@ -1775,7 +1875,7 @@ class Controller {
         const request = this.state.import.keyRequest;
         if (!waiting || !request) return;
         const check = validateKeyText(waiting.kind, input);
-        if ('error' in check) { this.patchImport({ keyRequest: { ...request, message: check.error } }); return; }
+        if ('error' in check) { this.patchImport({ keyRequest: { fileName: request.fileName, kind: request.kind, code: request.code, message: check.error, ...(check.message ? { reason: check.message } : {}) } }); return; }
         this.sessionOptions = { ...this.sessionOptions, ...check.options };
         const { payload } = waiting;
         void this.track(this.loadPayload(payload, this.beginImport()));
@@ -1835,8 +1935,8 @@ class Controller {
       activateProbeRegion: (documentId, regionId) => this.batch(() => this.activateProbeRegion(documentId, regionId)),
       setSchematicInstance: (documentId, instancePath) => this.batch(() => this.setSchematicInstance(documentId, instancePath)),
       clearSelection: () => this.batch(() => this.clearSelection()),
-      setAlias: (kind, from, to) => { this.batch(() => this.mutate(manifest => setAlias(manifest, kind, from, to))); },
-      removeAlias: (kind, from) => { this.batch(() => this.mutate(manifest => removeAlias(manifest, kind, from))); },
+      setAlias: (kind, from, to) => this.batch(() => this.changeAlias(kind, from, to)),
+      removeAlias: (kind, from) => this.batch(() => this.mutate(manifest => removeAlias(manifest, kind, from))),
 
       setSearchQuery: query => { this.searchText = query; this.runSearch(); },
       activateSearchRow: row => this.batch(() => this.activateSearchRow(row)),

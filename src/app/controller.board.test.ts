@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { boardIdentityKey } from '../lib/workspace';
-import { boardPayload, createHarness, dividerBoard, deferred, enc, hexKey, makeBoard, openNative, registerBoard, seedWorkspace } from './testing';
+import { boardPayload, createHarness, dividerBoard, deferred, documentPayload, enc, hexKey, makeBoard, openNative, registerBoard, seedWorkspace } from './testing';
 import type { Harness } from './testing';
 import type { KeyedNote } from '../lib/types';
 
@@ -44,6 +44,31 @@ describe('board import', () => {
     await h.controller.actions.openDropped([new File([enc('c')], 'c.cad')]);
     expect(h.state().boardKey).toBe(hexKey(2));
     expect(h.state().notices.at(-1)).toMatchObject({ kind: 'error', message: { key: 'toast.pathUnavailable' } });
+  });
+
+  it('a board dropped with a PDF opens even when the PDF comes first; the PDF is attached as a document (HUNT-WIN-20261011-03)', async () => {
+    const h = createHarness();
+    const board = registerBoard(h, 'a.cad', 1);
+    h.desktop.docs.set('/drop/service.pdf', documentPayload('/drop/service.pdf', 'pdf', 42));
+    await h.controller.actions.openDropped([
+      Object.assign(new File([enc('%PDF')], 'service.pdf'), { path: '/drop/service.pdf' }),
+      Object.assign(new File([enc('b')], 'a.cad'), { path: board.path }),
+    ]);
+    await h.controller.idle();
+    expect(h.state().boardKey).toBe(hexKey(1));
+    expect(h.state().documents.map(doc => doc.record.name)).toEqual(['service.pdf']);
+  });
+
+  it('a dropped file that cannot be attached is reported, and the board opens all the same (HUNT-WIN-20261011-03)', async () => {
+    const h = createHarness();
+    const board = registerBoard(h, 'a.cad', 1);
+    await h.controller.actions.openDropped([
+      Object.assign(new File([enc('x')], 'readme.md'), { path: '/drop/readme.md' }),
+      Object.assign(new File([enc('b')], 'a.cad'), { path: board.path }),
+    ]);
+    await h.controller.idle();
+    expect(h.state().boardKey).toBe(hexKey(1));
+    expect(h.state().notices.some(notice => notice.kind === 'error')).toBe(true);
   });
 
   it('keeps the previous board when a new import fails, and reports the failure', async () => {

@@ -9,6 +9,10 @@
   "update.openFailed": "A letöltési oldalt nem sikerült megnyitni.",
   "update.download": "Letöltés",
   "update.dismiss": "Elrejtés",
+  "update.askText": "Új TRACE-verziók keresése indításkor? Az ellenőrzés csak a GitHub kiadási oldalát éri el. A Beállításokban bármikor átállítható.",
+  "update.askYes": "Igen, indításkor",
+  "update.askNo": "Nem, maradjon kikapcsolva",
+  "update.askSkip": "Kihagyom",
 
   "network.title": "Hálózat",
   "network.intro": "A TRACE csak az itt felsorolt funkciókhoz használ internetet. Minden kérés megjelenik az alábbi tevékenységlistában, és a panelekről, jegyzetekről vagy dokumentumokról soha nem küld el semmit.",
@@ -46,5 +50,6 @@
   "network.bugReport": "Hibajelentés",
   "network.bugReportHint": "A jelentés csak akkor megy el, ha a jelentés űrlapján a Küldés gombra kattintasz.",
   "network.resultCancelled": "Megszakítva",
-  "network.resultHttpStatus": "Nem elfogadott HTTP-állapot: {status}"
+  "network.resultHttpStatus": "Nem elfogadott HTTP-állapot: {status}",
+  "network.stateOnDemand": "Csak a „Fizetés ellenőrzése” gombra"
 }

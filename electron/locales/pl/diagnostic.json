@@ -109,5 +109,7 @@
   "diagnostic.bugStageDone": "Gotowe",
   "diagnostic.bugStageUnknown": "Nieznane",
   "diagnostic.bugCleanupTiming": "Te limity zakładają normalne zaplanowane czyszczenie; awarie hostingu mogą opóźnić usunięcie.",
-  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bajtów"
+  "diagnostic.bugHashBytes": "SHA-256: {hash} · {bytes} bajtów",
+  "diagnostic.bugDescriptionCounter": "{count} / {max} znaków",
+  "diagnostic.bugDescriptionLimit": "Opis może mieć najwyżej {max} znaków. Skróć go, aby móc go sprawdzić i wysłać."
 }

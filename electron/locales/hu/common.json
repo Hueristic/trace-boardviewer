@@ -5,6 +5,7 @@
   "common.delete": "Törlés",
   "common.note": "Megjegyzés",
   "common.skip": "Kihagyás",
+  "common.cancel": "Mégse",
 
   "unit.components": "{count} alkatrész",
   "unit.pins": "{count} pin",

@@ -1,5 +1,6 @@
 import { loadSchematicDesign, SchematicError } from './index';
 import type { SchematicDesign, SchematicErrorCode, SchematicFormat } from './model';
+import type { SourcePlatform } from '../formats/source-name';
 
 /**
  * Dedicated worker for ONE schematic document (parse + connectivity). The shell posts the ORIGINAL bytes (transferred,
@@ -12,6 +13,8 @@ export interface SchematicWorkerRequest {
   data: Uint8Array;
   /** Sibling schematic/library files of the same directory, lowercase basename keys. */
   companions?: Record<string, Uint8Array>;
+  /** The OS family of the renderer that picked the file: the separators its name follows. Absent: the readers' default rule. */
+  platform?: SourcePlatform;
 }
 export interface SchematicWorkerFailure { code: SchematicErrorCode | 'UNKNOWN'; message: string; format?: SchematicFormat }
 export type SchematicWorkerResponse =
@@ -19,10 +22,10 @@ export type SchematicWorkerResponse =
   | { requestId: number; error: SchematicWorkerFailure };
 
 self.onmessage = (event: MessageEvent<SchematicWorkerRequest>) => {
-  const { requestId, name, data, companions } = event.data;
+  const { requestId, name, data, companions, platform } = event.data;
   try {
     if (typeof name !== 'string' || !(data instanceof Uint8Array)) throw new SchematicError('Invalid schematic import message.', 'INVALID_FORMAT');
-    const design = loadSchematicDesign({ name, data, companions });
+    const design = loadSchematicDesign({ name, data, companions, platform });
     (self as unknown as Worker).postMessage({ requestId, design } satisfies SchematicWorkerResponse);
   } catch (error) {
     const failure: SchematicWorkerFailure = error instanceof SchematicError

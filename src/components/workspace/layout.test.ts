@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { WorkspaceApi } from '../../app/api';
 import { DocumentList } from './DocumentList';
 import { SchematicBanners, needsBanner, schematicOverlay } from './Tabs';
+import { UiContext, type UiContextValue } from './ui-context';
+import { createFormatters, createTranslator, renderMessage } from '../../lib/i18n';
 
 // The node test environment has no layout engine: the geometry itself is proven on the source-level Electron app
 // (evidence/dev-ui). These tests pin the DOM structure and the CSS contract that the geometry depends on.
@@ -58,6 +60,8 @@ describe('board-candidate banner is an overlay (W-fin-crossprobe-01)', () => {
   const uniqueNet = { status: 'unique', total: 1, truncated: false, reasons: [], caseInsensitive: [], candidates: [{ name: 'GND', pinCount: 2, via: 'exact' }] } as unknown as WorkspaceApi['state']['probe']['boardNetMapping'];
   const missingPart = { status: 'missing', total: 0, truncated: false, reasons: [], caseInsensitive: [], candidates: [] } as unknown as WorkspaceApi['state']['probe']['boardMapping'];
   const actions = { chooseBoardNet: vi.fn(), chooseBoardTarget: vi.fn() } as unknown as WorkspaceApi['actions'];
+  // The banners take their texts from the UI context (English here).
+  const ui: UiContextValue = { t: createTranslator('en'), fmt: createFormatters('en'), language: 'en', text: message => renderMessage('en', message), copy: () => {} };
 
   it('needs a banner only for an ambiguous or missing counterpart', () => {
     expect(needsBanner(null)).toBe(false);
@@ -70,14 +74,14 @@ describe('board-candidate banner is an overlay (W-fin-crossprobe-01)', () => {
     expect(schematicOverlay(null, uniqueNet, actions, () => {})).toBeNull();
     const overlay = schematicOverlay(null, ambiguousNet, actions, () => {});
     expect(overlay).not.toBeNull();
-    const html = renderToStaticMarkup(overlay);
+    const html = renderToStaticMarkup(createElement(UiContext.Provider, { value: ui }, overlay));
     expect(html).toContain('data-testid="board-net-mapping"');
     expect(html.match(/data-testid="board-net-candidate"/g)).toHaveLength(2);
     expect(html).toContain('SIGA');
     expect(html).toContain('SIGB');
   });
   it('renders the part banner through the same overlay', () => {
-    const html = renderToStaticMarkup(createElement(SchematicBanners, { mapping: missingPart, netMapping: null, actions, onLink: () => {} }));
+    const html = renderToStaticMarkup(createElement(UiContext.Provider, { value: ui }, createElement(SchematicBanners, { mapping: missingPart, netMapping: null, actions, onLink: () => {} })));
     expect(html).toContain('data-testid="board-mapping"');
     expect(html).not.toContain('data-testid="board-net-mapping"');
   });

@@ -13,29 +13,12 @@ import { componentFiles, countMarkers, findLiterals, scanComponents, scanMarkers
 
 /**
  * Legacy English literals per component file. Each of these files keeps local English tables (`const T = {...}`) or inline
- * texts, marked `// i18n: pending`, from before the catalogs covered the Phase 1 workspace; the backlog translates them.
+ * texts, marked `// i18n: pending`, from before the catalogs covered the workspace; the backlog translates them.
  * Do not add to this list. `schematic-render.ts` has no marker: its title-block labels are drawn on the schematic canvas in English.
  */
 const LEGACY_LITERALS: Readonly<Record<string, number>> = {
-  'src/components/ImageViewer.tsx': 109,
-  'src/components/PdfViewer.tsx': 75,
-  'src/components/SchematicViewer.tsx': 30,
-  'src/components/schematic-render.ts': 11,
-  'src/components/workspace/Dialogs.tsx': 12,
-  'src/components/workspace/DocumentList.tsx': 24,
-  'src/components/workspace/DocumentViewer.tsx': 13,
-  'src/components/workspace/ExportDialog.tsx': 17,
-  'src/components/workspace/Inspector.tsx': 3,
-  'src/components/workspace/InspectorSections.tsx': 90,
-  'src/components/workspace/LinkDialog.tsx': 61,
-  'src/components/workspace/NoteDialog.tsx': 10,
-  'src/components/workspace/SearchPanel.tsx': 8,
-  'src/components/workspace/Shell.tsx': 6,
-  'src/components/workspace/SplitLayout.tsx': 5,
-  'src/components/workspace/StatusBar.tsx': 9,
-  'src/components/workspace/Tabs.tsx': 18,
-  'src/components/workspace/TopBar.tsx': 8,
-  'src/components/workspace/search-model.ts': 5,
+  'src/components/schematic-render.ts': 10,
+  'src/components/workspace/Shell.tsx': 1,
 };
 
 /**
@@ -43,34 +26,13 @@ const LEGACY_LITERALS: Readonly<Record<string, number>> = {
  * and of the format readers, and the component tables above. A comment that merely mentions the marker counts, too.
  */
 const PENDING_MARKERS: Readonly<Record<string, number>> = {
-  'electron/documents.cjs': 39,
-  'electron/formats.cjs': 1,
+  'electron/documents.cjs': 12,
   'electron/identity.cjs': 5,
-  'electron/main.cjs': 13,
   'electron/store.cjs': 14,
   'electron/workspace.cjs': 1,
   'src/app/api.ts': 1,
   'src/app/controller.ts': 1,
-  'src/app/keys.ts': 1,
-  'src/components/ImageViewer.tsx': 1,
-  'src/components/PdfViewer.tsx': 1,
-  'src/components/SchematicViewer.tsx': 1,
   'src/components/viewer-contracts.ts': 1,
-  'src/components/workspace/Dialogs.tsx': 2,
-  'src/components/workspace/DocumentList.tsx': 1,
-  'src/components/workspace/DocumentViewer.tsx': 1,
-  'src/components/workspace/ExportDialog.tsx': 1,
-  'src/components/workspace/Inspector.tsx': 1,
-  'src/components/workspace/InspectorSections.tsx': 1,
-  'src/components/workspace/LinkDialog.tsx': 1,
-  'src/components/workspace/NoteDialog.tsx': 1,
-  'src/components/workspace/SearchPanel.tsx': 1,
-  'src/components/workspace/Shell.tsx': 1,
-  'src/components/workspace/SplitLayout.tsx': 1,
-  'src/components/workspace/StatusBar.tsx': 1,
-  'src/components/workspace/Tabs.tsx': 1,
-  'src/components/workspace/TopBar.tsx': 1,
-  'src/components/workspace/search-model.ts': 1,
   'src/lib/formats/bdv.ts': 1,
   'src/lib/formats/brd.ts': 1,
   'src/lib/formats/bvr.ts': 1,
@@ -155,5 +117,20 @@ describe('the scanner', () => {
   it('counts `i18n: pending` markers, comments that mention one included', () => {
     expect(countMarkers('// i18n: pending\nconst T = {};\n/* see `// i18n: pending` */')).toBe(2);
     expect(countMarkers('const T = { a: \'b\' };')).toBe(0);
+  });
+
+  it('exempts a file-format name and a CSS selector, and nothing more of their shape', () => {
+    expect(scan('export const KIND = { png: \'PNG\', webp: \'WebP\', gcd: \'GCD\', pcbdoc: \'PcbDoc\' };', 'f.ts')).toEqual([]);
+    expect(scan('export const A = () => <span>PDF</span>;')).toEqual([]);
+    expect(scan('export const A = () => <img alt=\'WebP\' />;')).toEqual([]);
+    expect(scan('export function f(root: Element) { return root.querySelectorAll(\'.pdfv-page canvas\'); }', 'f.ts')).toEqual([]);
+    expect(scan('export function f() { return document.querySelector(\'#pdfv-root > .pdfv-page canvas\'); }', 'f.ts')).toEqual([]);
+  });
+
+  it('keeps a sentence, a bare English word and a selector followed by an English word as findings', () => {
+    expect(scan('export const L = { empty: \'No files yet\' };', 'f.ts')).toEqual(['No files yet']);
+    expect(scan('export const L = { retry: \'Retry\', near: \'WebPage\' };', 'f.ts')).toEqual(['Retry', 'WebPage']);
+    expect(scan('export const A = () => <span>PDF file</span>;')).toEqual(['PDF file']);
+    expect(scan('export function f(root: Element) { return root.querySelector(\'.pdfv-page close\'); }', 'f.ts')).toEqual(['.pdfv-page close']);
   });
 });

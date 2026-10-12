@@ -1,0 +1,2 @@
+- Readings files that another program holds open are reported as "The file is in use by another program" instead of a generic error, on import; an export onto a held file says the same.
+- When a schematic's companion file exists only online, the notice now names the affected file.

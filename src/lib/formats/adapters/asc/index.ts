@@ -19,14 +19,14 @@ export default defineBoardAdapter({
   detection: 'name',
   companions: { sets: [TRIO, ['@format.asc', 'pins.asc', 'nails.asc']] },
   sniff(input) {
-    if (!ENTRIES.includes(baseName(input.name))) return NO_MATCH;
+    if (!ENTRIES.includes(baseName(input.name, input.platform))) return NO_MATCH;
     if (!hasUtf16Mark(input.head)) {
       const nul = input.head.subarray(0, 8192).indexOf(0);
       const terminal = nul > 0 && input.size === input.head.length && (input.head[nul - 1] === 10 || input.head[nul - 1] === 13)
         && input.head.subarray(nul).every(byte => byte === 0 || byte === 9 || byte === 10 || byte === 13 || byte === 32);
       if (nul >= 0 && !terminal) return NO_MATCH;
     }
-    return sniffed(LIKELY, `${baseName(input.name)}: a member of the ASC trio by name; its first record is checked when read`);
+    return sniffed(LIKELY, `${baseName(input.name, input.platform)}: a member of the ASC trio by name; its first record is checked when read`);
   },
   structure: ascHook,
   parse: parseAsc,

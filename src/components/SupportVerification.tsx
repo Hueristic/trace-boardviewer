@@ -60,7 +60,7 @@ export default function SupportVerification({ t, onVerified }: { t: Translator; 
     if (view.busy || !view.code) return;
     setView(current => ({ ...current, busy: true, result: null }));
     try {
-      const value = await window.traceDesktop?.checkSupport?.();
+      const value = await window.traceDesktop?.checkSupport?.({ userAction: true });
       if (value?.status === 'verified') onVerified?.(value);
       else setView(current => ({ ...current, result: value?.status === 'pending' ? 'pending' : 'unavailable' }));
     } catch { setView(current => ({ ...current, result: 'unavailable' })); }

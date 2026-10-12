@@ -1,0 +1,1 @@
+- When you open a schematic, a companion file that exists only online (for example in OneDrive) is no longer downloaded in the background. TRACE says that the companion is available online only: open it, or attach it by hand.

@@ -87,3 +87,27 @@ describe('Markdown table cells', () => {
     }
   });
 });
+
+// Open-tool files (written by an open-source tool, never by the vendor's software) must name their tool and designs, and must not be listed as real-file validation.
+describe('open-tool validation wording', () => {
+  const openTool = FORMAT_CAPABILITIES.filter(c => c.status === 'open-tool-validated');
+  const lineStartingWith = (text: string, prefix: string) => text.split('\n').find(line => line.startsWith(prefix))!;
+  it('names the tool, the design count and that no vendor-written file was tested in every open-tool row', () => {
+    const text = buildSupportMarkdown();
+    expect(openTool.map(c => c.id), 'open-tool rows').toEqual(expect.arrayContaining(['ipc2581', 'ipc356']));
+    for (const c of openTool) {
+      const row = lineStartingWith(text, `| ${c.name} |`);
+      expect(row, c.name).toContain(`| open tool-written files: ${c.openTool!.tool} exports of ${c.openTool!.designs}; no vendor-written file was tested |`);
+    }
+  });
+  it('keeps open-tool rows out of the real-file sentence of the Not verified section', () => {
+    const text = buildSupportMarkdown();
+    const sentence = lineStartingWith(text, '- Real-file validation covers ');
+    const [realFilePart] = sentence.split('. ');
+    for (const c of openTool) {
+      expect(realFilePart, c.name).not.toContain(c.name);
+      expect(sentence, c.name).toContain(`${c.name} (${c.openTool!.tool} exports of ${c.openTool!.designs})`);
+    }
+    expect(sentence).toContain('no vendor-written file tested');
+  });
+});

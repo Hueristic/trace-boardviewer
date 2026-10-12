@@ -13,5 +13,10 @@
   "settings.labelsHint": "Repères qui s’adaptent au zoom",
   "settings.connections": "Guides de connexion",
   "settings.connectionsHint": "Lignes droites entre la broche sélectionnée et les pastilles de son réseau",
-  "settings.autosave": "Les paramètres sont enregistrés automatiquement."
+  "settings.autosave": "Les paramètres sont enregistrés automatiquement.",
+  "settings.noSandbox.title": "Linux : démarrage sans bac à sable",
+  "settings.noSandbox.hint": "Si vous avez choisi « Ne plus demander », TRACE ne demandera plus. Le retrait prend effet au prochain démarrage.",
+  "settings.noSandbox.saved": "Enregistré : TRACE ne demande plus",
+  "settings.noSandbox.unsaved": "Non enregistré : la question apparaît à chaque démarrage sans bac à sable",
+  "settings.noSandbox.revoke": "Redemander au prochain démarrage"
 }

@@ -9,6 +9,7 @@
  */
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { boundText } from '../bounded-text';
+import { sourceBaseName, type SourcePlatform } from '../formats/source-name';
 import {
   SCHEMATIC_LIMITS, SchematicError,
   type SchBounds, type SchBus, type SchDeclaredNet, type SchDiagnostic, type SchField, type SchGraphic, type SchJunction, type SchLabel,
@@ -344,15 +345,15 @@ export const parseEagleSch: SchematicParser = input => {
   }
   const root = obj(obj(document)?.eagle), schematic = obj(obj(root?.drawing)?.schematic);
   if (!root || !schematic) return null;
-  return build(input.name, root, schematic);
+  return build(input.name, root, schematic, input.platform);
 };
 
 interface PinRef { net: string; node: Xml; defId: string }
 interface DeclaredNet extends SchDeclaredNet { wires: NonNullable<SchDeclaredNet['wires']> }
 
-function build(fileName: string, root: Xml, schematic: Xml): Schematic {
+function build(fileName: string, root: Xml, schematic: Xml, platform?: SourcePlatform): Schematic {
   const limits = SCHEMATIC_LIMITS, diag = new Diagnostics(), budget: Budget = { sheet: 0, total: 0 };
-  const stem = fileName.replace(/^.*[\\/]/, '').replace(/\.[^.]*$/, '') || 'schematic';
+  const stem = sourceBaseName(fileName, platform).replace(/\.[^.]*$/, '') || 'schematic';
   const version = attr(root, 'version')?.trim().slice(0, 24) ?? '';
   if (!version) diag.add('warning', 'VERSION_MISSING', 'The EAGLE document has no version attribute.');
   else if (!(Number.parseInt(version, 10) >= 6)) diag.add('warning', 'VERSION_UNKNOWN', `EAGLE XML version "${version}" is older than 6.0 and was not tested; the file is read as written.`);

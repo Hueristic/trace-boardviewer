@@ -1,0 +1,1 @@
+TVW files that still cannot be opened now say why. A file is refused with a named reason when a top or bottom layer has a coordinate or size outside the supported range, or when it has no top or bottom physical layer. Nothing is guessed, and no file that opened before changes.

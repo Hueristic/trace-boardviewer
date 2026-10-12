@@ -221,6 +221,15 @@ describe('bug report session', () => {
     expect(session.getSnapshot().outcome).toBe('received');
   });
 
+  it('returns a reviewed draft to editing with its description intact (Continue editing)', async () => {
+    const { session } = harness();
+    session.setDescription('Synthetic draft kept while reviewing.');
+    await session.prepare();
+    expect(session.getSnapshot().phase).toBe('review');
+    session.back();
+    expect(session.getSnapshot()).toMatchObject({ phase: 'editing', input: { description: 'Synthetic draft kept while reviewing.' } });
+  });
+
   it('clears retry state when the user edits an attempted report so the next preview is a new report', async () => {
     const { session } = harness();
     session.setDescription('Original report.');
@@ -258,9 +267,18 @@ describe('bug report session', () => {
     const pending = session.send();
     await session.cancel();
     expect(session.getSnapshot()).toMatchObject({ busy: true, phase: 'sending' });
-    finish({ status: 'error', error: 'cancelled' });
+    finish({ status: 'cancelled', uncertain: true });
     await pending;
     expect(session.getSnapshot()).toMatchObject({ outcome: 'uncertain', attempted: true, error: 'cancelled' });
+  });
+
+  it('keeps a cancelled send that never left the machine unconfirmed too, with the same cancelled shape', async () => {
+    const { session, sendBugReport } = harness();
+    sendBugReport.mockImplementationOnce(async () => ({ status: 'cancelled' as const, uncertain: false }));
+    session.setDescription('A synthetic problem.');
+    await session.prepare();
+    await session.send();
+    expect(session.getSnapshot()).toMatchObject({ phase: 'result', outcome: 'uncertain', error: 'cancelled' });
   });
 
   it('keeps source submission unavailable until the receiver gate opens', async () => {
@@ -281,5 +299,112 @@ describe('bug report session', () => {
     expect(await session.send()).toMatchObject({ status: 'received', reportId: 'report-a' });
     expect(sendBugReport).toHaveBeenCalledWith({ prepareId: 'prepare-a' });
     expect(session.getSnapshot()).toMatchObject({ outcome: 'received', busy: false });
+  });
+
+  // Regression: after the draft was saved, Cancel with nothing changed closed through the "Leave?" question.
+  describe('close after a saved draft', () => {
+    async function closeAttempt(session: BugReportSession) {
+      const close = vi.fn();
+      const prompt = vi.fn();
+      await requestBugReportClose(session, close, prompt);
+      return { close, prompt };
+    }
+
+    it('closes at once when the saved text and privacy choice are unchanged, and the draft stays saved', async () => {
+      const { session } = harness();
+      session.setDescription('A saved synthetic problem.');
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+      session.markSaved(session.getSnapshot().input);
+      const { close, prompt } = await closeAttempt(session);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledOnce();
+      expect(session.getSnapshot().input.description).toBe('A saved synthetic problem.');
+    });
+
+    it('asks again once the text changes after the save, and closes again when the change is reverted', () => {
+      const { session } = harness();
+      session.setDescription('A saved synthetic problem.');
+      session.markSaved(session.getSnapshot().input);
+      session.setDescription('A saved synthetic problem, edited.');
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+      session.setDescription('A saved synthetic problem.');
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(false);
+    });
+
+    it('asks again when the saved privacy choice is changed, and clearing the saved text is a change too', () => {
+      const { session } = harness();
+      session.setDescription('A saved synthetic problem.');
+      session.markSaved(session.getSnapshot().input);
+      session.setDiagnostics(false);
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+      session.setDiagnostics(true);
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(false);
+      session.setDescription('');
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+    });
+
+    it('restores a plain saved draft as saved, so an untouched restored form closes without asking', async () => {
+      const { session } = harness();
+      session.restore({ description: 'Restored synthetic draft.', includeDiagnostics: false, context: null }, false);
+      const { close, prompt } = await closeAttempt(session);
+      expect(prompt).not.toHaveBeenCalled();
+      expect(close).toHaveBeenCalledOnce();
+      session.setDescription('Restored synthetic draft, changed.');
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+    });
+
+    it('keeps asking about a pending retry, which was never confirmed, even when nothing changed', () => {
+      const { session } = harness();
+      session.restore({ description: 'Pending synthetic retry.', includeDiagnostics: false, context: null }, true);
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+    });
+
+    it('asks again after the draft is discarded, because the text is no longer saved', () => {
+      const { session } = harness();
+      session.setDescription('A saved synthetic problem.');
+      session.markSaved(session.getSnapshot().input);
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(false);
+      session.markDiscarded();
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+    });
+
+    // The Escape key reaches the same decision as Cancel: the dialog's key handler calls requestClose, which calls requestBugReportClose.
+    it('Escape after an edit made following the save asks, and does not close the form', async () => {
+      const { session } = harness();
+      session.setDescription('A saved synthetic problem.');
+      session.markSaved(session.getSnapshot().input);
+      session.setDescription('A saved synthetic problem, edited after the save.');
+      const { close, prompt } = await closeAttempt(session);
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(close).not.toHaveBeenCalled();
+      expect(session.getSnapshot().input.description).toBe('A saved synthetic problem, edited after the save.');
+    });
+
+    it('an edit made while the save is still running is not lost: the saved baseline is the text at the click, so Escape asks', async () => {
+      const { session } = harness();
+      session.setDescription('Text at the moment of the save click.');
+      const clicked = session.getSnapshot().input;
+      session.setDescription('Text typed while the save was still running.');
+      session.markSaved(clicked);
+      const { close, prompt } = await closeAttempt(session);
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('Escape after an edit of a restored saved draft asks', async () => {
+      const { session } = harness();
+      session.restore({ description: 'Restored saved draft.', includeDiagnostics: true, context: null }, false);
+      session.setDescription('Restored saved draft, edited.');
+      const { close, prompt } = await closeAttempt(session);
+      expect(prompt).toHaveBeenCalledOnce();
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('a new form with text and no save still asks, and an empty new form closes at once', () => {
+      const { session } = harness();
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(false);
+      session.setDescription('Never saved synthetic text.');
+      expect(shouldPromptForBugReportClose(session.getSnapshot())).toBe(true);
+    });
   });
 });

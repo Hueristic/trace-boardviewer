@@ -37,6 +37,7 @@ export default defineBoardAdapter({
   keys?: ['fz'],                       // key kinds the reader may request
   structure?: hook,                    // optional layout hook of the diagnostic report (section 10)
   sniff(input) { ... },                // { head, name, size } -> { confidence, reason, variant?, needsKey? }
+  declineReason?(input),               // optional: after every reader declined, the precise reason (catalog issue) for the final refusal; never changes acceptance
   parse(input, context) { ... },       // Board | null, or a promise of one
 });
 ```
@@ -57,8 +58,8 @@ linear time) and side-effect free. It returns a confidence and a short English r
 | Confidence | Meaning | Built-in examples |
 | --- | --- | --- |
 | 90–100 (`CERTAIN`) | the format's own signature at its fixed place: magic number at an offset, root element, first record, mandatory header line | KiCad root 100, EAGLE root 100, XZZ magic 100, CST 100, BVR header on line 1 100, Altium ASCII 95, GenCAD `$HEADER` 90, OLE compound file under an Altium PCB name 90 |
-| 50–89 (`LIKELY`) | markers anywhere in the head, or a known file name plus matching content | Samsung markers 85, BDV markers 84, BVR header further down 83, BRDOUT 82, Landrex lines 81, decoded FZ text 70, ASC trio name 50 |
-| 1–49 (`POSSIBLE`) | the name alone, a weak recognizer, or markers that may lie beyond the 64 KiB window | Gerber 48, Mentor 45, encrypted FZ 40, gzip (ODB++) 35, OLE compound file under another name 30, EAGLE schematic 20, KiCad/EAGLE open prologue 12/11, markers beyond the window 6–9 |
+| 50–89 (`LIKELY`) | markers anywhere in the head, or a known file name plus matching content | Samsung markers 85, BDV markers 84, BVR header further down 83, BRDOUT 82, Landrex lines 81, decoded FZ text 70, ODB++ product-model names in a gzip tar 66–88, ASC trio name 50 |
+| 1–49 (`POSSIBLE`) | the name alone, a weak recognizer, or markers that may lie beyond the 64 KiB window | Gerber 48, Mentor 45, encrypted FZ 40, gzip tar whose ODB++ names may lie beyond the window 8, OLE compound file under another name 30, EAGLE schematic 20, KiCad/EAGLE open prologue 12/11, markers beyond the window 6–9 |
 | 0 | not this format: the parse is never called | |
 
 A sniff must never miss a file its parse would claim: when the deciding bytes may lie beyond the window, return a
@@ -159,7 +160,7 @@ have a pinned verdict in the same test; add yours there when your files can carr
   (`tests/fuzz`, docs/FUZZING.md), which feeds the new adapter's parse and sniff mutated and cut versions of them with no
   change to the harness.
 - Never commit a vendor, customer, leaked or downloaded board, or bytes copied out of one, and never name such a file
-  or its location. Real-file validation runs in a separate lane on lawfully obtained samples; its result enters the
+  or its location. Real-file validation runs as a separate step on lawfully obtained samples; its result enters the
   repository only as an `evidence` record (counts, measured agreement, what was not covered).
 - GPL, LGPL and AGPL readers may serve as behaviour references only; nothing is copied or transliterated.
 

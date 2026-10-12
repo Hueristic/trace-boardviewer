@@ -13,7 +13,7 @@ export type { NetworkActivityEntry, NetworkActivityReport, NetworkFeature };
 
 /** Catalog keys (electron/locales/*.json, all eight languages). */
 export const NETWORK_KEYS = {
-  title: 'network.title', intro: 'network.intro', hosts: 'network.hosts', stateOn: 'network.stateOn', stateOff: 'network.stateOff',
+  title: 'network.title', intro: 'network.intro', hosts: 'network.hosts', stateOn: 'network.stateOn', stateOff: 'network.stateOff', stateOnDemand: 'network.stateOnDemand',
   show: 'network.activityShow', hide: 'network.activityHide', activityTitle: 'network.activityTitle', activityIntro: 'network.activityIntro',
   caption: 'network.activityCaption', empty: 'network.activityEmpty', refresh: 'network.activityRefresh', clear: 'network.activityClear',
   cleared: 'network.activityCleared', dropped: 'network.activityDropped', loadFailed: 'network.activityLoadFailed',
@@ -21,9 +21,10 @@ export const NETWORK_KEYS = {
 } as const satisfies Record<string, MessageKey>;
 
 /** The features the interface has words for. A feature registered in the main process that is not listed here is still shown, by its id and without a hint. */
-export const FEATURE_TEXT: Readonly<Record<string, { name: MessageKey; hint: MessageKey }>> = {
+export const FEATURE_TEXT: Readonly<Record<string, { name: MessageKey; hint: MessageKey; onDemand?: true }>> = {
   'update-check': { name: 'network.updateCheck', hint: 'network.updateCheckHint' },
-  'support-verification': { name: 'support.verify', hint: 'support.referenceHint' },
+  // Runs only when the user presses Verify (SUP-01) and its opt-in is not stored, so the row says that instead of On or Off.
+  'support-verification': { name: 'support.verify', hint: 'support.referenceHint', onDemand: true },
   'bug-report': { name: 'network.bugReport', hint: 'network.bugReportHint' },
 };
 

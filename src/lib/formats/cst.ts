@@ -10,8 +10,8 @@
  * position. The format carries no body geometry, pad size, outline or physical pin number: components are placed by
  * their test pads (one without any is omitted with a note) and pins are numbered by file order.
  */
-import type { Board } from '../types';
-import { BoardFormatError, buildBoard, MAX_IMPORT_BYTES, note, type ParseInput, type RawPart, type RawPin } from './common';
+import type { Board, ParseIssue } from '../types';
+import { buildBoard, localizedFormatError, MAX_IMPORT_BYTES, note, type ParseInput, type RawPart, type RawPin } from './common';
 
 /** Binary fields are never BOM-sniffed (a name starting FF FE must not select UTF-16): UTF-8 when valid, else windows-1252. */
 const utf8 = new TextDecoder('utf-8', { fatal: true }), windows1252 = new TextDecoder('windows-1252');
@@ -21,33 +21,36 @@ function field(bytes: Uint8Array): string {
   return value.replace(/\0+$/, '');
 }
 
+/** A layer code as the refusals print it: 0x0a, 0x0c. */
+const hexCode = (layer: number): string => `0x${layer.toString(16).padStart(2, '0')}`;
+
 export function parseCst(input: ParseInput): Board | null {
   const { data } = input;
   const looksLikeCst = data.length >= 12 && data[6] === 4 && data[7] === 0 && String.fromCharCode(...data.subarray(8, 12)) === 'CDev';
   if (!looksLikeCst) return null;
-  const fail = (message: string): never => { throw new BoardFormatError(`CST: ${message}`, 'INVALID_FORMAT', 'CST'); };
-  if (data.length > MAX_IMPORT_BYTES) throw new BoardFormatError('CST exceeds the import limit.', 'LIMIT_EXCEEDED', 'CST');
+  const fail = (message: string, issue: ParseIssue): never => { throw localizedFormatError(`CST: ${message}`, 'INVALID_FORMAT', issue, 'CST'); };
+  if (data.length > MAX_IMPORT_BYTES) throw localizedFormatError('CST exceeds the import limit.', 'LIMIT_EXCEEDED', { key: 'parse.error.cstByteLimit' }, 'CST');
   const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
   let offset = 0;
-  const ensure = (count: number) => { if (!Number.isInteger(count) || count < 0 || offset + count > data.length) fail('truncated binary record.'); };
+  const ensure = (count: number) => { if (!Number.isInteger(count) || count < 0 || offset + count > data.length) fail('truncated binary record.', { key: 'parse.error.cstTruncated' }); };
   const skip = (count: number) => { ensure(count); offset += count; };
   const byte = () => { ensure(1); return data[offset++]; };
   const short = () => { ensure(2); const result = view.getInt16(offset, true); offset += 2; return result; };
-  const count = () => { const result = short(); if (result < 0) fail('negative record count.'); return result; };
+  const count = () => { const result = short(); if (result < 0) fail('negative record count.', { key: 'parse.error.cstNegativeCount' }); return result; };
   const text = (length: number) => { ensure(length); const value = field(data.subarray(offset, offset + length)); offset += length; return value; };
   const partCount = count(); // immutable: pin part ids are validated against this, never against the grown parts array
   skip(4);
-  if (text(count()) !== 'CDev') fail('missing CDev section.');
-  if (!partCount) fail('no component records.');
+  if (text(count()) !== 'CDev') fail('missing CDev section.', { key: 'parse.error.cstMissingCdev' });
+  if (!partCount) fail('no component records.', { key: 'parse.error.cstNoComponents' });
   const parts: RawPart[] = [], pins: RawPin[] = [];
   for (let index = 0; index < partCount; index++) {
     const ref = text(byte());
-    if (!ref) fail('empty component name.');
+    if (!ref) fail('empty component name.', { key: 'parse.error.cstEmptyName' });
     skip(4);
     const layer = byte();
-    if ([0x04, 0x08, 0x09, 0x0a].includes(layer)) throw new BoardFormatError(`CST: component layer code 0x${layer.toString(16).padStart(2, '0')} occurs in real exports but its top/bottom mapping is not validated.`, 'UNSUPPORTED_VARIANT', 'CST');
+    if ([0x04, 0x08, 0x09, 0x0a].includes(layer)) throw localizedFormatError(`CST: component layer code ${hexCode(layer)} occurs in real exports but its top/bottom mapping is not validated.`, 'UNSUPPORTED_VARIANT', { key: 'parse.error.cstUnvalidatedLayer', params: { code: hexCode(layer) } }, 'CST');
     // Only the two layer codes documented by CSTFile.cpp are known; anything else is reported, never guessed.
-    const side = layer === 0x0c ? 'top' : layer === 0x01 ? 'bottom' : fail(`unsupported component layer code 0x${layer.toString(16).padStart(2, '0')} for ${ref}.`);
+    const side = layer === 0x0c ? 'top' : layer === 0x01 ? 'bottom' : fail(`unsupported component layer code ${hexCode(layer)} for ${ref}.`, { key: 'parse.error.cstUnknownLayer', params: { code: hexCode(layer), ref } });
     parts.push({ key: String(index), ref, side });
     skip(6);
   }
@@ -59,7 +62,7 @@ export function parseCst(input: ParseInput): Board | null {
   for (let index = offset; index + 4 <= data.length; index++) {
     if (data[index] === 67 && data[index + 1] === 80 && data[index + 2] === 97 && data[index + 3] === 100) { cpad = index; break; }
   }
-  if (cpad < 8 || view.getUint16(cpad - 2, true) !== 4) fail('missing CPad section.');
+  if (cpad < 8 || view.getUint16(cpad - 2, true) !== 4) fail('missing CPad section.', { key: 'parse.error.cstMissingCpad' });
   offset = cpad - 8;
   const pinCount = count();
   skip(10);
@@ -69,8 +72,8 @@ export function parseCst(input: ParseInput): Board | null {
     const partId = short(); short(); // ICT probe number is not a physical pin number.
     const netId = short(), x = short(), y = short();
     short(); skip(4); // Shape table and trailing metadata have no known physical geometry.
-    if (netId < 0 || netId >= nets.length) fail('pin references an invalid net.');
-    if (partId >= partCount) fail(`pin ${index + 1} references component ${partId} but only ${partCount} are declared.`);
+    if (netId < 0 || netId >= nets.length) fail('pin references an invalid net.', { key: 'parse.error.cstInvalidNet' });
+    if (partId >= partCount) fail(`pin ${index + 1} references component ${partId} but only ${partCount} are declared.`, { key: 'parse.error.cstPinComponent', params: { pin: String(index + 1), component: String(partId), count: partCount } });
     if (partId < 0 && !orphan) { orphan = { key: 'orphan', ref: 'ICT', side: 'both' }; parts.push(orphan); }
     const parent = partId < 0 ? orphan! : parts[partId];
     pins.push({ part: parent.key, number: String(index + 1), net: nets[netId], side: parent.side, x, y, radius: 0 });

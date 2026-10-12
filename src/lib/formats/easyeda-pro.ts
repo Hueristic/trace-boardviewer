@@ -18,21 +18,26 @@
  *
  * Coordinates are Y-up (library footprints named for a bottom-left pin 1 have pin 1 at negative x and y and number counter-clockwise), rotations are
  * counter-clockwise (vendor conventions chapter), and one unit is one mil (see PRO_UNIT_MM). A part is placed as: pad
- * point p, on the BOTTOM layer first mirrored (x -> -x), then rotated by the part's angle and moved to its position; a pad's own angle follows (bottom:
- * 180 - angle). Top-side placement was checked against real EasyEDA Pro project backups: every pad that has a same-net track or via end lies inside the
- * pad's rotated rectangle for all but one of more than 1,000 pads (the exception is a pad whose track ends beside it). The vendor documents do not say how a
- * BOTTOM component is mirrored or whether its angle is kept or negated, and the real files available hold bottom-side free pads only, so the bottom-side
- * transform above is the usual mirror-then-rotate convention and is UNVERIFIED; every import that has a bottom-side component says so.
- * Not read: tracks, vias, copper pours, text, panels, footprint pad overrides (disclosed), the V3 log format (rejected as unsupported) and the SQLite
+ * point p: on the TOP layer it is rotated by the part's angle and moved to its position, and each pad turns with its own angle. A BOTTOM part is
+ * flipped and then turned by its angle plus 180 degrees (normalised to 0..360): mirrored in x and turned by that, which is the same as mirrored in y and
+ * turned by the angle (see turnOf in easyeda-common.ts). A bottom pad's board angle is the part angle minus the pad's own angle. Top-side
+ * placement was checked against real EasyEDA Pro project backups: every pad that has a same-net track or via end lies inside the pad's rotated rectangle
+ * for all but one of more than 1,000 pads (the exception is a pad whose track ends beside it). The vendor documents do not say how a BOTTOM component is
+ * mirrored or turned by the vendor documents. The rule above is the one real EasyEDA Pro files agree with, checked on bottom parts turned by 0, 90, 180 and
+ * 270 degrees. The first confirmed case was a part turned by 180 degrees (the EasyEDA Pro format 2.2 example): its two pads are point-symmetric about the
+ * part origin, each net's track ends sit on its own pad, and the previous placement had swapped the two pads. A bottom angle that no real file has been
+ * checked at follows the same rule.
+ * Not read: tracks, vias, copper pours, text, panels, footprint pad overrides (disclosed), V3 logs without a PCB document of components (refused by name; V3 projects are read by easyeda-pro-v3.ts) and the SQLite
  * project databases (.eprj/.elib), which are rejected with a hint to export an .epro.
  */
 import type { Board, ParseIssue, Point } from '../types';
 import { BoardFormatError, buildBoard, decodeText, stitchOutlines, type ParseInput, type RawBoard, type RawPart, type RawPin } from './common';
 import {
   EASYEDA_PRO_FORMAT, MAX_PARTS, MAX_PINS, OUTLINE_CLOSURE_MM, PRO_UNIT_MM, PointBudget, arcBySweep, boxCorners, boxIsEmpty, circlePoints, edgesOf, emptyBox, fail, grow,
-  headText, normalizeAngle, note, numeric, quantity, rotateAbout, type Box, type EasyedaKind, type EasyedaSniff,
+  headText, normalizeAngle, note, numeric, quantity, rotateAbout, turnOf, type Box, type EasyedaKind, type EasyedaSniff,
 } from './easyeda-common';
 import { isZipSignature, openZip, type ZipArchive, type ZipEntry } from './easyeda-zip';
+import { parseEasyedaProV3Container, parseEasyedaProV3Log, sniffV3LogKind } from './easyeda-pro-v3';
 
 const FORMAT = EASYEDA_PRO_FORMAT;
 const MAX_RECORDS = 3_000_000, MAX_LINE_CHARS = 16 * 1024 * 1024, MAX_POLYGON_ITEMS = 200_000, MAX_PROJECT_JSON = 16 * 1024 * 1024, MAX_FOOTPRINT_BYTES = 32 * 1024 * 1024;
@@ -40,9 +45,9 @@ const MAX_ATTRS_PER_PART = 256, MAX_ATTR_CHARS = 4096, BEZIER_STEPS = 32;
 
 /** Static facts about the reader, for the registry that lists formats (the generated capability table is built from these). */
 export const EASYEDA_PRO_INFO = {
-  id: 'easyeda-pro', name: 'EasyEDA Pro PCB', extensions: ['.epro', '.epcb', '.zip'], variants: ['project archive (.epro, or the .zip backup the client writes: project.json + PCB/ + FOOTPRINT/, line-based JSON arrays, format 1.x)', 'bare PCB document (.epcb: components only, no pads)'],
+  id: 'easyeda-pro', name: 'EasyEDA Pro PCB', extensions: ['.epro', '.epro2', '.epcb', '.zip'], variants: ['project archive (.epro, or the .zip backup the client writes: project.json + PCB/ + FOOTPRINT/, line-based JSON arrays, format 1.x)', 'bare PCB document (.epcb: components only, no pads)'],
   status: 'supported', validation: 'real-files', electrical: 'nets', geometry: 'mixed', units: 'mil (0.0254 mm); the vendor text says 0.01 inch, real files say mil',
-  sides: 'COMPONENT layer TOP/BOTTOM (bottom parts are mirrored in x, unverified); pad layer MULTI is both',
+  sides: 'COMPONENT layer TOP/BOTTOM (bottom parts are mirrored and turned by their angle plus 180: confirmed by a manufacturer flying-probe export and a CPL for 0, 90, 180 and 270 degrees; other bottom angles follow the same rule and are not checked against a real file); pad layer MULTI is both',
   notes: [
     'Validated with real files: eight open-licence EasyEDA Pro projects (twelve .zip project backups plus the same projects exported from the offline .eprj databases); top-side pad positions agree with the routed tracks of the same nets.',
     'No real bottom-side component was available and the vendor documents are silent on the bottom mirror: the mirror-then-rotate convention is unverified and every import with a bottom-side part says so.',
@@ -73,6 +78,8 @@ export function sniffEasyedaPro(data: Uint8Array, name = ''): EasyedaSniff | nul
     try { archive = openZip(data, FORMAT); } catch { return null; }
     if (!archive) return null;
     const names = archive.entries.map(entry => entry.name.toLowerCase());
+    // A V3 project: project2.json next to V3 .epru logs (read by easyeda-pro-v3.ts, which settles whether it holds a board).
+    if (names.includes('project2.json') && names.some(entry => /\.epru$/.test(entry))) return { id: 'easyeda-pro', variant: 'epro2-v3', kind: 'pcb', confidence: 0.95, reason: 'ZIP with project2.json and V3 .epru documents' };
     const project = names.includes('project.json'), pcb = names.some(entry => /^pcb\/[^/]+$/.test(entry)), other = names.some(entry => /^(?:sheet|footprint|symbol)\//.test(entry));
     if (project && (pcb || other)) return { id: 'easyeda-pro', variant: 'epro-zip', kind: pcb ? 'pcb' : 'project', confidence: 0.95, reason: `ZIP with project.json${pcb ? ' and a PCB/ entry' : ' and schematic or library entries but no PCB/ entry'}` };
     if (pcb && names.some(entry => /^pcb\/[^/]+\.epcb$/.test(entry))) return { id: 'easyeda-pro', variant: 'epro-zip', kind: 'pcb', confidence: 0.8, reason: 'ZIP with a PCB/*.epcb entry and no project.json' };
@@ -88,8 +95,12 @@ export function sniffEasyedaPro(data: Uint8Array, name = ''): EasyedaSniff | nul
     const kind = DOC_KINDS[header.type];
     return kind ? { id: 'easyeda-pro', variant: 'epcb', kind, confidence: 0.99, reason: `["DOCTYPE","${header.type}"${header.version ? `,"${header.version}"` : ''}] header${/\.epcb$/i.test(name) ? ', .epcb name' : ''}` } : null;
   }
-  const first = /^\s*\{\s*"type"\s*:\s*"DOCHEAD"\s*\}\s*\|\|/.exec(text);
-  if (first) return { id: 'easyeda-pro', variant: 'log-v3', kind: 'unsupported', confidence: 0.9, reason: 'DOCHEAD||{...} log header (EasyEDA Pro V3 project log)' };
+  // Real V3 logs carry more fields in the DOCHEAD object (for example "ticket"), so only the object's end is required, not its end after the type.
+  const first = /^\s*\{\s*"type"\s*:\s*"DOCHEAD"[^{}]*\}\s*\|\|/.exec(text);
+  if (first) {
+    const kind = sniffV3LogKind(decodeText(data));
+    return { id: 'easyeda-pro', variant: 'log-v3', kind, confidence: 0.9, reason: kind === 'pcb' ? 'DOCHEAD||{...} log header with a PCB document that has components (EasyEDA Pro V3 project log)' : 'DOCHEAD||{...} log header without a PCB document that has components (EasyEDA Pro V3 project log)' };
+  }
   return null;
 }
 const asciiHead = (data: Uint8Array, length: number): string => {
@@ -376,14 +387,16 @@ function boardOf(doc: PcbDocument, project: Project | undefined, footprintText: 
     const circular = pad.kind === 'ELLIPSE' || pad.kind === 'ROUND' || pad.kind === 'OVAL' || pad.kind === 'NGON';
     const round = circular && Math.abs(pad.width - pad.height) < 1e-9 * Math.max(pad.width, pad.height, 1);
     const approx = pad.kind === 'NGON' || pad.kind === 'POLY' || circular && !round;
-    // A polygon is stored in footprint coordinates already, so only the part's turn applies to it; other pads also carry their own angle.
-    const rotation = pad.spreadsPolygon ? theta : bottom ? theta + 180 - pad.angle : theta + pad.angle;
+    // A polygon is stored in footprint coordinates already, so only the part's turn applies to it; other pads also carry their own angle, which a
+    // bottom pad takes 180 minus its own angle after the mirror in x; the turn already carries the extra half turn (see the header).
+    const turn = turnOf(theta, bottom);
+    const rotation = pad.spreadsPolygon ? turn : bottom ? 180 - pad.angle + turn : turn + pad.angle;
     return { shape: round ? 'round' : pad.width === pad.height ? 'square' : 'rect', width: pad.width, height: pad.height, radius: Math.min(pad.width, pad.height) / 2, rotation: normalizeAngle(rotation), approx };
   };
   doc.components.forEach((component, index) => {
     const attrs = doc.attrs.get(component.id), { footprint, title } = resolved[index], key = component.id;
-    const bottom = doc.layers.typeOf(component.layer) === 'BOTTOM', theta = component.angle, origin = { x: component.x, y: component.y };
-    const place = (p: Point): Point => { const turned = rotateAbout({ x: bottom ? -p.x : p.x, y: p.y }, { x: 0, y: 0 }, theta); return { x: origin.x + turned.x, y: origin.y + turned.y }; };
+    const bottom = doc.layers.typeOf(component.layer) === 'BOTTOM', theta = component.angle, origin = { x: component.x, y: component.y }, turn = turnOf(theta, bottom);
+    const place = (p: Point): Point => { const turned = rotateAbout({ x: bottom ? -p.x : p.x, y: p.y }, { x: 0, y: 0 }, turn); return { x: origin.x + turned.x, y: origin.y + turned.y }; };
     const reference = attribute(attrs, 'Designator'), value = attribute(attrs, 'Value') || attribute(attrs, 'Name');
     let outline: Point[] | undefined;
     if (footprint) {
@@ -442,7 +455,7 @@ function boardOf(doc: PcbDocument, project: Project | undefined, footprintText: 
   if (arcs && loops.length) warnings.push(note(`${arcs} EasyEDA outline arcs/curves/circles were approximated by straight segments.`));
   if (cutouts) warnings.push({ key: 'parse.warning.boardCutouts' });
   if (approximated) warnings.push({ key: 'parse.warning.approximatedPads', params: { count: approximated } });
-  if (mirrored) warnings.push(note(`${quantity(mirrored, 'bottom-side component')} ${mirrored === 1 ? 'is' : 'are'} placed mirrored and rotated by the usual convention, which the EasyEDA Pro documents do not state and no real file has confirmed; check the pad positions of ${mirrored === 1 ? 'that part' : 'those parts'} before probing.`));
+  if (mirrored) warnings.push(note(`${quantity(mirrored, 'bottom-side component')} ${mirrored === 1 ? 'is' : 'are'} placed mirrored; real EasyEDA Pro files confirm this placement for bottom parts turned by 0, 90, 180 or 270 degrees, and no real file has been checked for other angles, so check the pad positions before probing.`));
   if (unresolved) warnings.push(note(`${quantity(unresolved, 'component')} ${unresolved === 1 ? 'has' : 'have'} no footprint in the file, so ${unresolved === 1 ? 'it has' : 'they have'} no pads${orphanNets ? ` (${quantity(orphanNets, 'pad-net assignment')} could not be placed)` : ''}.`));
   if (unnetted) warnings.push(note(`${quantity(unnetted, 'free pad')} without a net (mounting pads and the like) ${unnetted === 1 ? 'was' : 'were'} not imported.`));
   if (doc.overrides) warnings.push(note(`${quantity(doc.overrides, 'footprint pad override')} ${doc.overrides === 1 ? 'was' : 'were'} ignored.`));
@@ -496,10 +509,16 @@ export function parseEasyedaPro(input: ParseInput): Board | null {
     const archive = openZip(input.data, FORMAT);
     throw new BoardFormatError(archive ? `${FORMAT}: the archive holds no EasyEDA Pro project (no project.json next to PCB/ or FOOTPRINT/ entries).` : `${FORMAT}: the file is not a readable ZIP archive.`, 'INVALID_FORMAT', FORMAT);
   }
+  // A .epro2 archive that is not a readable V3 project is refused by name (easyeda-pro-v3.ts) instead of being reported as unrecognized.
+  if ((!sniff || sniff.confidence < 0.5) && /\.epro2$/i.test(input.name) && isZipSignature(input.data)) return parseEasyedaProV3Container(input);
   if (!sniff || sniff.confidence < 0.5) return null;
   if (sniff.kind === 'schematic') return null;
   if (sniff.variant === 'eprj-sqlite') throw new BoardFormatError('This is an EasyEDA Pro offline project database (SQLite, .eprj/.elib). Open the project in EasyEDA Pro and export it as an .epro project file, which TRACE can read.', 'UNSUPPORTED_VARIANT', FORMAT);
-  if (sniff.variant === 'log-v3') throw new BoardFormatError('This is an EasyEDA Pro V3 project log (DOCHEAD records); the V3 format is not supported yet. Export a V2 .epro from EasyEDA Pro if the editor offers it.', 'UNSUPPORTED_VARIANT', FORMAT);
+  if (sniff.variant === 'epro2-v3') return parseEasyedaProV3Container(input);
+  if (sniff.variant === 'log-v3') {
+    if (sniff.kind === 'pcb') return parseEasyedaProV3Log(input);
+    throw new BoardFormatError('This is an EasyEDA Pro V3 project log (DOCHEAD records) without a PCB document that has components, so there is no board to read.', 'UNSUPPORTED_VARIANT', FORMAT);
+  }
   if (sniff.kind === 'footprint') throw new BoardFormatError('This is an EasyEDA Pro footprint document; it contains pads but no board placement.', 'WRONG_KIND', 'EasyEDA Pro footprint');
   if (sniff.kind === 'unsupported') throw new BoardFormatError('This EasyEDA Pro document is a panel or copper-pour result, not a board.', 'WRONG_KIND', FORMAT);
   if (sniff.variant === 'epro-zip') return fromArchive(input.data, input);

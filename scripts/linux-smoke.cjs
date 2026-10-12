@@ -51,13 +51,15 @@ const COMMANDS = Object.freeze(['static', 'run', 'summary']);
 const TARGETS = Object.freeze(['installed', 'appimage', 'unpacked']);
 const TARGET_LABELS = Object.freeze({ installed: 'installed .deb', appimage: 'AppImage', unpacked: 'unpacked app' });
 
-// Names fixed by config/electron-builder.linux.yml (tests/linux-workflow-checks.cjs compares them with the config).
-const PRODUCT_NAME = 'TRACE Boardviewer';
-const EXECUTABLE_NAME = 'trace-boardviewer';
+// Names fixed by config/electron-builder.linux.yml (tests/linux-workflow-checks.cjs compares them with the config). The QA flavour
+// (TRACE_FLAVOUR=qa, config/electron-builder.qa.linux.yml) has its own product and executable names; see scripts/qa-flavour.cjs.
+const FLAVOUR = require('./qa-flavour.cjs').flavourFromEnvironment();
+const PRODUCT_NAME = FLAVOUR.productName;
+const EXECUTABLE_NAME = FLAVOUR.executableName;
 const DESKTOP_FILE = `${EXECUTABLE_NAME}.desktop`;
 const INSTALL_DIR = `/opt/${PRODUCT_NAME}`;
 const INSTALLED_EXECUTABLE = `${INSTALL_DIR}/${EXECUTABLE_NAME}`;
-const DEB_PACKAGE = 'trace-boardviewer';
+const DEB_PACKAGE = EXECUTABLE_NAME;
 const MAINTAINER = 'TRACE Boardviewer <noreply@trace-boardviewer.invalid>';
 const MAINTAINER_ADDRESS = 'noreply@trace-boardviewer.invalid';
 const CATEGORIES = 'Development;Electronics;';
@@ -222,7 +224,7 @@ function executableFor({ target, appimage, unpacked, executable }) {
 function artifactFileName(version, arch, ext) {
   const tokens = ARCHES[arch];
   if (!tokens) throw new Error(`unknown architecture ${arch}`);
-  return `TRACE-Boardviewer-${version}-linux-${ext === 'AppImage' ? tokens.appimage : tokens.deb}.${ext}`;
+  return `${FLAVOUR.artifactPrefix}-${version}-linux-${ext === 'AppImage' ? tokens.appimage : tokens.deb}.${ext}`;
 }
 
 const DEFAULT_OUT = Object.freeze({ static: 'test-results/linux/linux-static.json' });
@@ -374,7 +376,7 @@ function classifySandbox({ browser, renderers, noSandboxSwitch }) {
 function decideSandbox({ expectSandbox, classification, target, browserLabel }) {
   const problems = [];
   if (classification !== expectSandbox) problems.push(`sandbox is ${classification}, expected ${expectSandbox}`);
-  if (target === 'installed' && !/^trace-boardviewer\b/.test(String(browserLabel ?? ''))) problems.push(`the app runs under the AppArmor label "${browserLabel}", not the trace-boardviewer profile of the .deb`);
+  if (target === 'installed' && !new RegExp(`^${EXECUTABLE_NAME}\\b`).test(String(browserLabel ?? ''))) problems.push(`the app runs under the AppArmor label "${browserLabel}", not the ${EXECUTABLE_NAME} profile of the .deb`);
   return problems;
 }
 
@@ -474,6 +476,20 @@ function parseDebFields(text) {
   return fields;
 }
 
+// The installed-state problems of the .deb (TB-084). dpkg must report this package as installed, and the installed version must be the
+// exact Version of the .deb the run was given: a status prefix ("install ok installed") or a longer version that starts with the same
+// text is not a match. `status` is the dpkg-query line, `debVersion` the Version field of `dpkg-deb -f`.
+function installedProblems({ status, debVersion, apparmorProfileFile }) {
+  const problems = [];
+  const line = String(status ?? '').trim();
+  const installed = /^install ok installed (\S+)$/.exec(line);
+  if (installed === null) problems.push(`dpkg reports "${line}"`);
+  if (typeof debVersion !== 'string' || debVersion.length === 0) problems.push('the .deb has no readable Version field');
+  else if (installed !== null && installed[1] !== debVersion) problems.push(`installed version ${installed[1]} is not the version of the .deb (${debVersion})`);
+  if (!apparmorProfileFile) problems.push(`/etc/apparmor.d/${EXECUTABLE_NAME} is missing`);
+  return problems;
+}
+
 const addressesIn = (text) => [...String(text ?? '').matchAll(/[^\s<>()"',;]+@[^\s<>()"',;]+/g)].map((match) => match[0]);
 
 /** Problems of the .deb control fields. */
@@ -528,7 +544,7 @@ function checkAppArmorProfile(text) {
   if (!/^\s*userns,\s*$/m.test(body)) problems.push('no "userns," rule');
   if (!body.includes('flags=(unconfined)')) problems.push('not flags=(unconfined)');
   if (!body.includes(`"${INSTALLED_EXECUTABLE}"`)) problems.push(`does not attach to "${INSTALLED_EXECUTABLE}"`);
-  if (!/profile\s+"?trace-boardviewer"?\s/.test(body)) problems.push('the profile is not named trace-boardviewer');
+  if (!new RegExp(`profile\\s+"?${EXECUTABLE_NAME}"?\\s`).test(body)) problems.push(`the profile is not named ${EXECUTABLE_NAME}`);
   return problems;
 }
 
@@ -693,6 +709,7 @@ function buildEvidence(input) {
     scenario: input.scenario ?? (input.kind === 'static' ? 'S0' : null),
     target: input.target ?? null,
     executable: input.executable ?? null,
+    executableSha256: input.executableSha256 ?? null,
     userns: input.userns ?? null,
     expectSandbox: input.expectSandbox ?? null,
     expectGate: input.expectGate ?? null,
@@ -898,12 +915,12 @@ function builderLibDirectory() {
 
 function readJson(file) { return JSON.parse(fsSync.readFileSync(file, 'utf8')); }
 
-/** The electronFuses the Linux build was configured with (the Linux config; the Windows build block as a fallback). */
+/** The electronFuses the Linux build was configured with (the Linux config of the flavour; the Windows build block as a fallback). */
 function configuredFuses() {
-  const configFile = path.join(ROOT, 'config', 'electron-builder.linux.yml');
+  const configFile = path.join(ROOT, FLAVOUR.configs.linux);
   if (exists(configFile)) {
     const yaml = require(require.resolve('js-yaml', { paths: [builderLibDirectory()] }));
-    return { source: 'config/electron-builder.linux.yml', fuses: yaml.load(fsSync.readFileSync(configFile, 'utf8')).electronFuses };
+    return { source: FLAVOUR.configs.linux, fuses: yaml.load(fsSync.readFileSync(configFile, 'utf8')).electronFuses };
   }
   return { source: 'package.json build', fuses: readJson(path.join(ROOT, 'package.json')).build.electronFuses };
 }
@@ -973,7 +990,7 @@ async function staticChecks(parsed, { log }) {
     for (const [key, file] of [['appimage', appimage], ['deb', deb]]) {
       facts.packages[key] = exists(file) ? { name: path.basename(file), bytes: fsSync.statSync(file).size, sha256: await sha256File(file) } : { name: path.basename(file), missing: true };
     }
-    add('package file names follow TRACE-Boardviewer-<version>-linux-<arch>.<ext>', [
+    add(`package file names follow ${FLAVOUR.artifactPrefix}-<version>-linux-<arch>.<ext>`, [
       ...(path.basename(appimage) === artifactFileName(version, parsed.arch, 'AppImage') ? [] : [`AppImage is ${path.basename(appimage)}, expected ${artifactFileName(version, parsed.arch, 'AppImage')}`]),
       ...(path.basename(deb) === artifactFileName(version, parsed.arch, 'deb') ? [] : [`.deb is ${path.basename(deb)}, expected ${artifactFileName(version, parsed.arch, 'deb')}`]),
       ...(exists(appimage) ? [] : ['the AppImage is missing']), ...(exists(deb) ? [] : ['the .deb is missing']),
@@ -1052,7 +1069,7 @@ async function staticChecks(parsed, { log }) {
     const control = exists(deb) ? tool('dpkg-deb', ['-e', deb, path.join(work, 'deb-control')]) : { status: null };
     const profileText = readText(path.join(debDir, INSTALL_DIR.slice(1), 'resources', 'apparmor-profile'));
     facts.deb.apparmorProfile = profileText.split('\n').filter((line) => line.trim() && !line.trim().startsWith('#'));
-    add('deb AppArmor profile: trace-boardviewer, flags=(unconfined) with userns for the installed executable', extracted.status === 0 ? checkAppArmorProfile(profileText) : ['dpkg-deb -x failed']);
+    add(`deb AppArmor profile: ${EXECUTABLE_NAME}, flags=(unconfined) with userns for the installed executable`, extracted.status === 0 ? checkAppArmorProfile(profileText) : ['dpkg-deb -x failed']);
     const debDesktopFile = path.join(debDir, 'usr', 'share', 'applications', DESKTOP_FILE);
     const debEntry = parseDesktopEntry(readText(debDesktopFile));
     facts.deb.desktopEntry = debEntry.entry;
@@ -1636,6 +1653,8 @@ async function runScenario(parsed, { env = process.env, log = console.log } = {}
   if (!gate.allowed) throw new Error(gate.message);
   const startedAt = new Date().toISOString();
   const executable = path.resolve(executableFor(parsed));
+  // The digest of the very file that ran is part of the evidence (TB-084): a run is tied to a build, not only to a commit and a name.
+  const executableSha256 = exists(executable) ? await sha256File(executable) : null;
   const observations = [];
   let checks = [];
   let flow = { runtime: null, launches: null, gate: null, sandbox: null, defaultProfile: null, appimage: null };
@@ -1649,11 +1668,12 @@ async function runScenario(parsed, { env = process.env, log = console.log } = {}
     if (parsed.target === 'installed') {
       const status = tool('dpkg-query', ['-W', '-f=${Status} ${Version}', DEB_PACKAGE]);
       const sandboxMode = (() => { try { return (fsSync.statSync(`${INSTALL_DIR}/chrome-sandbox`).mode & 0o7777).toString(8); } catch { return null; } })();
-      facts.installed = { dpkg: status.stdout.trim(), apparmorProfileFile: exists(`/etc/apparmor.d/${EXECUTABLE_NAME}`), chromeSandboxMode: sandboxMode };
-      const problems = [];
-      if (!/^install ok installed /.test(facts.installed.dpkg)) problems.push(`dpkg reports "${facts.installed.dpkg}"`);
-      if (!facts.installed.apparmorProfileFile) problems.push(`/etc/apparmor.d/${EXECUTABLE_NAME} is missing`);
-      checks.push({ name: 'the .deb is installed and its AppArmor profile file is in place', status: problems.length ? 'fail' : 'pass', ...(problems.length ? { detail: problems.join('; ') } : { detail: facts.installed }) });
+      // The Version of the .deb this run was given: the installed version must be exactly this one (TB-084).
+      const debFile = parsed.deb ? path.resolve(parsed.deb) : null;
+      const debVersion = debFile !== null && exists(debFile) ? (parseDebFields(tool('dpkg-deb', ['-f', debFile]).stdout).Version ?? null) : null;
+      facts.installed = { dpkg: status.stdout.trim(), debVersion, apparmorProfileFile: exists(`/etc/apparmor.d/${EXECUTABLE_NAME}`), chromeSandboxMode: sandboxMode };
+      const problems = installedProblems({ status: facts.installed.dpkg, debVersion, apparmorProfileFile: facts.installed.apparmorProfileFile });
+      checks.push({ name: 'the .deb is installed at its exact version and its AppArmor profile file is in place', status: problems.length ? 'fail' : 'pass', ...(problems.length ? { detail: problems.join('; ') } : { detail: facts.installed }) });
     }
     if (usernsProblems.length) {
       checks.push({ name: 'packaged-app flow', status: 'skipped', detail: 'the host is not in the user-namespace state of this scenario' });
@@ -1667,7 +1687,7 @@ async function runScenario(parsed, { env = process.env, log = console.log } = {}
     checks.push({ name: 'the run completed', status: 'fail', detail: String(caught && caught.message ? caught.message : caught).slice(0, 500) });
   }
   const evidence = buildEvidence({
-    kind: 'run', commit: parsed.commit, arch: parsed.arch, scenario: parsed.scenario, target: parsed.target, executable, userns, expectSandbox: parsed.expectSandbox,
+    kind: 'run', commit: parsed.commit, arch: parsed.arch, scenario: parsed.scenario, target: parsed.target, executable, executableSha256, userns, expectSandbox: parsed.expectSandbox,
     expectGate: parsed.expectGate, sandbox: flow.sandbox, gate: flow.gate, defaultProfile: flow.defaultProfile, appimage: flow.appimage, runtime: flow.runtime,
     launches: flow.launches, host: { ...facts.host, ...(facts.installed ? { installed: facts.installed } : {}) }, run: facts.run, checks, observations, startedAt,
     finishedAt: new Date().toISOString(), error,
@@ -1750,7 +1770,7 @@ module.exports = Object.freeze({
   FUSE_INDEX, FUSE_NAMES, NOT_COVERED, USAGE, XDG_OPEN_STUB,
   platformGate, parseArgs, executableFor, artifactFileName, defaultOut, shQuote, wrapperScript, assertSandboxKept, fileUri, launchArgs, launchEnvironment, resolveSpec,
   environmentChanges, launchSpecs, runDirectories, parseProcStatus, classifySandbox, decideSandbox, decideUserns, decideGate, parseDesktopEntry,
-  checkDesktopEntry, parseDebFields, checkDebFields, parseDebListing, checkDebListing, checkAppArmorProfile, checkPostinst, checkAppRun, elfMachine,
+  checkDesktopEntry, parseDebFields, checkDebFields, installedProblems, parseDebListing, checkDebListing, checkAppArmorProfile, checkPostinst, checkAppRun, elfMachine,
   pngSize, parseXpropWmClass, parseXpropAtom, parseXpropString, parseNetWmIconSize, parseXwininfo, parseXwininfoTree, parseXdotoolIds,
   parseKeyValueLines, expectedFuseWire, describeFuseWire, compareFuseWire, decideDefaultProfile, buildEvidence, formatSummary, planRun, planStatic,
   runScenario, runStatic, main,

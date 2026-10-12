@@ -1,0 +1,1 @@
+In the bug report form, removing detected details keeps the rest of your sentence, home-relative and drive-less file paths are detected too, and the description shows a 2,000-character limit with a counter.

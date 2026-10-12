@@ -13,16 +13,31 @@
   "help.footer": "Mausrad: am Cursor zoomen. Ziehen: Platine verschieben. Klicken: Bauteil oder Pin auswählen.",
   "help.diagnosticReport": "Formatdiagnose-Bericht …",
   "help.diagnosticHint": "Beschreibt eine Datei, die sich nicht öffnen lässt, ohne ihren Inhalt.",
-
+  "help.settings": "Einstellungen öffnen",
   "recents.title": "Zuletzt geöffnet",
   "recents.empty": "Es wurde noch keine Datei geöffnet.",
   "recents.openOther": "Andere Datei öffnen",
-
   "info.title": "Platineninformationen",
   "info.format": "Format",
   "info.size": "Platinengröße",
   "info.counts": "Bauteile / Pins / Netze",
   "info.footer": "Hilfslinien zeigen die Netzverbindungen an. Sie ersetzen nicht die Geometrie der Leiterbahnen in der Datei.",
+  "key.skipHelp": "Sie können diesen Schritt überspringen und die App weiter verwenden. Diese verschlüsselte Datei bleibt geschlossen, bis ein passender Schlüssel angegeben wird.",
+  "help.shortcutTabs": "Board / Schaltplan / Dokumente (Reiter)",
+  "help.shortcutSplit": "Geteilte Ansicht ein / aus",
+  "help.shortcutResize": "Geteilte Bereiche vergrößern/verkleinern (Trenner fokussiert)",
+  "help.shortcutResults": "Suchergebnisse: verschieben / öffnen",
+  "help.shortcutClearSearch": "Suchfeld leeren (zweiter Druck verlässt es)",
 
-  "key.skipHelp": "Du kannst diesen Schritt überspringen und die App weiter verwenden. Diese verschlüsselte Datei bleibt geschlossen, bis ein passender Schlüssel angegeben wird."
+  "dialogs.keyTitleFz": "FZ-/CAE-Verschlüsselungsschlüssel",
+  "dialogs.keyTitleXzz": "XZZ-Verschlüsselungsschlüssel",
+  "dialogs.keyLabelFz": "Fügen Sie die 44 hexadezimalen 32-Bit-Wörter des Herstellerschlüssels ein (0x optional; Leerzeichen, Kommas oder Zeilenumbrüche zwischen ihnen).",
+  "dialogs.keyLabelXzz": "Geben Sie die 16 hexadezimalen Ziffern des Schlüssels ein.",
+  "dialogs.keyValid": "Das Schlüsselformat ist gültig. Er bleibt nur für diese Sitzung erhalten und wird nie gespeichert.",
+  "dialogs.keyUse": "Schlüssel verwenden",
+  "dialogs.shortcutResizeKeys": "← →  ·  Shift = große Schritte  ·  Enter = zurücksetzen",
+  "dialogs.keyXzzHexOnly": "Nur hexadezimale Ziffern (0-9, a-f) sind erlaubt.",
+  "dialogs.keyXzzCount": "Geben Sie genau 16 hexadezimale Ziffern ein (bisher: {count}).",
+  "dialogs.keyFzWordInvalid": "\"{word}\" ist kein hexadezimales 32-Bit-Wort.",
+  "dialogs.keyFzWordCount": "Geben Sie 44 hexadezimale 32-Bit-Wörter ein (bisher: {count})."
 }

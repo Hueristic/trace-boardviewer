@@ -8,14 +8,19 @@
   "header.settings": "Settings",
   "layout.workshop": "Workshop",
   "layout.focus": "Focus",
-
   "window.minimize": "Minimize window",
   "window.restore": "Restore window",
   "window.maximize": "Maximize window",
   "window.close": "Close application",
-
   "status.fileInfo": "File information",
   "status.shortcuts": "Keyboard shortcuts",
+  "status.saved": "Saved",
+  "status.saving": "Saving…",
+  "status.unsaved": "Unsaved changes",
+  "status.failed": "Save failed: {message}",
+  "status.notSaved": "Not saved (browser mode)",
+  "status.region": "Status",
+  "status.zoom": "Zoom",
 
   "welcome.eyebrow": "THE CONNECTIONS BEHIND THE BOARD",
   "welcome.title1": "See through it.",
@@ -31,7 +36,6 @@
   "welcome.recentEmpty": "Boards you open will appear here.",
   "welcome.footerLocal": "Local workspace · works offline",
   "welcome.shortcuts": "Keyboard shortcuts",
-
   "toast.close": "Dismiss notification",
   "toast.settingsSaveFailed": "The settings could not be saved.",
   "toast.settingsReadFailed": "The settings could not be read.",
@@ -60,7 +64,9 @@
   "toast.startupFailed": "The application could not start.",
   "toast.importCancelled": "Opening the file was cancelled.",
   "toast.importStopped": "Opening the file was stopped after {seconds} seconds without progress. The file may be damaged or unusually complex.",
-
+  "toast.companionOnlineOnly": "The companion file is available online only. Open it, or attach it by hand.",
+  "toast.companionOnlineOnlyNames": "Affected companion files: {names}.",
+  "toast.noSandboxRevokeFailed": "The setting could not be changed.",
   "loading.processing": "Processing the board…",
   "loading.reading": "Reading the file…",
   "loading.hint": "Just a moment and the picture comes together.",
@@ -68,5 +74,13 @@
   "loading.stalled": "This file is taking unusually long. You can keep waiting or cancel.",
   "loading.cancel": "Cancel",
   "drop.title": "Drop the board",
-  "fileInput.aria": "Boardview file"
+  "fileInput.aria": "Boardview file",
+  "toast.componentMissing": "The component is not on this board.",
+  "toast.documentsAfterBoard": "Documents dropped with the board are attached once it is open. Drop them again then.",
+  "toast.attachedOne": "Attached \"{name}\".",
+  "toast.attachedMany": "Attached {count} documents.",
+
+  "config.locked": "The settings cannot be read because another program locks the file; they will not be overwritten.",
+  "config.readOnly": "The settings file is read-only: changes apply to this session only, and the file is not replaced.",
+  "config.unreadable": "The settings file is damaged or was written by another version: the program started with the defaults, and the old file is kept aside before the first save."
 }

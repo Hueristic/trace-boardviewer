@@ -11,6 +11,9 @@ export function sniffReader(input: SniffInput) {
    if (length && length <= 512 && at+30+length <= input.head.length) names.push(new TextDecoder().decode(input.head.subarray(at+30,at+30+length)).toLowerCase());
   }
   const pcb = names.some(name => /^pcb\/[^/]+\.epcb$/.test(name));
+  // A V3 project: project2.json next to V3 .epru logs when the head reaches their local headers; otherwise the .epro2 name decides (the full sniff in parse checks it).
+  if (names.includes('project2.json') && names.some(name => /\.epru$/.test(name))) return sniffed(95, 'ZIP local headers for project2.json and a V3 .epru document', { variant: 'epro2-v3' });
+  if (/\.epro2$/i.test(input.name)) return sniffed(65, 'ZIP project named .epro2; V3 members are checked during parse');
   if (names.includes('project.json') && pcb) return sniffed(95, 'ZIP local headers for project.json and PCB/*.epcb', { variant: 'epro-zip' });
   if (pcb) return sniffed(80, 'ZIP local header for PCB/*.epcb', { variant: 'epro-zip' });
   if (/\.epro$/i.test(input.name)) return sniffed(65, 'ZIP project named .epro; directory checked during parse');

@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const path = require('node:path');
 const { isDeepStrictEqual } = require('node:util');
+const { feedReleaseVersion } = require('./update-version.cjs');
 
 const OBSERVER_SCHEMA = 'trace-packaged-bug-report-observer/2';
 const REPORT_ID = 'bug-report-receiver';
@@ -76,8 +77,20 @@ function isExpectedSupportDenial(attempt) {
     const url = new URL(attempt.url);
     return url.protocol === 'https:' && url.hostname === SUPPORT_HOST && url.port === ''
       && url.username === '' && url.password === '' && url.pathname === '/receipt'
-      && url.search === '?claim=synthetic' && url.hash === '';
+      && /^\?claim=[a-f0-9]{32}$/.test(url.search) && url.hash === '';
   } catch { return false; }
+}
+
+// The updater's one fixed GET (electron/updates.cjs RELEASES_API), blocked before network by the pre-main observer. One update check runs in full scope (see expectedUpdateChecks).
+const UPDATE_CHECK_URL = 'https://api.github.com/repos/trace-boardviewer/trace-boardviewer/releases/latest';
+// The local fixture's stable tag (update-version.cjs: the next patch of package.json) opens only its fixed release page; the shell handoff is intercepted in support-updates.cjs.
+const RELEASE_PAGE_INTENT = `https://github.com/trace-boardviewer/trace-boardviewer/releases/tag/v${feedReleaseVersion()}`;
+
+function isExpectedUpdateDenial(attempt) {
+  if (!attempt || typeof attempt !== 'object' || Array.isArray(attempt)) return false;
+  if (!hasExactKeys(attempt, ['session', 'url', 'method', 'cancelledBeforeNetwork', 'source'])) return false;
+  return attempt.session === 'trace-egress' && attempt.method === 'GET' && attempt.cancelledBeforeNetwork === true
+    && attempt.source === SUPPORT_SOURCE && attempt.url === UPDATE_CHECK_URL;
 }
 
 function reconcileBugReportNetworkEvidence(report, options = { scope: 'full-functional' }) {
@@ -185,8 +198,13 @@ function reconcileBugReportNetworkEvidence(report, options = { scope: 'full-func
     problems.push('global report records are missing, unknown, denied, or mismatched');
   }
   const supportDenials = globalNetwork.filter((entry) => entry?.targetID !== REPORT_ID);
-  if (supportDenials.length !== 1 || supportDenials.some((entry) => !isExpectedSupportDenial(entry))) {
-    problems.push('external request evidence contains traffic beyond the one blocked support verification request and expected reports');
+  const receiptDenials = supportDenials.filter((entry) => isExpectedSupportDenial(entry));
+  const updateDenials = supportDenials.filter((entry) => isExpectedUpdateDenial(entry));
+  // One update check in full scope: the explicit Check now action. Startup checks run only after an opt-in (9b9dd262) and the packaged
+  // QA profile starts opted out; since the update check is off by default (3fcdfe59), the startup check that ce1f34e6 counted is gone.
+  const expectedUpdateChecks = scope === 'full-functional' ? 1 : 0;
+  if (supportDenials.length !== receiptDenials.length + updateDenials.length || receiptDenials.length !== 1 || updateDenials.length !== expectedUpdateChecks) {
+    problems.push('external request evidence contains traffic beyond the one blocked support verification request, the expected update checks and expected reports');
   }
   const aggregate = observerCounts(contract.finalObserver);
   const allCounts = [...launchCounts.values()];
@@ -212,12 +230,16 @@ function reconcileBugReportNetworkEvidence(report, options = { scope: 'full-func
   const intents = [];
   for (const launch of launches) {
     const current = launch.externalIntents;
-    if (!Array.isArray(current) || current.some((intent) => intent !== 'https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00')
+    if (!Array.isArray(current) || current.some((intent) => intent !== 'https://donate.stripe.com/7sYaEZeET2op8PxaGE5EY00' && intent !== RELEASE_PAGE_INTENT)
       || launch.startupObservation?.finalExternalIntents !== current.length) problems.push(`launch ${launch.launch} contains unexpected or unreconciled external intents`);
     else intents.push(...current);
   }
-  const expectedIntentCount = scope === 'full-functional' ? 2 : 0;
-  if (intents.length !== expectedIntentCount) problems.push(`the ${scope} scope requires exactly ${expectedIntentCount} support Stripe opens`);
+  const expectedStripe = scope === 'full-functional' ? 2 : 0;
+  const expectedReleasePage = scope === 'full-functional' ? 1 : 0;
+  const stripeOpens = intents.filter((intent) => intent !== RELEASE_PAGE_INTENT).length;
+  const releasePageOpens = intents.filter((intent) => intent === RELEASE_PAGE_INTENT).length;
+  if (stripeOpens !== expectedStripe) problems.push(`the ${scope} scope requires exactly ${expectedStripe} support Stripe opens`);
+  if (releasePageOpens !== expectedReleasePage) problems.push(`the ${scope} scope requires exactly ${expectedReleasePage} validated release-page open`);
   if (launchCounts.size !== launches.length) problems.push('one or more launches have no reconciled report-observer counts');
   return problems;
 }
@@ -314,7 +336,16 @@ async function run(ctx) {
 
   await ctx.withWelcome(async () => {
     let welcome = ctx.getPage();
-    assert.equal(await welcome.locator('[data-testid=support-notice]').count(), 0, 'fresh no-board profile with verification disabled has no startup support notice');
+    // A fresh unpaid profile has no verified support receipt, so the startup reminder appears exactly once and is skippable.
+    // The reminder is suppressed only while a verified, unexpired receipt is active (src/lib/support-status.ts supportIsActive).
+    // The QA profile sets supportVerification: false, the opt-in network receipt check (electron/support.cjs optIn.setting), so this run
+    // never verifies a receipt. That setting controls the network check, not the reminder. The reminder is awaited, skipped here, and
+    // its absence is checked afterwards.
+    const startupReminder = welcome.locator('[data-testid=support-notice]');
+    await startupReminder.first().waitFor({ state: 'visible', timeout: 20_000 });
+    assert.equal(await startupReminder.count(), 1, 'a fresh no-board unpaid profile shows exactly one skippable startup support reminder');
+    await ctx.dismissSupport();
+    assert.equal(await startupReminder.count(), 0, 'the startup support reminder is skippable');
     const baseline = await readObserver(ctx);
     const before = { attempts: baseline.reportObserver?.attempts?.length ?? -1, intents: baseline.external?.length ?? -1 };
     await ctx.step('bug report local welcome, eight-locale controls, privacy and dismissal remain offline', async () => {
@@ -354,6 +385,10 @@ async function run(ctx) {
         assert.equal(enabledPreview.report?.schema === 'trace-bug-report/1' && enabledPreview.report.description === `Synthetic localized QA draft (${locale}).`
           && !!enabledPreview.report.diagnostics && enabledPreview.text === JSON.stringify(enabledPreview.report), true,
         'diagnostics-on canonical preview exactly projects the selected description and optional technical summary');
+        // A draft that matches its last saved state closes at once (c1bc774f); the prompt is for unsaved changes. A restored draft counts
+        // as saved, so the text is changed here before Escape, and the prompt is then expected.
+        await welcome.locator('[data-testid=bug-report-back]').click();
+        await welcome.locator('[data-testid=bug-report-description]').fill(`Synthetic localized QA draft (${locale})!`);
         await welcome.keyboard.press('Escape');
         await welcome.waitForSelector('[data-testid=bug-report-dialog] [role=alertdialog]', { timeout: 10000 });
         const prompt = welcome.locator('[data-testid=bug-report-dialog] [role=alertdialog]');
@@ -371,7 +406,7 @@ async function run(ctx) {
         assert.equal(focusProof.controls && focusProof.shiftWrap && focusProof.forwardWrap, true, 'dirty prompt traps reverse and forward keyboard focus');
         await prompt.getByRole('button', { name: strings['diagnostic.bugContinueEditing'], exact: true }).click();
         await welcome.waitForSelector('[data-testid=bug-report-dialog] [role=alertdialog]', { state: 'detached', timeout: 10000 });
-        assert.equal(await welcome.locator('[data-testid=bug-report-description]').inputValue(), `Synthetic localized QA draft (${locale}).`, 'Continue editing keeps the local draft intact');
+        assert.equal(await welcome.locator('[data-testid=bug-report-description]').inputValue(), `Synthetic localized QA draft (${locale})!`, 'Continue editing keeps the local draft intact');
         await welcome.keyboard.press('Escape');
         await welcome.waitForSelector('[data-testid=bug-report-dialog] [role=alertdialog]', { timeout: 10000 });
         await welcome.locator('[data-testid=bug-report-leave]').click();
@@ -389,16 +424,21 @@ async function run(ctx) {
         const result = await window.traceDesktop?.getBugReportDraft?.();
         return result?.status === 'available' && result.draft?.description === 'Synthetic local draft for packaged acceptance.';
       }, 'local draft save');
+      // A saved draft whose text and privacy choice are unchanged closes at once (c1bc774f); the draft stays on this device.
       await welcome.locator('[data-testid=bug-report-cancel]').click();
-      await welcome.waitForSelector('[data-testid=bug-report-dialog] [role=alertdialog]');
-      await welcome.locator('[data-testid=bug-report-leave]').click();
-      await welcome.waitForSelector('[data-testid=bug-report-dialog]', { state: 'detached' });
+      await welcome.waitForSelector('[data-testid=bug-report-dialog]', { state: 'detached', timeout: 10000 });
+      assert.equal(await welcome.locator('[data-testid=bug-report-dialog] [role=alertdialog]').count(), 0, 'an unchanged saved draft closes without the prompt');
       await ctx.restart();
       welcome = ctx.getPage();
       await welcome.waitForSelector('[data-testid=welcome]', { timeout: 20000 });
       assert.equal(await welcome.locator('[data-testid=project-name]').count(), 0, 'normal restart keeps the fresh owned profile on Welcome with no active board');
       assert.equal(await welcome.locator('.recent-empty').count(), 1, 'normal restart has no restored board history');
-      assert.equal(await welcome.locator('[data-testid=support-notice]').count(), 0, 'normal restart preserves disabled support verification');
+      // Each launch shows its own startup reminder once; it is skipped again.
+      const restartReminder = welcome.locator('[data-testid=support-notice]');
+      await restartReminder.first().waitFor({ state: 'visible', timeout: 20_000 });
+      assert.equal(await restartReminder.count(), 1, 'a normal restart shows the one startup support reminder for the unpaid profile');
+      await ctx.dismissSupport();
+      assert.equal(await restartReminder.count(), 0, 'the restart reminder is skippable');
       await waitForPageValue(welcome, () => !!window.traceDesktop?.getBugReportDraft, 'draft bridge after restart');
       await openForm(welcome, '[data-testid=report-bug-button]');
       await welcome.waitForFunction((expected) => document.querySelector('[data-testid=bug-report-description]')?.value === expected,

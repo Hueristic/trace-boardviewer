@@ -21,30 +21,6 @@ import type { IndexRange, PageBox, PageLayout, Point, ScrollAnchor, Size } from 
 import type { DocRect, PdfViewerProps, ViewerCamera, ViewerHighlight, ViewerProbeRegion, ViewerRotation } from './viewer-contracts';
 import './pdf-viewer.css';
 
-// i18n: pending
-const T = {
-  toolbar: 'PDF viewer controls', sidebarShow: 'Show sidebar', sidebarHide: 'Hide sidebar', pageGroup: 'Page navigation', prevPage: 'Previous page', nextPage: 'Next page',
-  pageInput: 'Page number', zoomGroup: 'Zoom', zoomOut: 'Zoom out (-)', zoomIn: 'Zoom in (+)', zoomInput: 'Zoom percent', fitWidth: 'Fit width', fitPage: 'Fit page',
-  rotateLeft: 'Rotate counterclockwise', rotateRight: 'Rotate clockwise', viewGroup: 'Page rotation', marksGroup: 'Bookmarks and notes',
-  addBookmark: 'Add bookmark at this position', addNote: 'Add note (then click the page to place it)', addNoteKeyboard: 'Add note at the center of the view',
-  noteCancel: 'Click a page to place the note, Esc to cancel', searchLabel: 'Find in document', searchPlaceholder: 'Find in document', searchClear: 'Clear search',
-  prevHit: 'Previous match (Shift+Enter)', nextHit: 'Next match (Enter)', caseSensitive: 'Match case', wholeWord: 'Whole word', searching: 'Searching…',
-  noMatches: 'No matches', hitLimit: (n: number) => `Showing the first ${n.toLocaleString('en')} matches only.`,
-  noTextLayer: 'No text layer: this is a scanned or raster PDF, so text search is unavailable. The pages can still be viewed.',
-  indexing: (done: number, total: number) => `Indexing text: ${done} of ${total} pages`,
-  truncated: (done: number, total: number) => `Text index truncated: only the first ${done} of ${total} pages are searchable.`,
-  indexFailed: 'Text indexing failed; search results may be incomplete.', searchFailed: (message: string) => `Search failed: ${message}`,
-  pages: 'Pages', outline: 'Outline', bookmarks: 'Bookmarks', notes: 'Notes', sidebarTabs: 'Document panels', pagesRegion: 'PDF pages',
-  thumbnailsLabel: 'Page thumbnails', pageN: (n: number) => `Page ${n}`, goToPage: (n: number) => `Go to page ${n}`,
-  noOutline: 'This PDF has no outline.', noBookmarks: 'No bookmarks yet. Add one at the current position.', noNotes: 'No notes yet. Use "Add note" and click a page.',
-  addBookmarkHere: 'Add bookmark here', renameBookmark: 'Rename bookmark', deleteBookmark: 'Delete bookmark', bookmarkLabel: 'Bookmark name', deleteNote: 'Delete note',
-  noteMarker: (text: string) => `Note: ${text}`, noteEditor: 'Note text', noteDone: 'Done', noteDiscard: 'Discard', notePlaceholder: 'Write a note…', emptyNote: '(empty note)',
-  openingTitle: 'Opening PDF…', passwordTitle: 'This PDF is password protected', passwordLabel: 'Password', passwordUnlock: 'Unlock', passwordWrong: 'That password is not correct. Try again.',
-  passwordFailed: (message: string) => `Could not unlock the PDF: ${message}`, errorTitle: 'The PDF could not be opened', closedTitle: 'This document has been closed',
-  closedHint: 'Reopen it from the document list.', renderFailed: 'This page could not be rendered.', pageClamped: 'Rendered at reduced resolution to bound memory.',
-  loadingPage: 'Rendering page',
-} as const;
-
 const PAGE_GAP = 12;
 const PAD = 16;
 const PAD_COMPACT = 8;
@@ -120,15 +96,16 @@ function useSession(session: PdfSession): PdfSessionSnapshot {
 function ViewerGate(props: PdfViewerProps) {
   const snapshot = useSession(props.session);
   const handle = snapshot.status === 'ready' ? props.session.getHandle() : null;
+  const t = useMemo(() => createTranslator(props.language ?? 'en'), [props.language]);
   if (handle) return <ReadyViewer {...props} handle={handle} snapshot={snapshot} />;
   return (
     <section className="pdfv pdfv-bare" data-theme={props.theme} data-motion={props.motion ? 'on' : 'off'} data-compact={props.compact ? 'true' : 'false'} data-state={snapshot.status} style={{ colorScheme: props.theme }}>
-      <StatePanel session={props.session} snapshot={snapshot} />
+      <StatePanel session={props.session} snapshot={snapshot} t={t} />
     </section>
   );
 }
 
-function StatePanel({ session, snapshot }: { session: PdfSession; snapshot: PdfSessionSnapshot }) {
+function StatePanel({ session, snapshot, t }: { session: PdfSession; snapshot: PdfSessionSnapshot; t: Translator }) {
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
   const [password, setPassword] = useState('');
@@ -140,7 +117,7 @@ function StatePanel({ session, snapshot }: { session: PdfSession; snapshot: PdfS
     try { await session.submitPassword(attempt); }
     catch (error) {
       const code = (error as { code?: unknown } | null)?.code;
-      setFailure(code === 'INVALID_PASSWORD' ? T.passwordWrong : T.passwordFailed(errorMessage(error)));
+      setFailure(code === 'INVALID_PASSWORD' ? t('pdf.passwordWrong') : t('pdf.passwordFailed', { message: errorMessage(error) }));
     } finally { setBusy(false); }
   };
   switch (snapshot.status) {
@@ -149,20 +126,20 @@ function StatePanel({ session, snapshot }: { session: PdfSession; snapshot: PdfS
       return (
         <form className="pdfv-state" onSubmit={submit} aria-labelledby="pdfv-pw-title">
           <Lock size={28} aria-hidden="true" className="pdfv-state-icon" />
-          <h2 id="pdfv-pw-title">{T.passwordTitle}</h2>
+          <h2 id="pdfv-pw-title">{t('pdf.passwordTitle')}</h2>
           <label className="pdfv-field">
-            <span>{T.passwordLabel}</span>
+            <span>{t('pdf.passwordLabel')}</span>
             <input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="off" autoFocus spellCheck={false} disabled={busy} aria-invalid={snapshot.status === 'invalid-password' || failure !== null} aria-describedby="pdfv-pw-error" />
           </label>
-          <button type="submit" className="pdfv-primary" disabled={busy || !password}>{busy ? <LoaderCircle size={14} className="pdfv-spin" aria-hidden="true" /> : null}{T.passwordUnlock}</button>
-          <p id="pdfv-pw-error" className="pdfv-state-error" role="alert">{failure ?? (snapshot.status === 'invalid-password' ? T.passwordWrong : '')}</p>
+          <button type="submit" className="pdfv-primary" disabled={busy || !password}>{busy ? <LoaderCircle size={14} className="pdfv-spin" aria-hidden="true" /> : null}{t('pdf.passwordUnlock')}</button>
+          <p id="pdfv-pw-error" className="pdfv-state-error" role="alert">{failure ?? (snapshot.status === 'invalid-password' ? t('pdf.passwordWrong') : '')}</p>
         </form>
       );
     case 'error':
       return (
         <div className="pdfv-state" role="alert">
           <FileWarning size={28} aria-hidden="true" className="pdfv-state-icon pdfv-state-icon-bad" />
-          <h2>{T.errorTitle}</h2>
+          <h2>{t('pdf.errorTitle')}</h2>
           <p>{snapshot.error?.message ?? ''}</p>
           {snapshot.error ? <p className="pdfv-state-code mono">{snapshot.error.code}</p> : null}
         </div>
@@ -171,15 +148,15 @@ function StatePanel({ session, snapshot }: { session: PdfSession; snapshot: PdfS
       return (
         <div className="pdfv-state" role="status">
           <FileWarning size={28} aria-hidden="true" className="pdfv-state-icon" />
-          <h2>{T.closedTitle}</h2>
-          <p>{T.closedHint}</p>
+          <h2>{t('pdf.closedTitle')}</h2>
+          <p>{t('pdf.closedHint')}</p>
         </div>
       );
     default:
       return (
         <div className="pdfv-state" role="status" aria-live="polite">
           <LoaderCircle size={28} aria-hidden="true" className="pdfv-spin pdfv-state-icon" />
-          <h2>{T.openingTitle}</h2>
+          <h2>{t('pdf.openingTitle')}</h2>
         </div>
       );
   }
@@ -402,19 +379,19 @@ const PageHighlights = memo(function PageHighlights({ box, rotation, zoom, hits,
   );
 });
 
-function NoteMarker({ note, style, open, actions }: { note: { id: string; text: string }; style: CSSProperties; open: boolean; actions: PageActions }) {
+function NoteMarker({ note, style, open, actions, t }: { note: { id: string; text: string }; style: CSSProperties; open: boolean; actions: PageActions; t: Translator }) {
   const wasOpen = useRef(false);
   return (
     <button
       type="button" className={open ? 'pdfv-note is-open' : 'pdfv-note'} style={style} data-note-marker={note.id}
-      aria-label={T.noteMarker(note.text || T.emptyNote)} aria-expanded={open} title={note.text || T.emptyNote}
+      aria-label={t('pdf.noteMarker', { text: note.text || t('pdf.emptyNote') })} aria-expanded={open} title={note.text || t('pdf.emptyNote')}
       onPointerDown={() => { wasOpen.current = open; }}
       onClick={event => { event.stopPropagation(); if (wasOpen.current) { wasOpen.current = false; return; } actions.openNote(note.id); }}
     ><StickyNote size={13} aria-hidden="true" /></button>
   );
 }
 
-function NotePopover({ note, isDraft, left, top, pageWidth, actions }: { note: { id: string; text: string }; isDraft: boolean; left: number; top: number; pageWidth: number; actions: PageActions }) {
+function NotePopover({ note, isDraft, left, top, pageWidth, actions, t }: { note: { id: string; text: string }; isDraft: boolean; left: number; top: number; pageWidth: number; actions: PageActions; t: Translator }) {
   const [text, setText] = useState(note.text);
   const finished = useRef(false);
   const finish = (commit: boolean, refocus = true) => {
@@ -425,7 +402,7 @@ function NotePopover({ note, isDraft, left, top, pageWidth, actions }: { note: {
   const x = clamp(left - 14, 4, Math.max(4, pageWidth - 252));
   return (
     <div
-      className="pdfv-popover" role="dialog" aria-label={T.noteEditor} style={{ left: x, top: top + 18 }}
+      className="pdfv-popover" role="dialog" aria-label={t('pdf.noteEditor')} style={{ left: x, top: top + 18 }}
       onClick={event => event.stopPropagation()}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) finish(true, false); }}
       onKeyDown={event => {
@@ -434,12 +411,12 @@ function NotePopover({ note, isDraft, left, top, pageWidth, actions }: { note: {
       }}
     >
       <textarea
-        autoFocus value={text} rows={4} maxLength={WORKSPACE_LIMITS.text} aria-label={T.noteEditor} placeholder={T.notePlaceholder}
+        autoFocus value={text} rows={4} maxLength={WORKSPACE_LIMITS.text} aria-label={t('pdf.noteEditor')} placeholder={t('pdf.notePlaceholder')}
         onChange={event => setText(event.target.value)} onFocus={event => { const end = event.target.value.length; event.target.setSelectionRange(end, end); }}
       />
       <div className="pdfv-popover-actions">
-        <button type="button" className="pdfv-chip pdfv-chip-danger" onClick={() => finish(false)}><Trash2 size={13} aria-hidden="true" />{isDraft ? T.noteDiscard : T.deleteNote}</button>
-        <button type="button" className="pdfv-chip pdfv-chip-primary" onClick={() => finish(true)}>{T.noteDone}</button>
+        <button type="button" className="pdfv-chip pdfv-chip-danger" onClick={() => finish(false)}><Trash2 size={13} aria-hidden="true" />{isDraft ? t('pdf.noteDiscard') : t('pdf.deleteNote')}</button>
+        <button type="button" className="pdfv-chip pdfv-chip-primary" onClick={() => finish(true)}>{t('pdf.noteDone')}</button>
       </div>
     </div>
   );
@@ -467,8 +444,8 @@ const PageInteractive = memo(function PageInteractive({ box, rotation, zoom, wid
         const open = openNote?.id === note.id;
         return (
           <span key={note.id}>
-            <NoteMarker note={note} open={open} actions={actions} style={{ left: at.x * zoom, top: at.y * zoom }} />
-            {open ? <NotePopover note={note} isDraft={openNote?.draft !== undefined} left={at.x * zoom} top={at.y * zoom} pageWidth={width} actions={actions} /> : null}
+            <NoteMarker note={note} open={open} actions={actions} style={{ left: at.x * zoom, top: at.y * zoom }} t={t} />
+            {open ? <NotePopover note={note} isDraft={openNote?.draft !== undefined} left={at.x * zoom} top={at.y * zoom} pageWidth={width} actions={actions} t={t} /> : null}
           </span>
         );
       })}
@@ -515,7 +492,7 @@ const PdfPage = memo(function PdfPage(props: PdfPageProps) {
       {state !== 'done' ? (
         <div className="pdfv-page-ph" aria-hidden="true" data-failed={state === 'error' ? 'true' : undefined}>
           <span className="mono">{page}</span>
-          {state === 'error' ? <span className="pdfv-page-fail" role="alert"><TriangleAlert size={14} aria-hidden="true" />{T.renderFailed}</span> : null}
+          {state === 'error' ? <span className="pdfv-page-fail" role="alert"><TriangleAlert size={14} aria-hidden="true" />{t('pdf.renderFailed')}</span> : null}
         </div>
       ) : null}
       {box ? <PageHighlights box={box} rotation={rotation} zoom={zoom} hits={hits} active={activeHit} highlights={highlights} /> : null}
@@ -530,9 +507,9 @@ const PdfPage = memo(function PdfPage(props: PdfPageProps) {
 // ---------------------------------------------------------------------------------------------------------------------
 // Sidebar
 
-const Thumb = memo(function Thumb({ handle, page, box, estimate, rotation, dpr, active, top, height, cache, queue, onJump }: {
+const Thumb = memo(function Thumb({ handle, page, box, estimate, rotation, dpr, active, top, height, cache, queue, onJump, t }: {
   handle: PdfHandle; page: number; box: PageBox | undefined; estimate: Size; rotation: ViewerRotation; dpr: number; active: boolean; top: number; height: number;
-  cache: BoundedCache<string, HTMLCanvasElement>; queue: TaskQueue; onJump(page: number): void;
+  cache: BoundedCache<string, HTMLCanvasElement>; queue: TaskQueue; onJump(page: number): void; t: Translator;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const shown = box ? displaySize(box, rotation) : estimate;
@@ -540,16 +517,16 @@ const Thumb = memo(function Thumb({ handle, page, box, estimate, rotation, dpr, 
   const state = useCanvasRender({ handle, page, enabled: box !== undefined, scale: plan.scale, rotation, cache, queue, priority: () => 2, delay: THUMB_RENDER_DELAY_MS, host });
   const imageHeight = height - THUMB_LABEL;
   return (
-    <button type="button" className={active ? 'pdfv-thumb is-active' : 'pdfv-thumb'} style={{ top, height }} aria-label={T.goToPage(page)} aria-current={active ? 'page' : undefined} onClick={() => onJump(page)} data-thumb={page}>
+    <button type="button" className={active ? 'pdfv-thumb is-active' : 'pdfv-thumb'} style={{ top, height }} aria-label={t('pdf.goToPage', { page: String(page) })} aria-current={active ? 'page' : undefined} onClick={() => onJump(page)} data-thumb={page}>
       <div className="pdfv-thumb-image" style={{ width: THUMB_WIDTH, height: imageHeight }} data-render={state}><div ref={host} className="pdfv-canvas-host" /></div>
       <span className="pdfv-thumb-label mono">{page}</span>
     </button>
   );
 });
 
-function ThumbList({ handle, pageCount, boxes, version, rotation, current, dpr, request, onJump, cache, queue }: {
+function ThumbList({ handle, pageCount, boxes, version, rotation, current, dpr, request, onJump, cache, queue, t }: {
   handle: PdfHandle; pageCount: number; boxes: Map<number, PageBox>; version: number; rotation: ViewerRotation; current: number; dpr: number;
-  request(page: number): void; onJump(page: number): void; cache: BoundedCache<string, HTMLCanvasElement>; queue: TaskQueue;
+  request(page: number): void; onJump(page: number): void; cache: BoundedCache<string, HTMLCanvasElement>; queue: TaskQueue; t: Translator;
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [view, setView] = useState({ top: 0, height: 0 });
@@ -591,25 +568,25 @@ function ThumbList({ handle, pageCount, boxes, version, rotation, current, dpr, 
 
   const items: ReactNode[] = [];
   for (let i = range.first; i <= range.last; i++) {
-    items.push(<Thumb key={i} handle={handle} page={i + 1} box={boxes.get(i + 1)} estimate={fallback} rotation={rotation} dpr={dpr} active={current === i + 1} top={layout.tops[i]} height={layout.heights[i]} cache={cache} queue={queue} onJump={onJump} />);
+    items.push(<Thumb key={i} handle={handle} page={i + 1} box={boxes.get(i + 1)} estimate={fallback} rotation={rotation} dpr={dpr} active={current === i + 1} top={layout.tops[i]} height={layout.heights[i]} cache={cache} queue={queue} onJump={onJump} t={t} />);
   }
   return (
-    <div ref={scroller} className="pdfv-scroll pdfv-thumbs" role="group" aria-label={T.thumbnailsLabel} onScroll={onScroll}>
+    <div ref={scroller} className="pdfv-scroll pdfv-thumbs" role="group" aria-label={t('pdf.thumbnailsLabel')} onScroll={onScroll}>
       <div className="pdfv-thumbs-spacer" style={{ height: layout.total }}>{items}</div>
     </div>
   );
 }
 
-function OutlineList({ outline, current, onJump }: { outline: readonly OutlineEntry[]; current: number; onJump(page: number): void }) {
-  if (!outline.length) return <p className="pdfv-empty">{T.noOutline}</p>;
+function OutlineList({ outline, current, onJump, t }: { outline: readonly OutlineEntry[]; current: number; onJump(page: number): void; t: Translator }) {
+  if (!outline.length) return <p className="pdfv-empty">{t('pdf.noOutline')}</p>;
   let active = -1;
   outline.forEach((entry, i) => { if (entry.page <= current) active = i; });
   return (
     <ul className="pdfv-list pdfv-outline">
       {outline.map((entry, i) => (
         <li key={i}>
-          <button type="button" className={i === active ? 'pdfv-row is-active' : 'pdfv-row'} style={{ paddingLeft: 10 + Math.min(entry.depth, 6) * 12 }} onClick={() => onJump(entry.page)} title={`${entry.title} (${T.pageN(entry.page)})`} aria-label={`${entry.title || T.pageN(entry.page)}, ${T.pageN(entry.page).toLowerCase()}`}>
-            <span className="pdfv-row-text">{entry.title || T.pageN(entry.page)}</span><span className="pdfv-row-page mono">{entry.page}</span>
+          <button type="button" className={i === active ? 'pdfv-row is-active' : 'pdfv-row'} style={{ paddingLeft: 10 + Math.min(entry.depth, 6) * 12 }} onClick={() => onJump(entry.page)} title={t('pdf.itemWithPage', { item: entry.title, page: t('pdf.pageN', { page: String(entry.page) }) })} aria-label={t('pdf.itemOnPage', { item: entry.title || t('pdf.pageN', { page: String(entry.page) }), page: String(entry.page) })}>
+            <span className="pdfv-row-text">{entry.title || t('pdf.pageN', { page: String(entry.page) })}</span><span className="pdfv-row-page mono">{entry.page}</span>
           </button>
         </li>
       ))}
@@ -617,9 +594,19 @@ function OutlineList({ outline, current, onJump }: { outline: readonly OutlineEn
   );
 }
 
-function BookmarkList({ bookmarks, renaming, setRenaming, onJump, onChange, onAdd, canAdd }: {
+/**
+ * The bookmark list with one more bookmark at `page`. Its default name is the catalog text of the interface language `t` at the
+ * moment of creation; the saved bookmarks are returned as they are, names included (a name is user data, never re-translated).
+ */
+export function listWithNewBookmark(current: readonly DocumentBookmark[], page: number, t: Translator, id: string, at?: { x: number; y: number }): DocumentBookmark[] {
+  const bookmark: DocumentBookmark = { id, page, label: t('pdf.bookmarkName', { page: String(page) }) };
+  if (at) { bookmark.x = at.x; bookmark.y = at.y; }
+  return [...current, bookmark];
+}
+
+function BookmarkList({ bookmarks, renaming, setRenaming, onJump, onChange, onAdd, canAdd, t }: {
   bookmarks: readonly DocumentBookmark[]; renaming: string | null; setRenaming(id: string | null): void; onJump(bookmark: DocumentBookmark): void;
-  onChange(next: DocumentBookmark[]): void; onAdd(): void; canAdd: boolean;
+  onChange(next: DocumentBookmark[]): void; onAdd(): void; canAdd: boolean; t: Translator;
 }) {
   const sorted = useMemo(() => [...bookmarks].sort((a, b) => a.page - b.page || (a.y ?? 0) - (b.y ?? 0)), [bookmarks]);
   const commit = (bookmark: DocumentBookmark, label: string) => {
@@ -629,43 +616,43 @@ function BookmarkList({ bookmarks, renaming, setRenaming, onJump, onChange, onAd
   };
   return (
     <div className="pdfv-bookmarks">
-      <button type="button" className="pdfv-chip pdfv-chip-primary pdfv-add" onClick={onAdd} disabled={!canAdd}><BookmarkPlus size={14} aria-hidden="true" />{T.addBookmarkHere}</button>
+      <button type="button" className="pdfv-chip pdfv-chip-primary pdfv-add" onClick={onAdd} disabled={!canAdd}><BookmarkPlus size={14} aria-hidden="true" />{t('pdf.addBookmarkHere')}</button>
       {sorted.length ? (
         <ul className="pdfv-list">
           {sorted.map(bookmark => (
             <li key={bookmark.id} className="pdfv-bm">
               {renaming === bookmark.id ? (
                 <input
-                  className="pdfv-rename" autoFocus defaultValue={bookmark.label} aria-label={T.bookmarkLabel} maxLength={200}
+                  className="pdfv-rename" autoFocus defaultValue={bookmark.label} aria-label={t('pdf.bookmarkLabel')} maxLength={200}
                   onFocus={event => event.target.select()} onBlur={event => commit(bookmark, event.target.value)}
                   onKeyDown={event => { if (event.key === 'Enter') commit(bookmark, event.currentTarget.value); else if (event.key === 'Escape') { event.stopPropagation(); setRenaming(null); } }}
                 />
               ) : (
-                <button type="button" className="pdfv-row" onClick={() => onJump(bookmark)} title={`${bookmark.label} (${T.pageN(bookmark.page)})`} aria-label={`${bookmark.label}, ${T.pageN(bookmark.page).toLowerCase()}`}>
+                <button type="button" className="pdfv-row" onClick={() => onJump(bookmark)} title={t('pdf.itemWithPage', { item: bookmark.label, page: t('pdf.pageN', { page: String(bookmark.page) }) })} aria-label={t('pdf.itemOnPage', { item: bookmark.label, page: String(bookmark.page) })}>
                   <BookmarkIcon size={13} aria-hidden="true" /><span className="pdfv-row-text">{bookmark.label}</span><span className="pdfv-row-page mono">{bookmark.page}</span>
                 </button>
               )}
-              <button type="button" className="pdfv-mini" aria-label={`${T.renameBookmark}: ${bookmark.label}`} title={T.renameBookmark} onClick={() => setRenaming(bookmark.id)}><Pencil size={13} aria-hidden="true" /></button>
-              <button type="button" className="pdfv-mini" aria-label={`${T.deleteBookmark}: ${bookmark.label}`} title={T.deleteBookmark} onClick={() => onChange(bookmarks.filter(item => item.id !== bookmark.id))}><Trash2 size={13} aria-hidden="true" /></button>
+              <button type="button" className="pdfv-mini" aria-label={t('pdf.renameBookmarkNamed', { name: bookmark.label })} title={t('pdf.renameBookmark')} onClick={() => setRenaming(bookmark.id)}><Pencil size={13} aria-hidden="true" /></button>
+              <button type="button" className="pdfv-mini" aria-label={t('pdf.deleteBookmarkNamed', { name: bookmark.label })} title={t('pdf.deleteBookmark')} onClick={() => onChange(bookmarks.filter(item => item.id !== bookmark.id))}><Trash2 size={13} aria-hidden="true" /></button>
             </li>
           ))}
         </ul>
-      ) : <p className="pdfv-empty">{T.noBookmarks}</p>}
+      ) : <p className="pdfv-empty">{t('pdf.noBookmarks')}</p>}
     </div>
   );
 }
 
-function NoteList({ annotations, onOpen, onDelete }: { annotations: readonly DocumentAnnotation[]; onOpen(note: DocumentAnnotation): void; onDelete(note: DocumentAnnotation): void }) {
+function NoteList({ annotations, onOpen, onDelete, t }: { annotations: readonly DocumentAnnotation[]; onOpen(note: DocumentAnnotation): void; onDelete(note: DocumentAnnotation): void; t: Translator }) {
   const sorted = useMemo(() => [...annotations].sort((a, b) => a.page - b.page || a.y - b.y), [annotations]);
-  if (!sorted.length) return <p className="pdfv-empty">{T.noNotes}</p>;
+  if (!sorted.length) return <p className="pdfv-empty">{t('pdf.noNotes')}</p>;
   return (
     <ul className="pdfv-list">
       {sorted.map(note => (
         <li key={note.id} className="pdfv-bm">
-          <button type="button" className="pdfv-row" onClick={() => onOpen(note)} title={note.text} aria-label={`${note.text.split('\n')[0] || T.emptyNote}, ${T.pageN(note.page).toLowerCase()}`}>
-            <StickyNote size={13} aria-hidden="true" /><span className="pdfv-row-text">{note.text.split('\n')[0] || T.emptyNote}</span><span className="pdfv-row-page mono">{note.page}</span>
+          <button type="button" className="pdfv-row" onClick={() => onOpen(note)} title={note.text} aria-label={t('pdf.itemOnPage', { item: note.text.split('\n')[0] || t('pdf.emptyNote'), page: String(note.page) })}>
+            <StickyNote size={13} aria-hidden="true" /><span className="pdfv-row-text">{note.text.split('\n')[0] || t('pdf.emptyNote')}</span><span className="pdfv-row-page mono">{note.page}</span>
           </button>
-          <button type="button" className="pdfv-mini" aria-label={`${T.deleteNote}: ${note.text.slice(0, 40)}`} title={T.deleteNote} onClick={() => onDelete(note)}><Trash2 size={13} aria-hidden="true" /></button>
+          <button type="button" className="pdfv-mini" aria-label={t('pdf.deleteNoteNamed', { text: note.text.slice(0, 40) })} title={t('pdf.deleteNote')} onClick={() => onDelete(note)}><Trash2 size={13} aria-hidden="true" /></button>
         </li>
       ))}
     </ul>
@@ -1105,16 +1092,17 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
     const { bookmarks: current, onBookmarksChange } = propsRef.current;
     if (current.length >= WORKSPACE_LIMITS.bookmarks) return;
     const element = scrollerRef.current, lay = layoutRef.current, target = pageRef.current, box = boxesRef.current.get(target);
-    const bookmark: DocumentBookmark = { id: newId(), page: target, label: T.pageN(target) };
+    const id = newId();
+    let at: { x: number; y: number } | undefined;
     if (element && lay && box) {
       const z = zoomRef.current, index = target - 1, shown = displaySize(box, rotationRef.current);
       // bookmarks stay inside the page even when the viewport corner is in the margin above it
       const inside = unrotatePoint(clamp((element.scrollLeft - pageLeft(lay, index)) / z, 0, shown.width), clamp((element.scrollTop - lay.tops[index]) / z, 0, shown.height), box.width, box.height, displayRotation(box.rotation, rotationRef.current));
-      bookmark.x = round(inside.x, 2); bookmark.y = round(inside.y, 2);
+      at = { x: round(inside.x, 2), y: round(inside.y, 2) };
     }
-    onBookmarksChange([...current, bookmark]);
-    setSidebarOpen(true); setTab('bookmarks'); setRenaming(bookmark.id);
-  }, []);
+    onBookmarksChange(listWithNewBookmark(current, target, t, id, at));
+    setSidebarOpen(true); setTab('bookmarks'); setRenaming(id);
+  }, [t]);
 
   // ---- keyboard (scoped to this pane: the handler lives on the viewer root)
   const onKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
@@ -1163,7 +1151,7 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
   const thumbJump = useCallback((target: number) => jumpFromSidebar(target), [jumpFromSidebar]);
   const index = snapshot.index;
   const limited = hits.length >= SEARCH_HIT_LIMIT;
-  const countText = search.busy ? T.searching : searchQuery.trim() && canSearch ? (hits.length ? `${Math.max(activeHit, 0) + 1} / ${hits.length.toLocaleString('en')}${limited ? '+' : ''}` : search.error ? '' : T.noMatches) : '';
+  const countText = search.busy ? t('pdf.searching') : searchQuery.trim() && canSearch ? (hits.length ? `${Math.max(activeHit, 0) + 1} / ${hits.length.toLocaleString('en')}${limited ? '+' : ''}` : search.error ? '' : t('pdf.noMatches')) : '';
   const notices: Array<{ key: string; tone: 'info' | 'warn'; icon: ReactNode; text: string; progress?: number; action?: ReactNode }> = [];
   const recognizeButton = <button type="button" className="pdfv-chip pdfv-chip-primary" data-action="recognize-text" title={t('pdf.ocr.recognizeTitle')} onClick={recognize}><ScanLine size={13} aria-hidden="true" />{t('pdf.ocr.recognize')}</button>;
   const running = ocr.state === 'running';
@@ -1177,11 +1165,11 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
   }
   const offerHere = ocrAvailable && !running && !recognizedHere && pageKind?.page === page && pageKind.kind === 'image-only';
   if (searchable === false && ocr.words === 0) {
-    if (!ocrAvailable) notices.push({ key: 'raster', tone: 'warn', icon: <ScanLine size={14} aria-hidden="true" />, text: T.noTextLayer });
+    if (!ocrAvailable) notices.push({ key: 'raster', tone: 'warn', icon: <ScanLine size={14} aria-hidden="true" />, text: t('pdf.noTextLayer') });
     else if (!running) notices.push({ key: 'raster', tone: 'warn', icon: <ScanLine size={14} aria-hidden="true" />, text: t('pdf.ocr.documentOffer'), action: recognizeButton });
   } else if (offerHere) notices.push({ key: 'ocr-offer', tone: 'warn', icon: <ScanLine size={14} aria-hidden="true" />, text: t('pdf.ocr.pageOffer'), action: recognizeButton });
   if (!running && ocr.words > 0 && (searchable === false || recognizedHere)) {
-    notices.push({ key: 'ocr-summary', tone: 'info', icon: <ScanLine size={14} aria-hidden="true" />, text: `${t('pdf.ocr.summary', { pages: ocr.recognizedPages, words: ocr.words })}. ${t('pdf.ocr.linkRule', { floor: OCR_LINK_MIN_CONFIDENCE })}` });
+    notices.push({ key: 'ocr-summary', tone: 'info', icon: <ScanLine size={14} aria-hidden="true" />, text: `${t('pdf.ocr.summary', { pages: ocr.recognizedPages, words: ocr.words })} ${t('pdf.ocr.linkRule', { floor: OCR_LINK_MIN_CONFIDENCE })}` });
   }
   if (ocr.state === 'cancelled') {
     const resume = searchable === false && ocr.words > 0 && !offerHere; // a scan whose remaining pages were not recognized yet
@@ -1193,11 +1181,11 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
     notices.push({ key: 'ocr-error', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: t(unavailable ? 'pdf.ocr.unavailable' : 'pdf.ocr.failed', { message: ocr.error.message }) });
   }
   if (searchable === false) { /* a scan has no text layer to index: no indexing notices */ }
-  else if (index.state === 'building') notices.push({ key: 'building', tone: 'info', icon: <LoaderCircle size={14} className="pdfv-spin" aria-hidden="true" />, text: T.indexing(index.indexedPages, index.pageCount), progress: index.pageCount ? index.indexedPages / index.pageCount : 0 });
-  else if (index.state === 'truncated') notices.push({ key: 'truncated', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: T.truncated(index.indexedPages, index.pageCount) });
-  else if (index.state === 'error') notices.push({ key: 'index-error', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: T.indexFailed });
-  if (search.error) notices.push({ key: 'search-error', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: T.searchFailed(search.error) });
-  if (limited) notices.push({ key: 'limit', tone: 'info', icon: <Search size={14} aria-hidden="true" />, text: T.hitLimit(SEARCH_HIT_LIMIT) });
+  else if (index.state === 'building') notices.push({ key: 'building', tone: 'info', icon: <LoaderCircle size={14} className="pdfv-spin" aria-hidden="true" />, text: t('pdf.indexing', { done: String(index.indexedPages), total: String(index.pageCount) }), progress: index.pageCount ? index.indexedPages / index.pageCount : 0 });
+  else if (index.state === 'truncated') notices.push({ key: 'truncated', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: t('pdf.truncated', { done: String(index.indexedPages), total: String(index.pageCount) }) });
+  else if (index.state === 'error') notices.push({ key: 'index-error', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: t('pdf.indexFailed') });
+  if (search.error) notices.push({ key: 'search-error', tone: 'warn', icon: <TriangleAlert size={14} aria-hidden="true" />, text: t('pdf.searchFailed', { message: search.error }) });
+  if (limited) notices.push({ key: 'limit', tone: 'info', icon: <Search size={14} aria-hidden="true" />, text: t('pdf.hitLimit', { limit: SEARCH_HIT_LIMIT }) });
 
   // ---- pages in the window
   const pageNodes: ReactNode[] = [];
@@ -1219,10 +1207,10 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
   }
 
   const tabs: Array<{ id: SidebarTab; label: string; icon: ReactNode; count?: number }> = [];
-  if (!compact) tabs.push({ id: 'pages', label: T.pages, icon: <Images size={15} aria-hidden="true" /> });
-  tabs.push({ id: 'outline', label: T.outline, icon: <ListTree size={15} aria-hidden="true" />, count: snapshot.outline.length });
-  tabs.push({ id: 'bookmarks', label: T.bookmarks, icon: <BookmarkIcon size={15} aria-hidden="true" />, count: bookmarks.length });
-  tabs.push({ id: 'notes', label: T.notes, icon: <StickyNote size={15} aria-hidden="true" />, count: annotations.length });
+  if (!compact) tabs.push({ id: 'pages', label: t('pdf.pages'), icon: <Images size={15} aria-hidden="true" /> });
+  tabs.push({ id: 'outline', label: t('pdf.outline'), icon: <ListTree size={15} aria-hidden="true" />, count: snapshot.outline.length });
+  tabs.push({ id: 'bookmarks', label: t('pdf.bookmarks'), icon: <BookmarkIcon size={15} aria-hidden="true" />, count: bookmarks.length });
+  tabs.push({ id: 'notes', label: t('pdf.notes'), icon: <StickyNote size={15} aria-hidden="true" />, count: annotations.length });
   const onTabKey = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
     if (!step) return;
@@ -1238,56 +1226,56 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
       ref={rootRef} className="pdfv" data-theme={theme} data-motion={motion ? 'on' : 'off'} data-compact={compact ? 'true' : 'false'} data-sidebar={sidebarOpen ? 'open' : 'closed'}
       data-page={page} data-zoom={round(zoom, 4)} data-rotation={rotation} data-fit={fit} style={{ colorScheme: theme }} onKeyDown={onKeyDown}
     >
-      <div className="pdfv-toolbar" role="toolbar" aria-label={T.toolbar}>
+      <div className="pdfv-toolbar" role="toolbar" aria-label={t('pdf.toolbar')}>
         <div className="pdfv-bar">
-          <IconButton label={sidebarOpen ? T.sidebarHide : T.sidebarShow} pressed={sidebarOpen} onClick={() => setSidebarOpen(open => !open)}><PanelLeft size={16} aria-hidden="true" /></IconButton>
-          <div className="pdfv-group" role="group" aria-label={T.pageGroup}>
-            <IconButton label={T.prevPage} hint={`${T.prevPage} (PageUp)`} disabled={page <= 1} onClick={() => jumpBy(-1)}><ChevronUp size={16} aria-hidden="true" /></IconButton>
+          <IconButton label={sidebarOpen ? t('pdf.sidebarHide') : t('pdf.sidebarShow')} pressed={sidebarOpen} onClick={() => setSidebarOpen(open => !open)}><PanelLeft size={16} aria-hidden="true" /></IconButton>
+          <div className="pdfv-group" role="group" aria-label={t('pdf.pageGroup')}>
+            <IconButton label={t('pdf.prevPage')} hint={t('pdf.keyHint', { label: t('pdf.prevPage'), key: 'PageUp' })} disabled={page <= 1} onClick={() => jumpBy(-1)}><ChevronUp size={16} aria-hidden="true" /></IconButton>
             <input
-              className="pdfv-num mono" aria-label={T.pageInput} inputMode="numeric" value={pageText} size={Math.max(2, String(pageCount).length)}
+              className="pdfv-num mono" aria-label={t('pdf.pageInput')} inputMode="numeric" value={pageText} size={Math.max(2, String(pageCount).length)}
               onFocus={event => event.target.select()} onChange={event => setPageDraft(event.target.value)} onBlur={() => setPageDraft(null)}
               onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitPage(); } else if (event.key === 'Escape') { setPageDraft(null); event.currentTarget.blur(); } }}
             />
             <span className="pdfv-of mono" aria-hidden="true">/ {pageCount}</span>
-            <IconButton label={T.nextPage} hint={`${T.nextPage} (PageDown)`} disabled={page >= pageCount} onClick={() => jumpBy(1)}><ChevronDown size={16} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.nextPage')} hint={t('pdf.keyHint', { label: t('pdf.nextPage'), key: 'PageDown' })} disabled={page >= pageCount} onClick={() => jumpBy(1)}><ChevronDown size={16} aria-hidden="true" /></IconButton>
           </div>
-          <div className="pdfv-group" role="group" aria-label={T.zoomGroup}>
-            <IconButton label={T.zoomOut} onClick={() => stepZoomBy(-1)} disabled={zoom <= 0.1001}><ZoomOut size={16} aria-hidden="true" /></IconButton>
+          <div className="pdfv-group" role="group" aria-label={t('pdf.zoomGroup')}>
+            <IconButton label={t('pdf.zoomOut')} onClick={() => stepZoomBy(-1)} disabled={zoom <= 0.1001}><ZoomOut size={16} aria-hidden="true" /></IconButton>
             <input
-              className="pdfv-num pdfv-zoom mono" aria-label={T.zoomInput} inputMode="decimal" value={zoomText} size={5}
+              className="pdfv-num pdfv-zoom mono" aria-label={t('pdf.zoomInput')} inputMode="decimal" value={zoomText} size={5}
               onFocus={event => { setZoomDraft(formatZoom(zoomRef.current).replace('%', '')); event.target.select(); }} onChange={event => setZoomDraft(event.target.value)} onBlur={commitZoom}
               onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); commitZoom(); scrollerRef.current?.focus({ preventScroll: true }); } else if (event.key === 'Escape') { setZoomDraft(null); event.currentTarget.blur(); } }}
             />
-            <IconButton label={T.zoomIn} onClick={() => stepZoomBy(1)} disabled={zoom >= 7.999}><ZoomIn size={16} aria-hidden="true" /></IconButton>
-            <IconButton label={T.fitWidth} pressed={fit === 'width'} onClick={() => fitTo('width')}><MoveHorizontal size={16} aria-hidden="true" /></IconButton>
-            <IconButton label={T.fitPage} pressed={fit === 'page'} onClick={() => fitTo('page')}><Maximize size={16} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.zoomIn')} onClick={() => stepZoomBy(1)} disabled={zoom >= 7.999}><ZoomIn size={16} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.fitWidth')} pressed={fit === 'width'} onClick={() => fitTo('width')}><MoveHorizontal size={16} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.fitPage')} pressed={fit === 'page'} onClick={() => fitTo('page')}><Maximize size={16} aria-hidden="true" /></IconButton>
           </div>
-          <div className="pdfv-group" role="group" aria-label={T.viewGroup}>
-            <IconButton label={T.rotateLeft} onClick={() => rotateBy(-90)}><RotateCcw size={16} aria-hidden="true" /></IconButton>
-            <IconButton label={T.rotateRight} onClick={() => rotateBy(90)}><RotateCw size={16} aria-hidden="true" /></IconButton>
+          <div className="pdfv-group" role="group" aria-label={t('pdf.viewGroup')}>
+            <IconButton label={t('pdf.rotateLeft')} onClick={() => rotateBy(-90)}><RotateCcw size={16} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.rotateRight')} onClick={() => rotateBy(90)}><RotateCw size={16} aria-hidden="true" /></IconButton>
           </div>
         </div>
         <div className="pdfv-bar pdfv-bar-end">
-          <div className="pdfv-group" role="group" aria-label={T.marksGroup}>
-            <IconButton label={T.addBookmark} onClick={addBookmark} disabled={bookmarks.length >= WORKSPACE_LIMITS.bookmarks}><BookmarkPlus size={16} aria-hidden="true" /></IconButton>
-            <IconButton label={noteArmed ? T.noteCancel : T.addNote} hint={noteArmed ? T.noteCancel : `${T.addNote}. Keyboard: ${T.addNoteKeyboard}`} pressed={noteArmed} onClick={startNote} disabled={!canAnnotate}><StickyNote size={16} aria-hidden="true" /></IconButton>
+          <div className="pdfv-group" role="group" aria-label={t('pdf.marksGroup')}>
+            <IconButton label={t('pdf.addBookmark')} onClick={addBookmark} disabled={bookmarks.length >= WORKSPACE_LIMITS.bookmarks}><BookmarkPlus size={16} aria-hidden="true" /></IconButton>
+            <IconButton label={noteArmed ? t('pdf.noteCancel') : t('pdf.addNote')} hint={noteArmed ? t('pdf.noteCancel') : t('pdf.addNoteHint', { note: t('pdf.addNote'), action: t('pdf.addNoteKeyboard') })} pressed={noteArmed} onClick={startNote} disabled={!canAnnotate}><StickyNote size={16} aria-hidden="true" /></IconButton>
           </div>
           <div className="pdfv-search" role="search" data-disabled={canSearch ? undefined : 'true'}>
             <Search size={14} aria-hidden="true" className="pdfv-search-icon" />
             <input
-              ref={searchRef} className="pdfv-search-input" type="text" value={searchQuery} placeholder={T.searchPlaceholder} aria-label={T.searchLabel} disabled={!canSearch}
+              ref={searchRef} className="pdfv-search-input" type="text" value={searchQuery} placeholder={t('pdf.searchPlaceholder')} aria-label={t('pdf.searchLabel')} disabled={!canSearch}
               spellCheck={false} autoComplete="off" onChange={event => { markSearchIntent(event.target.value); props.onSearchQueryChange(event.target.value); }}
               onKeyDown={event => {
                 if (event.key === 'Enter') { event.preventDefault(); stepHit(event.shiftKey ? -1 : 1); }
                 else if (event.key === 'Escape') { event.stopPropagation(); if (searchQuery) props.onSearchQueryChange(''); else scrollerRef.current?.focus({ preventScroll: true }); }
               }}
             />
-            {searchQuery ? <button type="button" className="pdfv-mini" aria-label={T.searchClear} title={T.searchClear} onClick={() => { props.onSearchQueryChange(''); searchRef.current?.focus(); }}><X size={13} aria-hidden="true" /></button> : null}
-            <button type="button" className="pdfv-mini" aria-label={T.caseSensitive} title={T.caseSensitive} aria-pressed={caseSensitive} disabled={!canSearch} onClick={() => { markSearchIntent(searchQuery); setCaseSensitive(value => !value); }}><CaseSensitive size={15} aria-hidden="true" /></button>
-            <button type="button" className="pdfv-mini" aria-label={T.wholeWord} title={T.wholeWord} aria-pressed={wholeWord} disabled={!canSearch} onClick={() => { markSearchIntent(searchQuery); setWholeWord(value => !value); }}><WholeWord size={15} aria-hidden="true" /></button>
+            {searchQuery ? <button type="button" className="pdfv-mini" aria-label={t('pdf.searchClear')} title={t('pdf.searchClear')} onClick={() => { props.onSearchQueryChange(''); searchRef.current?.focus(); }}><X size={13} aria-hidden="true" /></button> : null}
+            <button type="button" className="pdfv-mini" aria-label={t('pdf.caseSensitive')} title={t('pdf.caseSensitive')} aria-pressed={caseSensitive} disabled={!canSearch} onClick={() => { markSearchIntent(searchQuery); setCaseSensitive(value => !value); }}><CaseSensitive size={15} aria-hidden="true" /></button>
+            <button type="button" className="pdfv-mini" aria-label={t('pdf.wholeWord')} title={t('pdf.wholeWord')} aria-pressed={wholeWord} disabled={!canSearch} onClick={() => { markSearchIntent(searchQuery); setWholeWord(value => !value); }}><WholeWord size={15} aria-hidden="true" /></button>
             <span className="pdfv-count mono" role="status" aria-live="polite" data-testid="pdfv-count">{countText}</span>
-            <IconButton label={T.prevHit} onClick={() => stepHit(-1)} disabled={hits.length === 0}><ChevronUp size={15} aria-hidden="true" /></IconButton>
-            <IconButton label={T.nextHit} onClick={() => stepHit(1)} disabled={hits.length === 0}><ChevronDown size={15} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.prevHit')} onClick={() => stepHit(-1)} disabled={hits.length === 0}><ChevronUp size={15} aria-hidden="true" /></IconButton>
+            <IconButton label={t('pdf.nextHit')} onClick={() => stepHit(1)} disabled={hits.length === 0}><ChevronDown size={15} aria-hidden="true" /></IconButton>
           </div>
         </div>
       </div>
@@ -1304,8 +1292,8 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
       ) : null}
       <div className="pdfv-body">
         {sidebarOpen ? (
-          <aside className="pdfv-sidebar" aria-label={T.sidebarTabs}>
-            <div className="pdfv-tabs" role="tablist" aria-label={T.sidebarTabs} onKeyDown={onTabKey}>
+          <aside className="pdfv-sidebar" aria-label={t('pdf.sidebarTabs')}>
+            <div className="pdfv-tabs" role="tablist" aria-label={t('pdf.sidebarTabs')} onKeyDown={onTabKey}>
               {tabs.map(item => (
                 <button key={item.id} type="button" role="tab" id={`pdfv-tab-${item.id}`} data-tab={item.id} aria-selected={effectiveTab === item.id} aria-controls="pdfv-panel" tabIndex={effectiveTab === item.id ? 0 : -1} title={item.label} aria-label={item.label} className={effectiveTab === item.id ? 'pdfv-tab is-active' : 'pdfv-tab'} onClick={() => setTab(item.id)}>
                   {item.icon}{item.count ? <span className="pdfv-badge mono">{item.count > 99 ? '99+' : item.count}</span> : null}
@@ -1313,13 +1301,13 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
               ))}
             </div>
             <div className="pdfv-panel" id="pdfv-panel" role="tabpanel" aria-labelledby={`pdfv-tab-${effectiveTab}`}>
-              {effectiveTab === 'pages' ? <ThumbList handle={handle} pageCount={pageCount} boxes={boxes} version={version} rotation={rotation} current={page} dpr={dpr} request={request} onJump={thumbJump} cache={thumbCache} queue={thumbQueue} /> : null}
-              {effectiveTab === 'outline' ? <div className="pdfv-scroll"><OutlineList outline={snapshot.outline} current={page} onJump={target => jumpFromSidebar(target)} /></div> : null}
+              {effectiveTab === 'pages' ? <ThumbList handle={handle} pageCount={pageCount} boxes={boxes} version={version} rotation={rotation} current={page} dpr={dpr} request={request} onJump={thumbJump} cache={thumbCache} queue={thumbQueue} t={t} /> : null}
+              {effectiveTab === 'outline' ? <div className="pdfv-scroll"><OutlineList outline={snapshot.outline} current={page} onJump={target => jumpFromSidebar(target)} t={t} /></div> : null}
               {effectiveTab === 'bookmarks' ? (
                 <div className="pdfv-scroll">
                   <BookmarkList
                     bookmarks={bookmarks} renaming={renaming} setRenaming={setRenaming} onAdd={addBookmark} canAdd={bookmarks.length < WORKSPACE_LIMITS.bookmarks}
-                    onChange={props.onBookmarksChange}
+                    onChange={props.onBookmarksChange} t={t}
                     onJump={bookmark => jumpFromSidebar(bookmark.page, bookmark.x !== undefined && bookmark.y !== undefined ? { point: { x: bookmark.x, y: bookmark.y } } : {})}
                   />
                 </div>
@@ -1330,6 +1318,7 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
                     annotations={annotations}
                     onOpen={note => { jumpFromSidebar(note.page, { rect: { x: note.x - 24, y: note.y - 24, width: 48, height: 48 } }); setOpenNote({ id: note.id }); }}
                     onDelete={note => { if (openNote?.id === note.id) setOpenNote(null); props.onAnnotationsChange(annotations.filter(item => item.id !== note.id)); }}
+                    t={t}
                   />
                 </div>
               ) : null}
@@ -1338,7 +1327,7 @@ function ReadyViewer(props: PdfViewerProps & { handle: PdfHandle; snapshot: PdfS
         ) : null}
         <div className="pdfv-main">
           <div
-            ref={scrollerRef} className="pdfv-scroller" tabIndex={0} role="region" aria-label={T.pagesRegion} data-note-mode={noteArmed ? 'true' : undefined}
+            ref={scrollerRef} className="pdfv-scroller" tabIndex={0} role="region" aria-label={t('pdf.pagesRegion')} data-note-mode={noteArmed ? 'true' : undefined}
             onScroll={onScroll} onWheel={() => { lockRef.current = null; }} onPointerDown={() => { lockRef.current = null; }} onTouchStart={() => { lockRef.current = null; }}
           >
             <div className="pdfv-pages" style={{ width: layout.contentWidth, height: layout.total }}>{pageNodes}</div>

@@ -150,8 +150,15 @@ function fixedTokens(text: string): Set<string> {
   for (const brand of ['GENCAD', 'TRACE']) if (text.includes(brand)) tokens.add(brand);
   for (const match of text.matchAll(/(?<![\p{L}\p{N}])(?:mm|MB)(?![\p{L}\p{N}])/gu)) tokens.add(match[0]);
   for (const match of text.matchAll(/\.(?:cad|gcd)\b/g)) tokens.add(match[0]);
-  for (const match of text.matchAll(/\d+(?:\.\d+)*°?/g)) tokens.add(match[0]);
+  // Decimal commas of hu, de, fr, it, sk, pl and uk count as the English decimal point.
+  for (const match of text.replace(/(\d),(\d)/g, '$1.$2').matchAll(/\d+(?:\.\d+)*°?/g)) tokens.add(match[0]);
   return tokens;
+}
+
+/** The fixed tokens that a translation lacks. A decimal comma in the translation counts as the English point (see fixedTokens). */
+function missingFixedTokens(tokens: Iterable<string>, translation: string): string[] {
+  const normalized = translation.replace(/(\d),(\d)/g, '$1.$2');
+  return [...tokens].filter(token => !normalized.includes(token));
 }
 
 /** Latin letters each language may use besides a-z. Anything else means a leaked foreign letter. */
@@ -160,10 +167,12 @@ const LATIN_EXTRA: Readonly<Record<Language, string>> = {
   sk: 'áäčďéíĺľňóôŕšťúýž', pl: 'ąćęłńóśźż', uk: '',
 };
 const UKRAINIAN_LETTERS = 'абвгґдеєжзиіїйклмнопрстуфхцчшщьюя';
+/** Unit signs that are letters of another alphabet and stay as they are in every language: the ohm sign only (U+03A9). */
+const UNIT_SIGNS: ReadonlySet<string> = new Set(['Ω']);
 function foreignLetters(lang: Language, text: string): string[] {
   const bad: string[] = [];
   for (const char of text) {
-    if (!/\p{L}/u.test(char)) continue;
+    if (!/\p{L}/u.test(char) || UNIT_SIGNS.has(char)) continue;
     const lower = char.toLowerCase();
     if (/\p{Script=Latin}/u.test(char)) {
       if (!`abcdefghijklmnopqrstuvwxyz${LATIN_EXTRA[lang]}`.includes(lower)) bad.push(char);
@@ -207,7 +216,17 @@ const SAME_AS_ENGLISH: Readonly<Record<string, Allowance>> = {
   'settings.themeSystem': { languages: ['de'], reason: 'cognate: "System" is the German word' },
   'common.note': { languages: ['fr'], reason: 'cognate: "Note" is a French word' },
   'help.note': { languages: ['fr'], reason: 'cognate: "Note" is a French word' },
+  'schematic.netSection.scopeGlobal': { languages: ['de', 'fr'], reason: 'cognate: "global" is the German and French word' },
+  'schematic.netSection.sheetPage': { languages: ['fr', 'it'], reason: '"p." is the page abbreviation in French and Italian, the same as in English' },
   'layout.focus': { languages: ['fr', 'it'], reason: '"Focus" is used as-is in French and Italian UIs' },
+  'workspace.tabDocuments': { languages: ['fr'], reason: 'cognate: "Documents" is the French word for the workspace tab' },
+  'native.dialog.familyGenCAD': { languages: 'all', reason: 'format name: "GenCAD" is the same word in every language' },
+  'native.dialog.familyBoardview': { languages: 'all', reason: 'product and format name: "Boardview" is the same word in every language' },
+  'native.dialog.familyGerber': { languages: 'all', reason: 'format name: "Gerber" is the same word in every language' },
+  'native.dialog.kindImage': { languages: ['fr'], reason: 'cognate: "Images" is the French word for the image documents filter' },
+  'native.content.pdf': { languages: 'all', reason: 'format abbreviation: "PDF" is the same word in every language' },
+  'native.content.eagle': { languages: 'all', reason: 'product and format name: "EAGLE XML" is the same text in every language' },
+  'native.menu.zoom': { languages: ['fr', 'it'], reason: '"Zoom" is the macOS menu word in French and Italian' },
   'kind.diode': { languages: ['de', 'fr'], reason: 'cognate: "Diode" is the German and French word' },
   'kind.transistor': { languages: ['de', 'fr', 'it'], reason: 'cognate: "Transistor" is the German, French and Italian word' },
 };
@@ -220,8 +239,8 @@ const isAllowed = (table: Readonly<Record<string, Allowance>>, key: string, lang
   const entry = table[key];
   return entry !== undefined && (entry.languages === 'all' || entry.languages.includes(lang));
 };
-/** Keys whose Ukrainian value may stay Latin-only (none at present; pure templates are exempt by rule). */
-const UK_LATIN_ONLY_OK: ReadonlySet<string> = new Set();
+/** Keys whose Ukrainian value may stay Latin-only (pure templates are exempt by rule): format and product names, which the Ukrainian UI writes in Latin letters. */
+const UK_LATIN_ONLY_OK: ReadonlySet<string> = new Set(['native.dialog.familyGenCAD', 'native.dialog.familyBoardview', 'native.dialog.familyGerber', 'native.content.pdf', 'native.content.eagle']);
 
 // ---------------------------------------------------------------------------------------------
 // 1. Catalog completeness
@@ -380,9 +399,10 @@ const integerCategories = (lang: Language): string[] => {
 const pluralKeys = EN_KEYS.filter(key => isPluralObject(EN[key]));
 
 describe('plural completeness', () => {
-  it('English declares the nine plural messages the UI and parser use', () => {
+  it('English declares the ten plural messages the UI and parser use', () => {
     expect(pluralKeys.sort()).toEqual([
       'parse.warning.approximatedPads', 'parse.warning.danglingNodes', 'parse.warning.fallbackComponents', 'parse.warning.fallbackPads', 'parse.warning.unsupportedRecords',
+      'schematic.netSection.connections',
       'unit.components', 'unit.nets', 'unit.pins', 'unit.results',
     ]);
   });
@@ -657,11 +677,28 @@ describe('fixed tokens are preserved', () => {
       const tokens = new Set<string>();
       for (const form of formsOf(english)) for (const token of fixedTokens(form)) tokens.add(token);
       for (const form of formsOf(own)) {
-        const missing = [...tokens].filter(token => !form.includes(token));
+        const missing = missingFixedTokens(tokens, form);
         if (missing.length > 0) problems.push(`${key}: ${q(form)} lost ${missing.map(q).join(', ')}`);
       }
     });
     expectNoProblems(problems, `${localeFile(lang)} translated fixed tokens`);
+  });
+
+  it('a decimal comma in a translation counts as the English point: "pl. 1,8 V" keeps the token "1.8"', () => {
+    expect([...fixedTokens('e.g. 1.8 V')]).toEqual(['1.8']);
+    expect([...fixedTokens('pl. 1,8 V')]).toContain('1.8');
+    expect(missingFixedTokens(fixedTokens('e.g. 1.8 V'), 'pl. 1,8 V')).toEqual([]);
+  });
+  it('a translation that drops the number of the English text fails the fixed-token rule', () => {
+    expect(missingFixedTokens(fixedTokens('e.g. 1.8 V'), 'np. 2 V')).toEqual(['1.8']);
+    expect(missingFixedTokens(fixedTokens('e.g. 1.8 V'), 'np. 2,5 V')).toEqual(['1.8']);
+  });
+  it('a decimal comma of a translation keeps the English decimal token; a translation without the number loses it', () => {
+    const english = 'Enter the real distance in millimetres, for example 25.4.';
+    expect(fixedTokens(english).has('25.4')).toBe(true);
+    expect(missingFixedTokens(fixedTokens(english), 'Add meg a valós távolságot milliméterben, például 25,4.')).toEqual([]);
+    expect(missingFixedTokens(fixedTokens(english), 'Add meg a valós távolságot milliméterben, például 25.4.')).toEqual([]);
+    expect(missingFixedTokens(fixedTokens(english), 'Add meg a valós távolságot milliméterben.')).toEqual(['25.4']);
   });
 
   it('the millimetre unit is never localized: no catalog spells it in Cyrillic and the number formatter adds no unit text', () => {
@@ -1057,7 +1094,7 @@ describe('documentation', () => {
 // main.cjs hands its translator to store.cjs, repair-store.cjs and documents.cjs, so the keys they look up count as used too.
 const mainSource = readText('electron/main.cjs');
 const preloadSource = readText('electron/preload.cjs');
-const nativeKeySource = ['main', 'store', 'repair-store', 'documents', 'workspace', 'identity', 'formats'].map(name => readText(`electron/${name}.cjs`)).join('\n');
+const nativeKeySource = ['main', 'app-menu', 'store', 'repair-store', 'documents', 'workspace', 'identity', 'formats'].map(name => readText(`electron/${name}.cjs`)).join('\n');
 const nativeKeysUsed = [...nativeKeySource.matchAll(/\bt\(\s*'([^']+)'/g)].map(match => match[1]);
 const HUNGARIAN_LETTERS = /[áéíóöőúüűÁÉÍÓÖŐÚÜŰ]/;
 
@@ -1077,5 +1114,15 @@ describe.skipIf(nativeKeysUsed.length === 0)('native shell uses the shared catal
     expectNoProblems(lines(mainSource), 'Hungarian text left in electron/main.cjs');
     expectNoProblems(lines(preloadSource), 'Hungarian text left in electron/preload.cjs');
     expect(preloadSource, 'the sandboxed preload cannot require local modules').not.toMatch(/require\(\s*['"]\.\//);
+  });
+});
+
+describe('the number formatter with fixed decimals', () => {
+  it('number() keeps the requested decimals and the decimal comma of the comma languages (export sizes in MB)', () => {
+    expect(createFormatters('hu').number(2, 1)).toBe('2,0');
+    expect(createFormatters('hu').number(1.5, 1)).toBe('1,5');
+    expect(createFormatters('en').number(2, 1)).toBe('2.0');
+    expect(createFormatters('en').number(1.25, 1)).toBe('1.3');
+    expect(createFormatters('de').number(12.04, 1)).toBe('12,0');
   });
 });

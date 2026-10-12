@@ -1,7 +1,7 @@
 // i18n lint: user-visible English string literals in src/components/** and the `i18n: pending` markers.
 //
 // Every user-visible text of the interface comes from the catalogs (electron/locales/<language>/<namespace>.json, see
-// docs/I18N.md). The legacy exception is the Phase 1 workspace, whose components keep local English tables marked
+// docs/I18N.md). The legacy exception is the workspace, whose components keep local English tables marked
 // `// i18n: pending`; src/lib/i18n-lint.test.ts holds the explicit allow-list of those files and fails when a literal or a
 // marker is added anywhere else (or beyond the listed count). This module is the scanner. It parses with the AST parser that
 // ships with Vite (vite.parseAst, oxc), so it adds no dependency and reads TSX properly.
@@ -46,6 +46,38 @@ export function looksLikeText(value) {
   const tokens = text.split(/\s+/);
   if (tokens.every(token => /^[a-z0-9_-]+$/.test(token)) && tokens.some(token => /[-_\d]/.test(token))) return false; // CSS class names
   return /\p{L}{3,}\s+\p{L}{2,}/u.test(text) || /^\p{Lu}\p{Ll}{2,}/u.test(text);
+}
+
+/**
+ * Two exceptions to the text rules, both exact and narrow. A value that is exactly one file-format name or extension token of the
+ * format list (docs/SUPPORT.md) or of the image formats is a format label, the same in every language. A CSS selector is code.
+ * Nothing broader: a sentence or a bare English word stays a finding.
+ */
+const FORMAT_NAMES = new Set([
+  'WebP', 'PNG', 'JPEG', 'JPG', 'GIF', 'SVG', 'BMP', 'TIFF', 'PDF',
+  'CAD', 'GCD', 'GenCAD', 'BRD', 'BRD2', 'BDV', 'BVR', 'BV', 'BV2', 'ASC', 'ICT', 'FZ', 'CAE', 'XZZ', 'CST', 'TVW', 'VS2', 'SDB', 'F2B',
+  'PcbDoc', 'Gerber', 'FATF', 'FARC', 'FAZ', 'XML', 'CSV', 'TSV',
+]);
+/** Element names a selector may use bare after its first class or id (`.pdfv-page canvas`). Any other bare word is English. */
+const CSS_TAGS = new Set([
+  'a', 'article', 'audio', 'button', 'canvas', 'circle', 'dialog', 'div', 'g', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'iframe', 'img',
+  'input', 'label', 'li', 'line', 'main', 'nav', 'ol', 'option', 'p', 'path', 'polygon', 'rect', 'section', 'select', 'span', 'svg',
+  'table', 'td', 'text', 'textarea', 'th', 'tr', 'tspan', 'ul', 'use', 'video',
+]);
+const CSS_LINK = /^[.#][A-Za-z_][\w-]*$/; // one class or id: `.pdfv-page`, `#pdfv-root`
+/** A selector that starts with a class or an id, then identifiers, classes, ids, CSS_TAGS names, spaces and the combinators > + ~. */
+function isCssSelector(value) {
+  const text = value.trim();
+  if (!/^[.#]/.test(text)) return false;
+  return text.split(/\s*[>+~]\s*|\s+/).every(part => {
+    const [head, ...links] = part.split(/(?=[.#])/);
+    if (!links.every(link => CSS_LINK.test(link))) return false;
+    return /^[.#]/.test(head) ? CSS_LINK.test(head) : CSS_TAGS.has(head);
+  });
+}
+/** A literal whose value is a format name or a CSS selector is data, not interface text. */
+function isFormatOrSelector(value) {
+  return FORMAT_NAMES.has(value.trim()) || isCssSelector(value);
 }
 
 function lineStarts(code) {
@@ -100,7 +132,8 @@ function walk(node, ancestors, visit) {
 
 /**
  * User-visible string literals of a TypeScript or TSX source: JSX text, text-bearing props (`title`, `aria-label`, ...), and any
- * other string that reads like interface text. Returns [{ line, kind: 'text' | 'prop' | 'string', text }].
+ * other string that reads like interface text. A format name or a CSS selector is data, not text, and is not returned.
+ * Returns [{ line, kind: 'text' | 'prop' | 'string', text }].
  */
 export function findLiterals(code, fileName) {
   const ast = parseAst(code, { lang: fileName.endsWith('x') ? 'tsx' : 'ts' });
@@ -108,7 +141,7 @@ export function findLiterals(code, fileName) {
   const found = [];
   walk(ast, [], (node, ancestors) => {
     if (node.type === 'JSXText') {
-      if (/\p{L}{2,}/u.test(withoutTechnicalTokens(node.value))) found.push({ line: lineOf(starts, node.start), kind: 'text', text: node.value.trim() });
+      if (/\p{L}{2,}/u.test(withoutTechnicalTokens(node.value)) && !isFormatOrSelector(node.value)) found.push({ line: lineOf(starts, node.start), kind: 'text', text: node.value.trim() });
       return;
     }
     let value;
@@ -119,10 +152,10 @@ export function findLiterals(code, fileName) {
     const attribute = owningAttribute(ancestors);
     if (attribute) {
       if (!VISIBLE_ATTRIBUTES.has(attributeName(attribute))) return;
-      if (/\p{L}{2,}/u.test(withoutTechnicalTokens(value)) && !CATALOG_KEY.test(value.trim())) found.push({ line: lineOf(starts, node.start), kind: 'prop', text: value });
+      if (/\p{L}{2,}/u.test(withoutTechnicalTokens(value)) && !CATALOG_KEY.test(value.trim()) && !isFormatOrSelector(value)) found.push({ line: lineOf(starts, node.start), kind: 'prop', text: value });
       return;
     }
-    if (looksLikeText(value)) found.push({ line: lineOf(starts, node.start), kind: 'string', text: value.trim() });
+    if (looksLikeText(value) && !isFormatOrSelector(value)) found.push({ line: lineOf(starts, node.start), kind: 'string', text: value.trim() });
   });
   return found;
 }

@@ -9,6 +9,10 @@
   "update.openFailed": "Stránku na stiahnutie sa nepodarilo otvoriť.",
   "update.download": "Stiahnuť",
   "update.dismiss": "Skryť",
+  "update.askText": "Pri spustení hľadať nové verzie TRACE? Kontrola kontaktuje len stránku vydaní na GitHube. Dá sa zmeniť v Nastaveniach.",
+  "update.askYes": "Áno, kontrolovať pri spustení",
+  "update.askNo": "Nie, nechať vypnuté",
+  "update.askSkip": "Preskočiť",
 
   "network.title": "Sieť",
   "network.intro": "TRACE používa internet iba na funkcie uvedené tu. Každá požiadavka sa zaznamená do zoznamu aktivity nižšie a nikdy sa neodošle nič o doskách, poznámkach ani dokumentoch.",
@@ -46,5 +50,6 @@
   "network.bugReport": "Hlásenie chyby",
   "network.bugReportHint": "Hlásenie sa odošle iba po stlačení tlačidla Odoslať vo formulári.",
   "network.resultCancelled": "Zrušené",
-  "network.resultHttpStatus": "Neprijatý stav HTTP: {status}"
+  "network.resultHttpStatus": "Neprijatý stav HTTP: {status}",
+  "network.stateOnDemand": "Len po stlačení tlačidla Overiť platbu"
 }

@@ -1,0 +1,3 @@
+- A board, document or export that another program has open now says "The file is in use by another program. Close it there and try again." instead of a generic "could not be read" message (Windows).
+- Network locations (`\\server\share`) are still refused for boards, documents and exports. The message now says that network paths are not supported; copy the file to a local drive to open it.
+- An unusable `--user-data-dir` value stops the start with its message on the standard error and exit code 2, instead of an uncaught error.

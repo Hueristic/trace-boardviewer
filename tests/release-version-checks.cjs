@@ -114,6 +114,15 @@ test('every build job accepts the same versions: a release version with or witho
   assert.ok(patterns.every((pattern) => pattern.test(packageJson.version)), `package.json says ${packageJson.version}: a version the release jobs accept`);
 });
 
+test('the app reads every version the release jobs publish: a hyphen in the suffix (1.3.1-rc-1) is read, or the update check would silently turn off', () => {
+  const { VERSION_PATTERN } = require('../electron/net/egress.cjs');
+  const build = patternOf('build');
+  for (const version of ['1.3.1-rc-1', '1.3.1-rc.1', '1.3.1-rc-1.2', '1.3.1-beta-2', `1.3.1-${'a'.repeat(32)}`]) {
+    assert.ok(build.test(version), `${version} is published by the build job`);
+    assert.ok(VERSION_PATTERN.test(version), `${version} is read by the app`);
+  }
+});
+
 // ---- 2. the step "Validate release metadata", run for real --------------------------------------------------------------------
 
 const CASES = [
@@ -140,12 +149,12 @@ for (const job of ['mac', 'linux']) {
       fs.writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ name: 'x', version: entry.version }));
       const output = path.join(folder, 'github-output');
       fs.writeFileSync(output, '');
-      const env = { ...withNodeOnPath(), ...JOB_FACTS[job].env, TRACE_REF: entry.ref, TRACE_TAG: entry.tag, TRACE_EVENT_NAME: 'workflow_dispatch', GITHUB_OUTPUT: forward(output) };
+      const env = { ...withNodeOnPath(), ...JOB_FACTS[job].env, TRACE_REF: entry.ref, TRACE_TAG: entry.tag, GITHUB_OUTPUT: forward(output) };
       const result = runBash(folder, step.run, env);
       const label = `${entry.version} on ${entry.ref}`;
       if (entry.ok) {
         assert.equal(result.status, 0, `${label}: ${result.stderr}`);
-        assert.deepEqual(readOutputs(output), { version: entry.version, artifact_name: JOB_FACTS[job].artifact(entry.version), native_acceptance: 'true' }, label);
+        assert.deepEqual(readOutputs(output), { version: entry.version, artifact_name: JOB_FACTS[job].artifact(entry.version) }, label);
       } else {
         assert.notEqual(result.status, 0, `${label} must fail`);
         assert.match(result.stderr, entry.message, label);
@@ -162,62 +171,15 @@ test('build job, step "Validate release metadata" (PowerShell): the same rules f
     fs.writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ name: 'x', version: entry.version }));
     const output = path.join(folder, 'github-output');
     fs.writeFileSync(output, '');
-    const result = runPowerShell(folder, step.run, { ...withNodeOnPath(), TRACE_REF: entry.ref, TRACE_TAG: entry.tag, TRACE_EVENT_NAME: 'workflow_dispatch', GITHUB_OUTPUT: output });
+    const result = runPowerShell(folder, step.run, { ...withNodeOnPath(), TRACE_REF: entry.ref, TRACE_TAG: entry.tag, GITHUB_OUTPUT: output });
     const label = `${entry.version} on ${entry.ref}`;
     if (entry.ok) {
       assert.equal(result.status, 0, `${label}: ${result.stderr}`);
-      assert.deepEqual(readOutputs(output), { version: entry.version, artifact_name: `TRACE-Boardviewer-${entry.version}-windows-x64`, native_acceptance: 'true' }, label);
+      assert.deepEqual(readOutputs(output), { version: entry.version, artifact_name: `TRACE-Boardviewer-${entry.version}-windows-x64` }, label);
     } else {
       assert.notEqual(result.status, 0, `${label} must fail`);
       assert.match(`${result.stdout}${result.stderr}`, entry.message, label);
       assert.deepEqual(readOutputs(output), {}, `${label}: nothing is handed to the later steps`);
-    }
-  }
-});
-
-test('release metadata defers only the 1.3.1 automatic push and writes the private step summary', { skip: bashSkip || powershellSkip || false }, (t) => {
-  const scenarios = [
-    { version: '1.3.1', event: 'push', acceptance: 'false', summary: true },
-    { version: '1.3.1', event: 'workflow_dispatch', acceptance: 'true', summary: false },
-    { version: '1.3.2', event: 'push', acceptance: 'true', summary: false },
-  ];
-  for (const job of ['build', 'mac', 'linux']) {
-    const step = stepOf(job, METADATA_STEP);
-    for (const scenario of scenarios) {
-      const folder = temporaryFolder(t);
-      fs.writeFileSync(path.join(folder, 'package.json'), JSON.stringify({ name: 'x', version: scenario.version }));
-      const output = path.join(folder, 'github-output');
-      const summary = path.join(folder, 'github-step-summary');
-      fs.writeFileSync(output, '');
-      fs.writeFileSync(summary, '');
-      const env = {
-        ...withNodeOnPath(),
-        ...(JOB_FACTS[job]?.env || {}),
-        TRACE_REF: 'refs/heads/main',
-        TRACE_TAG: 'main',
-        TRACE_EVENT_NAME: scenario.event,
-        GITHUB_OUTPUT: job === 'build' ? output : forward(output),
-        GITHUB_STEP_SUMMARY: job === 'build' ? summary : forward(summary),
-      };
-      const result = job === 'build'
-        ? runPowerShell(folder, step.run, env)
-        : runBash(folder, step.run, env);
-      const label = `${job}: ${scenario.version} ${scenario.event}`;
-      assert.equal(result.status, 0, `${label}: ${result.stderr}`);
-      assert.deepEqual(readOutputs(output), {
-        version: scenario.version,
-        artifact_name: job === 'build'
-          ? `TRACE-Boardviewer-${scenario.version}-windows-x64`
-          : JOB_FACTS[job].artifact(scenario.version),
-        native_acceptance: scenario.acceptance,
-      }, label);
-      const summaryText = fs.readFileSync(summary, 'utf8');
-      if (scenario.summary) {
-        assert.match(summaryText, /Native runtime acceptance deferred/);
-        assert.match(summaryText, /scheduled after publication/);
-      } else {
-        assert.equal(summaryText, '', `${label}: no deferral note for accepted native validation`);
-      }
     }
   }
 });
@@ -345,7 +307,9 @@ function draftFolder(t, version) {
   }
   const env = (overrides = {}) => ({
     ...withNodeOnPath([bin]), GH_TOKEN: 'not-a-token', GH_REPO: 'example/example',
-    TRACE_TAG: `v${version}`, TRACE_VERSION: version, TRACE_MAC_VERSION: version, TRACE_LINUX_VERSION: version, ...overrides,
+    // The macOS job succeeded and its provenance check passed (the workflow sets TRACE_MAC_ATTACHED after that check).
+    TRACE_TAG: `v${version}`, TRACE_VERSION: version, TRACE_MAC_VERSION: version, TRACE_LINUX_VERSION: version,
+    TRACE_MAC_RESULT: 'success', TRACE_MAC_ATTACHED: 'true', ...overrides,
   });
   const ghArguments = () => (fs.existsSync(path.join(folder, 'gh-arguments.json')) ? JSON.parse(fs.readFileSync(path.join(folder, 'gh-arguments.json'), 'utf8')) : null);
   return { folder, assets, env, ghArguments, notes: () => fs.readFileSync(path.join(folder, 'release-notes.md'), 'utf8').replace(/^﻿/, '') };
@@ -369,16 +333,28 @@ test('draft release (PowerShell): a suffixed version becomes a prerelease draft 
   for (const name of Object.values(test_.assets)) assert.ok(notes.includes(name), `the notes name ${name}`);
 });
 
-test('draft release (PowerShell): a stable version is a normal draft with the notes it always had', { skip: powershellSkip }, (t) => {
+test('draft release (PowerShell): a stable version is a normal draft with its notes file after the introduction', { skip: powershellSkip }, (t) => {
   const draft = stepOf('draft-release', 'Create draft GitHub release');
   const stable = draftFolder(t, STABLE);
+  fs.mkdirSync(path.join(stable.folder, 'release-notes'), { recursive: true });
+  fs.writeFileSync(path.join(stable.folder, 'release-notes', `${STABLE}.md`), `# TRACE Boardviewer ${STABLE}\n\n## What's new\n\n- A stable release note line.\n`);
   const result = runPowerShell(stable.folder, draft.run, stable.env());
   assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
   const args = stable.ghArguments();
   assert.deepEqual(args.slice(args.indexOf('--draft')), ['--draft', '--verify-tag', '--title', `TRACE Boardviewer ${STABLE}`, '--notes-file', 'release-notes.md']);
   const notes = stable.notes();
   assert.ok(notes.startsWith(`**TRACE Boardviewer ${STABLE}** is a free, open-source (MIT) boardviewer`), 'no notice in front of the notes');
+  assert.ok(notes.includes("## What's new\n\n- A stable release note line."), 'the notes file is inserted, without its own title');
   assert.doesNotMatch(notes, /prerelease/i);
+});
+
+test('draft release (PowerShell): a stable version without its release notes file creates nothing', { skip: powershellSkip }, (t) => {
+  const draft = stepOf('draft-release', 'Create draft GitHub release');
+  const missing = draftFolder(t, STABLE);
+  const result = runPowerShell(missing.folder, draft.run, missing.env());
+  assert.notEqual(result.status, 0);
+  assert.match(`${result.stdout}${result.stderr}`, /Release notes are missing for the stable version/);
+  assert.equal(missing.ghArguments(), null, 'gh was not called');
 });
 
 test('draft release (PowerShell): a tag that is not the version, or builds of different versions, create nothing', { skip: powershellSkip }, (t) => {
@@ -393,6 +369,22 @@ test('draft release (PowerShell): a tag that is not the version, or builds of di
     assert.notEqual(result.status, 0);
     assert.match(`${result.stdout}${result.stderr}`, message);
     assert.equal(mismatch.ghArguments(), null, 'gh was not called');
+  }
+});
+
+test('draft release (PowerShell): a macOS build that did not pass its provenance check, or whose job failed, stays out and the notes say so', { skip: powershellSkip }, (t) => {
+  const draft = stepOf('draft-release', 'Create draft GitHub release');
+  for (const overrides of [{ TRACE_MAC_ATTACHED: 'false' }, { TRACE_MAC_RESULT: 'failure', TRACE_MAC_ATTACHED: '' }]) {
+    const stand = draftFolder(t, TEST);
+    // A different macOS version is not compared when the macOS build is not attached: the build is simply left out.
+    const result = runPowerShell(stand.folder, draft.run, stand.env({ ...overrides, TRACE_MAC_VERSION: STABLE }));
+    assert.equal(result.status, 0, `${result.stdout}${result.stderr}`);
+    const args = stand.ghArguments();
+    const files = args.slice(3, args.indexOf('--draft')).map((argument) => path.basename(argument));
+    const windowsAndLinux = [stand.assets.exe, stand.assets.appimage, stand.assets.deb].flatMap((name) => [name, `${name}.sha256`]);
+    assert.deepEqual(files.sort(), windowsAndLinux.sort(), 'the Windows and Linux builds only');
+    assert.match(stand.notes(), /macOS: not attached to this draft/, 'the notes say why the macOS build is missing');
+    assert.ok(!stand.notes().includes(stand.assets.zip), 'the notes do not name a macOS download that is not in the draft');
   }
 });
 

@@ -2,14 +2,39 @@ import { createRequire } from 'node:module';
 import { zipSync } from 'fflate';
 import { describe, expect, it } from 'vitest';
 import { defineBoardAdapter, type BoardAdapter } from '../formats/adapter';
-import { BoardFormatError } from '../formats/common';
+import { makeAllegro } from '../formats/allegro-fixture';
+import { BoardFormatError, MAX_IMPORT_BYTES } from '../formats/common';
 import { BOARD_ADAPTERS, CONTAINER_ADAPTERS } from '../formats/registry';
 import { ALL_BUILDERS, asc, fzEncrypted, fzEncryptedWithoutKey, gencad, kicad, xzz, type BuiltFile } from './canary-kit';
-import { collectDiagnostic, projectReport, type DiagnosticEnv } from './collect';
+import { baseName, collectDiagnostic, projectReport, type DiagnosticEnv } from './collect';
+import { extensionClass } from './input-facts';
 import { FORMAT_IDS, reportText, type DiagnosticReport } from './report';
 
 const nativeRequire = createRequire(import.meta.url);
 const diagnostics = nativeRequire('../../../electron/diagnostics.cjs') as { validateReport(value: unknown, options?: { reviewed?: boolean }): DiagnosticReport; serializeReport(report: DiagnosticReport): string };
+
+describe('baseName of a diagnostic input, by platform', () => {
+  it('on win32 both separators split the directories', () => {
+    expect(baseName('x\\Pins.ASC', 'win32')).toBe('pins.asc');
+    expect(baseName('dir/Pins.ASC', 'win32')).toBe('pins.asc');
+  });
+
+  it('elsewhere only the slash splits the directories: a backslash is part of the file name', () => {
+    expect(baseName('x\\Pins.ASC', 'linux')).toBe('x\\pins.asc');
+    expect(baseName('x\\Pins.ASC', 'darwin')).toBe('x\\pins.asc');
+    expect(baseName('dir/Pins.ASC', 'darwin')).toBe('pins.asc');
+  });
+});
+
+describe('the extension class of a diagnostic input, by platform', () => {
+  it('on win32 the name after the last separator is the file name, which has no extension here', () => {
+    expect(extensionClass('dir.v1\\board', 'win32')).toBe('none');
+  });
+
+  it('elsewhere a backslash is part of the name, so the extension runs to the end of it and is not a known one', () => {
+    expect(extensionClass('dir.v1\\board', 'linux')).toBe('other');
+  });
+});
 
 const ENV: DiagnosticEnv = { os: 'win32', appVersion: '1.3.0' };
 export const collect = (file: BuiltFile, env: DiagnosticEnv = ENV): Promise<DiagnosticReport> => collectDiagnostic({
@@ -210,6 +235,13 @@ describe('failures and unrecognized files', () => {
     await expect(collectDiagnostic({ name: 'a.cad', data: new Uint8Array(0) }, ENV)).resolves.toBeTruthy();
     await expect(collectDiagnostic({ name: 'a.cad', data: 'text' as unknown as Uint8Array }, ENV)).rejects.toThrow(RangeError);
   });
+
+  it('applies the size limit of the input format: a native Allegro database may exceed the general limit, any other input may not', async () => {
+    const native = new Uint8Array(MAX_IMPORT_BYTES + 1);
+    native.set(makeAllegro().data);
+    await expect(collectDiagnostic({ name: 'native.brd', data: native }, ENV)).resolves.toBeTruthy();
+    await expect(collectDiagnostic({ name: 'other.brd', data: new Uint8Array(MAX_IMPORT_BYTES + 1) }, ENV)).rejects.toThrow('at most 64 MiB');
+  }, 60_000);
 
   it('stops at once when it is cancelled', async () => {
     const controller = new AbortController();

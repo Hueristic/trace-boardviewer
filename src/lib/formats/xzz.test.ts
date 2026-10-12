@@ -3,6 +3,7 @@ import { BoardFormatError } from './common';
 import { createDes, xzzKeyParityValid } from './crypto';
 import { expectScaling } from '../../test-support/timing';
 import { parseXzz } from './xzz';
+import { formatIssue } from '../i18n';
 
 const encode = (text: string) => [...new TextEncoder().encode(text)];
 const u32 = (value: number) => [value & 255, value >>> 8 & 255, value >>> 16 & 255, value >>> 24 & 255];
@@ -107,6 +108,17 @@ describe('parseXzz', () => {
     expect(missing).toMatchObject({ code: 'KEY_REQUIRED', format: 'XZZPCB', keyKind: 'xzz' });
     expect(error(() => parse(encrypted, '')).code).toBe('KEY_REQUIRED');
     expect(parse(build(), 'not-a-key')!.pins).toHaveLength(5); // plaintext records never consult the key
+  });
+
+  it('attaches a catalog issue to the key refusals; the key-required refusal carries parse.error.xzzKeyRequired', () => {
+    const encrypted = build({ encrypt: true });
+    const missing = error(() => parse(encrypted));
+    expect(missing.message).toBe('XZZ PCB: component records are DES encrypted and require the 16-hex-digit XZZ key.');
+    expect(missing.issue).toEqual({ key: 'parse.error.xzzKeyRequired' });
+    expect(formatIssue('en', missing.issue!)).toBe(missing.message);
+    expect(error(() => parse(encrypted, '0123')).issue).toEqual({ key: 'parse.error.xzzKeyFormat' });
+    expect(error(() => parse(encrypted, '0000000000000000')).issue).toEqual({ key: 'parse.error.xzzKeyParity' });
+    expect(error(() => parse(encrypted, OTHER_KEY)).issue).toEqual({ key: 'parse.error.xzzKeyDecrypt' });
   });
 
   it('rejects wrong or malformed keys cleanly', () => {

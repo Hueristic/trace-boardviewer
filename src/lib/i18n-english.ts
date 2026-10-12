@@ -12,7 +12,9 @@ import dialogs from '../../electron/locales/en/dialogs.json';
 import diagnostic from '../../electron/locales/en/diagnostic.json';
 import documents from '../../electron/locales/en/documents.json';
 import formats from '../../electron/locales/en/formats.json';
+import images from '../../electron/locales/en/images.json';
 import kinds from '../../electron/locales/en/kinds.json';
+import library from '../../electron/locales/en/library.json';
 import native from '../../electron/locales/en/native.json';
 import network from '../../electron/locales/en/network.json';
 import notes from '../../electron/locales/en/notes.json';
@@ -23,6 +25,6 @@ import support from '../../electron/locales/en/support.json';
 import workspace from '../../electron/locales/en/workspace.json';
 
 export const en = {
-  ...app, ...board, ...common, ...dialogs, ...diagnostic, ...documents, ...formats, ...kinds, ...native,
+  ...app, ...board, ...common, ...dialogs, ...diagnostic, ...documents, ...formats, ...images, ...kinds, ...library, ...native,
   ...network, ...notes, ...pdf, ...schematic, ...settings, ...support, ...workspace,
 };

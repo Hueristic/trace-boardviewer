@@ -168,6 +168,23 @@ describe('continuous layout and virtualization', () => {
     expect(currentPageIndex(layout, 3 * 810 + 20, 600)).toBe(3);
   });
 
+  it('the top of a document is its first page, even when the reference line already falls on page 2', () => {
+    // Two synthetic 420x300 pages with gap 20 and padding 20: page 1 spans 20-320, page 2 spans 340-640, total 660.
+    const twoPages = computeLayout([{ width: 420, height: 300 }, { width: 420, height: 300 }], { zoom: 1, gap: 20, padding: 20, viewportWidth: 900 });
+    expect(twoPages.total).toBe(660);
+    expect(twoPages.tops[1]).toBe(340);
+    // The document fits a 950 px viewport, so there is no scroll range; the 40% line (380) is inside page 2, yet the reader is on page 1.
+    expect(currentPageIndex(twoPages, 0, 950)).toBe(0);
+    expect(currentPageIndex(twoPages, 0, 200)).toBe(0);
+    // A short first page at the top of a long document: the 40% line (240 of 600) reaches page 2 (tops 130), the reader is still on page 1.
+    const shortFirst = computeLayout([{ width: 600, height: 100 }, ...Array.from({ length: 9 }, () => ({ width: 600, height: 800 }))], options);
+    expect(shortFirst.tops[1]).toBe(130);
+    expect(currentPageIndex(shortFirst, 0, 600)).toBe(0);
+    expect(currentPageIndex(shortFirst, 1, 600)).toBe(1);
+    // Scrolling to the bottom of the two-page document (total 660, viewport 300, scroll 360) still reports its last page.
+    expect(currentPageIndex(twoPages, 360, 300)).toBe(1);
+  });
+
   it('anchors survive a zoom change and a page-size discovery above the viewport', () => {
     const scrollTop = 2500, scrollLeft = 0;
     const anchor = captureAnchor(layout, scrollTop, scrollLeft, 400, 300)!;

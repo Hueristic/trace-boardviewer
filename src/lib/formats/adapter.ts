@@ -12,6 +12,10 @@
 import type { Board } from '../types';
 import { MAX_IMPORT_BYTES, type ParseInput } from './common';
 import type { StructureHook } from './structure-hook';
+import type { SourcePlatform } from './source-name';
+import type { ParseIssue } from '../i18n';
+
+export { sourceBaseName, sourceSegments, type SourcePlatform } from './source-name';
 
 export const ADAPTER_API_VERSION = 2;
 /** The most bytes a sniff ever sees: the head of the (UTF-8 normalized) file. */
@@ -73,13 +77,14 @@ export interface FormatCapability {
 }
 
 /**
- * Real-file evidence recorded by a validation lane, kept next to the adapter it describes. `status`/`validatedWith` replace
+ * Real-file evidence recorded by a validation run, kept next to the adapter it describes. `status`/`validatedWith` replace
  * the table cells, `rewrites` replace a substring of exactly one stale note (`from` must occur once), `extra` is appended.
  */
 export interface RealFileEvidence { status: string; validatedWith: string; rewrites: ReadonlyArray<{ from: string; to: string }>; extra: readonly string[] }
 
 /** What a sniff sees: at most SNIFF_BYTES of the head, the file name (a path or a bare name) and the full size. */
-export interface SniffInput { readonly head: Uint8Array; readonly name: string; readonly size: number }
+/** `platform`: the platform a direct file's name came from (see source-name.ts); absent for an archive entry or when unknown. */
+export interface SniffInput { readonly head: Uint8Array; readonly name: string; readonly size: number; readonly platform?: SourcePlatform }
 export interface SniffResult {
   /** 0..100, see CERTAIN / LIKELY / POSSIBLE. */
   readonly confidence: number;
@@ -171,6 +176,12 @@ export interface BoardAdapter {
   /** Bounded and total: looks only at `input.head`, the name and the size; never throws, never allocates in proportion to the file. */
   sniff(input: SniffInput): SniffResult;
   parse(input: ParseInput, context: ParseContext): Board | null | Promise<Board | null>;
+  /**
+   * Optional: the precise reason this reader declined the whole input (its parse returned null), as a catalog issue plus an English
+   * text for developers. The dispatcher asks only after every reader has declined, and uses the answer to word the final refusal; it
+   * never changes which files are accepted. A reader without one keeps the generic refusal.
+   */
+  declineReason?(input: ParseInput): { message: string; issue: ParseIssue } | undefined;
 }
 
 export interface ContainerCapability {

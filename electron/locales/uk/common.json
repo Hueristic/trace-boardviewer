@@ -5,6 +5,7 @@
   "common.delete": "Видалити",
   "common.note": "Нотатка",
   "common.skip": "Пропустити",
+  "common.cancel": "Скасувати",
 
   "unit.components": {
     "one": "{count} компонент",

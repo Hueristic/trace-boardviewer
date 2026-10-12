@@ -71,8 +71,9 @@ function companionNames(filename, availableNames) {
   return [...(COMPANIONS.get(base) ?? [])];
 }
 
-// i18n: pending — English family names for the optional secondary filters of the open dialog (generated with the rest of
-// the manifest from the format registry; every listed extension must be one of the supported ones).
+// Family names of the optional secondary filters of the open dialog. They are the English ids of the generated manifest; the
+// caller passes the label function that shows them in the chosen language (see dialogFilters). Every listed extension must be
+// one of the supported ones.
 const familyTable = manifest.families ?? [];
 if (!Array.isArray(familyTable)) throw new TypeError('formats.json: "families" must be an array.');
 const FAMILIES = Object.freeze(familyTable.map((family) => {
@@ -85,13 +86,14 @@ const FAMILIES = Object.freeze(familyTable.map((family) => {
   return Object.freeze({ name: family.name, extensions: Object.freeze([...family.extensions]) });
 }));
 
-/** Supported extensions, then families, plus a localized all-files choice for fixed extensionless companion roles. */
-function dialogFilters(everyFormatName, allFilesName) {
+/** Supported extensions, then families, plus a localized all-files choice for fixed extensionless companion roles. The family labels
+ *  come from familyLabel (the caller's catalogue lookup); without one the English ids are used. */
+function dialogFilters(everyFormatName, allFilesName, familyLabel = (name) => name) {
   const bare = (extensions) => extensions.map((extension) => extension.slice(1));
   return [
     { name: everyFormatName, extensions: bare(SUPPORTED_EXTENSIONS) },
     ...FAMILIES
-      .map(({ name, extensions }) => ({ name, extensions: bare(extensions.filter((extension) => SUPPORTED_EXTENSIONS.includes(extension))) }))
+      .map(({ name, extensions }) => ({ name: familyLabel(name), extensions: bare(extensions.filter((extension) => SUPPORTED_EXTENSIONS.includes(extension))) }))
       .filter((filter) => filter.extensions.length),
     ...(EXTENSIONLESS_COMPANIONS.size && typeof allFilesName === 'string' && allFilesName
       ? [{ name: allFilesName, extensions: ['*'] }] : []),

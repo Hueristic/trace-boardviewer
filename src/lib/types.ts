@@ -3,6 +3,8 @@ import type { Language, ParseIssue } from './i18n';
 import type { DocumentKind, DocumentLocateRequest, DocumentLocateResult, DocumentPayload, WorkspaceExportRequest, WorkspaceExportResult, WorkspaceManifest } from './documents';
 import type { AppendResult, FamilyListEntry, RawFamilySnapshot, ReadingsExportRequest, ReadingsExportResult, ReadingsImportFile } from './readings/model';
 import type { RepairEvent } from './readings/schema';
+import type { Correction, CorrectionDocument } from './library/devices/corrections';
+import type { StepName } from './library/devices/catalogue';
 
 export type { Language, ParseIssue };
 export type BoardSide = 'top' | 'bottom' | 'both';
@@ -55,6 +57,46 @@ export interface Board {
   warnings: ParseIssue[];
   /** Present only when shortened BDV or ASC component/pin headers can change the earlier reader's positional component/pin ids. */
   legacyPositionalNotesUnsafe?: true;
+  /** Copper and drill data (ODB++ only today). Absent when the file has none; drawn by the board view (board-copper.ts). Same mm frame as components and pins. */
+  copper?: BoardCopper;
+}
+/** Copper pads, track lines and arcs of the top and bottom copper layers, and drilled holes. Pours and text are not read. */
+export interface BoardCopper {
+  pads: CopperPad[];
+  lines: CopperLine[];
+  arcs: CopperArc[];
+  holes: DrillHole[];
+}
+export type CopperSide = 'top' | 'bottom';
+export interface CopperPad {
+  side: CopperSide;
+  x: number;
+  y: number;
+  shape: 'round' | 'square' | 'rect' | 'oval';
+  /** Size along the pad's own axes before rotation, mm (a round pad has equal width and height: its diameter). */
+  width: number;
+  height: number;
+  /**
+   * Counter-clockwise degrees in canonical Y-up coordinates (the pin convention). The file's angle is clockwise and its mirror is applied
+   * after the turn; the parser folds both in (odbpp-copper.ts traceAngle) and does not rotate or mirror the shape itself.
+   */
+  rotation: number;
+  /** The file marks the pad as mirrored (ODB++ orientation code 9). */
+  mirrored: boolean;
+}
+export interface CopperLine { side: CopperSide; x1: number; y1: number; x2: number; y2: number; width: number }
+export interface CopperArc { side: CopperSide; x1: number; y1: number; x2: number; y2: number; cx: number; cy: number; width: number; clockwise: boolean }
+export interface DrillHole {
+  x: number;
+  y: number;
+  shape: 'round' | 'oval';
+  /** Diameter (round) or slot width and length (oval), mm. */
+  width: number;
+  height: number;
+  /** Counter-clockwise degrees, as CopperPad.rotation (slots only; a round hole does not turn). */
+  rotation: number;
+  /** From the tools file: plated, non-plated, via (a plated via), or unknown when the tools of this size disagree or none matches. */
+  plating: 'plated' | 'non-plated' | 'via' | 'unknown';
 }
 /** Original bytes of the chosen file; the parser (never the transport) decides the format. */
 export interface FilePayload {
@@ -113,8 +155,10 @@ export interface AppSettings {
   motion: boolean;
   showLabels: boolean;
   showConnections: boolean;
-  /** Ask GitHub once per launch whether a newer release exists (a notification only, nothing is installed). Profiles saved before this setting existed get true. */
+  /** Ask GitHub once per launch whether a newer release exists (a notification only, nothing is installed). Off by default; profiles saved before this setting existed get false. */
   updateCheck: boolean;
+  /** The first-start question about updateCheck has been answered or skipped. Asked once, never again. */
+  updateCheckAsked: boolean;
 }
 /** What the main process reports about the latest release (see electron/updates.cjs); no tag, no URL, no server text. */
 export type UpdateCheckResult = { status: 'available'; version: string } | { status: 'current' } | { status: 'unavailable' };
@@ -126,6 +170,9 @@ export interface NetworkActivityEntry {
   outcome: 'pending' | 'ok' | 'refused' | 'error'; status: number | null; bytes: number; durationMs: number | null; error: string | null;
 }
 export interface NetworkActivityReport { features: NetworkFeature[]; entries: NetworkActivityEntry[]; dropped: number; limit: number }
+
+/** The Linux "Do not ask again" answer: `applicable` is false where TRACE is never asked (Windows, macOS); `saved` is the stored answer. */
+export interface NoSandboxConsent { applicable: boolean; saved: boolean }
 export interface CanvasStatus {
   zoom: number;
   x: number;
@@ -150,11 +197,15 @@ export interface DiagnosticFilePayload { name: string; data: Uint8Array; compani
 export interface SupportStatus { status: 'inactive' | 'verified' | 'pending' | 'unavailable'; expiresAt: number | null; available: boolean }
 
 export interface TraceDesktop {
+  /** True only in a packaged QA build started with the device-database QA switch (electron/device-switch.cjs); false otherwise. */
+  readonly qaDeviceDatabase?: boolean;
   openBoard(): Promise<FilePayload | null>;
   readBoard(path: string): Promise<FilePayload>;
   acceptBoard(path: string, key: string): Promise<void>;
   initialBoard(): Promise<FilePayload | null>;
   recentBoards(): Promise<RecentFile[]>;
+  /** The language saved in the settings, known before the first paint (null when none is saved). The renderer starts in it (TB-041). */
+  readonly initialLanguage?: string | null;
   getSettings(): Promise<AppSettings>;
   saveSettings(settings: AppSettings): Promise<void>;
   getNotes(boardKey: string): Promise<BoardNote[]>;
@@ -164,8 +215,15 @@ export interface TraceDesktop {
   close(): void;
   isMaximized(): Promise<boolean>;
   onMaximized(listener: (value: boolean) => void): () => void;
+  /** The settings file was locked and is readable again: the saved settings are read again (main.cjs rereadLockedConfig). */
+  onSettingsChanged?(listener: () => void): () => void;
+  /** The settings file state (main.cjs configState; the notice is ConfigNotice). */
+  getConfigState?(): Promise<{ state: ConfigState }>;
+  onConfigStateChanged?(listener: (state: ConfigState) => void): () => void;
   droppedFilePath(file: File): string;
   onOpenBoard(listener: (payload: FilePayload) => void): () => void;
+  /** An external open that the main process could not read (its message, already in the application's language). Optional: an older preload lacks it. */
+  onOpenFailed?(listener: (message: string) => void): () => void;
   /** Main process asks the renderer to write its pending (debounced) state before the window closes or the app quits; the bridge answers when every listener settled. Optional: an older preload or the browser build lacks it. */
   onFlushRequest?(listener: () => Promise<void> | void): () => void;
   /** Persisted workspace manifest of one board (null when none was saved); validated natively, bounded, never attached to another board. */
@@ -200,8 +258,11 @@ export interface TraceDesktop {
   openSupportLink?(id: 'stripe' | 'kofi' | 'support'): Promise<void>;
   getSupportStatus?(): Promise<SupportStatus>;
   prepareSupport?(): Promise<SupportStatus & { code: string }>;
-  checkSupport?(): Promise<SupportStatus>;
-  /** Update notification: one request from the main process to the GitHub releases API (never from the renderer). Never rejects for network reasons: any failure is { status: 'unavailable' }. Optional: an older preload lacks it. */
+  /** Support Verify button only: `userAction: true` marks the explicit press. Without it the main process makes no receipt request while the support opt-in is off. */
+  checkSupport?(request?: { userAction?: boolean }): Promise<SupportStatus>;
+  /** Startup update check: main enforces the saved updateCheck setting. Never rejects for network reasons. Optional: an older preload lacks it. */
+  checkForStartupUpdates?(): Promise<UpdateCheckResult>;
+  /** Manual Settings update check: one request from the main process to the fixed releases API, even when automatic checks are off. Never rejects for network reasons. Optional: an older preload lacks it. */
   checkForUpdates?(): Promise<UpdateCheckResult>;
   /** Opens the release page of the version the last check reported, in the system browser. Takes no argument: the main process remembers the validated tag, the renderer never sends a URL. Rejects when no update was found. Optional: an older preload lacks it. */
   openUpdatePage?(): Promise<void>;
@@ -209,6 +270,10 @@ export interface TraceDesktop {
   getNetworkActivity?(): Promise<NetworkActivityReport>;
   /** Empties that log. Takes no argument; the log is read-only otherwise. Optional: an older preload lacks it. */
   clearNetworkActivity?(): Promise<void>;
+  /** Linux "Do not ask again" (Settings): whether this platform is asked at all, and whether the answer is stored. Optional: an older preload lacks it. */
+  getNoSandboxConsent?(): Promise<NoSandboxConsent>;
+  /** Takes the stored answer back: the question comes again at the next start without the sandbox. Rejects when the setting cannot be saved. */
+  revokeNoSandboxConsent?(): Promise<NoSandboxConsent>;
   /** Readings (src/lib/readings, docs/READINGS_FORMAT.md): every board family of the repair store, without its readings. Optional: an older preload lacks it. */
   listReadingFamilies?(): Promise<FamilyListEntry[]>;
   /** One family (null when it does not exist); the readings come as the text of one JSON array, see parseFamilySnapshot. */
@@ -219,7 +284,114 @@ export interface TraceDesktop {
   importReadings?(): Promise<ReadingsImportFile | null>;
   /** Native save dialog, then writes the pack (validated natively) as a pack file or CSV. Cancel resolves null. */
   exportReadings?(request: ReadingsExportRequest): Promise<ReadingsExportResult | null>;
+  /** Library device catalogue: native folder chooser (main window). Resolves the opaque root id and the folder's own name, or null when cancelled. The path never reaches the renderer. Optional: an older preload lacks it. */
+  libraryPickRoot?(): Promise<{ rootId: string; label: string } | null>;
+  /** The persisted root list: opaque id, the folder's own name, whether its path is reachable now (measured), the network flag ('unknown': not measured) and the last scan's coverage ('unknown' when not scanned). */
+  libraryListRoots?(): Promise<LibraryRootList>;
+  /** Removes a root from the list. The files are never touched; corrections that name it stay. */
+  libraryRemoveRoot?(request: { rootId: string }): Promise<{ removed: true }>;
+  /** Read-only scan of recorded roots. Optional skipFolders are folder ids from libraryListFolders. Resolves counts only; rejects with a LIBRARY_* code (LIBRARY_CANCELLED when cancelled). */
+  libraryScan?(request: { rootIds: string[]; steps?: Partial<Record<StepName, boolean>>; skipFolders?: string[]; scanId?: string }): Promise<LibraryScanSummary>;
+  /** Aborts the running scan. Resolves whether a scan was running. */
+  libraryCancelScan?(): Promise<{ cancelled: boolean }>;
+  /** Switches one step of the running scan off before it starts. scanId is the id the scan was started with (the renderer may choose it). The result of that scan is incomplete. */
+  libraryScanSkipStep?(request: { scanId: string; step: StepName }): Promise<{ scanId: string; step: StepName; accepted: true; complete: false }>;
+  /** One level of the folder tree of a scanned root (parentId omitted: the top level). Paged by cursor. Counts and opaque ids only. */
+  libraryListFolders?(request: { rootId: string; parentId?: string; cursor?: string; limit?: number }): Promise<LibraryFolderPage>;
+  /** The boards that have files under a scanned root. Paged by cursor. Counts and opaque ids only. */
+  libraryListBoards?(request: { rootId: string; cursor?: string; limit?: number }): Promise<LibraryBoardPage>;
+  /** One board: its boardview and BIOS presence ('confirmed' | 'candidate' | 'none' | 'unknown'), board code and revision, and its files (opaque ids, roles, states). */
+  libraryBoardDetail?(request: { boardId: string }): Promise<LibraryBoardDetail>;
+  /** The durable corrections (userData). status is the store's verdict ('quarantined' after a damaged file was moved aside, with no file name); document is null when the file cannot be used. */
+  libraryLoadCorrections?(): Promise<{ status: string; document: LibraryCorrectionDocument | null; dropped: number; rejections: LibraryRejection[] }>;
+  /** Saves the corrections of this platform atomically. 'refused' writes nothing and names each refused entry; rejects with a LIBRARY_* code. */
+  librarySaveCorrections?(document: LibraryCorrectionDocument): Promise<{ status: 'saved'; bytes: number; quarantine?: string; quarantinedEntries?: number } | { status: 'refused'; rejections: LibraryRejection[] }>;
 }
+/** A measured value, or 'unknown' when the scan did not measure it. Never false by default. */
+export type LibraryMeasure = number | 'unknown';
+export type LibraryPresence = 'confirmed' | 'candidate' | 'none' | 'unknown';
+export interface LibraryRootList {
+  roots: Array<{ rootId: string; label: string; online: boolean; network: 'unknown'; scanned: boolean; complete: boolean | 'unknown' }>;
+  total: number;
+}
+export interface LibraryScanSummary {
+  steps: Record<StepName, 'ran' | 'skipped'>;
+  complete: boolean;
+  scanId: string;
+  /** The steps switched off during the run by libraryScanSkipStep. */
+  skippedByRequest: StepName[];
+  roots: Array<{ rootId: string; complete: boolean; scanned: boolean; folderCount: number; fileCount: number; skippedCount: number }>;
+  fileCount: number;
+  associationCount: number;
+  anchorCount: number;
+  missingTargetCount: LibraryMeasure;
+  excludedFirmwareCount: number;
+  collisionCount: number;
+  /** Items the user must confirm by hand (darwin case-collisions of corrections); the count only, never a path. */
+  needsManualCount: number;
+  /** Files that need a manual role classification; the count only. */
+  manualClassificationCount: number;
+  stats: { folders: number; files: number; entries: number; match: { files: number; candidates: number; judgments: number; linkSteps: number } };
+  correctionsStatus: string;
+}
+/** A refused correction entry: the closed reason and the localisation key of its text (no internal message). */
+/** A correction as the renderer names it: files and boards by opaque id, never by path. */
+export interface LibraryCorrectionById { op: string; fileId?: string; boardAnchorId?: string; [key: string]: unknown }
+export interface LibraryCorrectionDocument { version: number; platform: string; corrections: LibraryCorrectionById[] }
+export interface LibraryRejection {
+  index: number;
+  reason: 'invalid-entry' | 'unknown-role' | 'path-too-long' | 'too-many';
+  messageKey: string;
+}
+export interface LibraryFolderPage {
+  generation: number;
+  scanned: boolean;
+  complete: boolean;
+  skippedCount: number;
+  /** Folder rows: the folder's own name (basename only, never a full path), its read state (`code` only for an unreadable folder) and an opaque id. */
+  folders: Array<{
+    folderId: string;
+    name: string;
+    readState: 'pending' | 'listed' | 'unreadable' | 'skipped';
+    code?: string;
+    folderCount: number;
+    fileCount: number;
+    bytes: number;
+    childFolderCount: number;
+  }>;
+  total: number;
+  nextCursor?: string;
+  /** The files directly in the listed folder (the top level when parentId is omitted): opaque id, basename and role (null when unknown). */
+  files: Array<{ fileId: string; name: string; role: string | null }>;
+  fileTotal: number;
+  filesTruncated: boolean;
+}
+export interface LibraryBoardPage {
+  generation: number;
+  scanned: boolean;
+  complete: boolean;
+  indexedFileCount: number;
+  manualClassificationCount: number;
+  missingTargetCount: LibraryMeasure;
+  collisionCount: number;
+  boards: Array<{ boardId: string; boardAnchorId: string; fileCount: number; confirmed: number; probable: number; review: number; boardview: LibraryPresence; bios: LibraryPresence }>;
+  total: number;
+  nextCursor?: string;
+}
+export interface LibraryBoardDetail {
+  generation: number;
+  boardId: string;
+  boardAnchorId: string;
+  boardCode: string | null;
+  revision: string | null;
+  boardview: LibraryPresence;
+  bios: LibraryPresence;
+  complete: boolean;
+  /** `online` is set for a file whose content is not on this computer (a cloud placeholder); it is never read. */
+  files: Array<{ fileId: string; name: string | null; rootId: string; role: string; state: 'confirmed' | 'probable' | 'review'; online?: true }>;
+  filesTruncated: boolean;
+}
+
 
 export type BugReportLastImport = {
   outcome: 'reading' | 'processing' | 'opened' | 'failed' | 'cancelled' | 'key-required' | 'timeout' | 'worker-failed';
@@ -236,7 +408,11 @@ export type BugReportInput = { description: string; includeDiagnostics: boolean;
 export type BugReportError = 'offline' | 'timeout' | 'cancelled' | 'invalid' | 'too-large' | 'rate-limited' | 'unavailable' | 'storage' | 'conflict' | 'busy' | 'stale-preview' | 'unknown';
 export type BugReportErrorResult = { status: 'error'; error: BugReportError; retryAfterSeconds?: number };
 export type BugReportPrepareResult = { status: 'prepared'; prepareId: string; report: BugReport; canonicalText: string; payloadHash: string } | BugReportErrorResult;
-export type BugReportSendResult = { status: 'received'; reportId: string; payloadHash: string } | BugReportErrorResult;
+/** A cancelled send has the same shape as the cancel reply: `uncertain` is true only after the request may have left the machine. */
+export type BugReportSendResult = { status: 'received'; reportId: string; payloadHash: string } | BugReportCancelResult;
 export type BugReportCancelResult = { status: 'cancelled'; uncertain: boolean } | BugReportErrorResult;
 export type BugReportDraftResult = { status: 'empty' } | { status: 'available'; draft: BugReportInput | null; pending: { report: BugReport; canonicalText: string; payloadHash: string } | null } | BugReportErrorResult;
 declare global { interface Window { traceDesktop?: TraceDesktop } }
+
+/** The state of config.json as the main process reports it: ok, locked by another program, unreadable (damaged or another version), or read-only. */
+export type ConfigState = 'ok' | 'locked' | 'unreadable' | 'readonly';

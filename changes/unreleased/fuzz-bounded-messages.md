@@ -1,1 +1,0 @@
-- Import errors and notes: text that a damaged file puts into an error message, a warning or a schematic note (an unknown keyword, a name, a flag) is now cut to a readable length. A single long token used to give a message of up to 190,000 characters in the error dialog and the file information.

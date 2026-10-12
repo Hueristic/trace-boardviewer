@@ -195,6 +195,11 @@ describe('parseBoard dispatcher', () => {
     const error = failure(() => parseBoard({ name: 'C:\\boards\\mystery.XYZ', data: bytes }));
     expect(error.code).toBe('UNRECOGNIZED');
     expect(error.message).toContain('.xyz'); expect(error.message).toContain('mystery.XYZ'); expect(error.message).toMatch(/matched none of the supported/);
+    // The user-facing refusal is a catalog key with the file name, so it reads in every UI language (HUNT-WIN-20261011-10).
+    const localized = (error as { issue?: { key: string; params?: Record<string, string> } }).issue;
+    expect(localized?.key).toBe('parse.error.unrecognized');
+    expect(localized?.params?.name).toBe('mystery.XYZ');
+    expect(localized?.params?.extension?.toLowerCase()).toBe('.xyz');
     expect(failure(() => parseBoard({ name: 'noext', data: bytes })).message).toContain('no extension');
     expect(failure(() => parseBoard(textInput('just some text\n', 'notes.txt'))).code).toBe('UNRECOGNIZED');
     expect(failure(() => parseBoard(textInput('', 'empty.cad'))).code).toBe('UNRECOGNIZED');

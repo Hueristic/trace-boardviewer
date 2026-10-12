@@ -11,13 +11,13 @@ describe('validateKeyText', () => {
     expect('options' in result && result.options.fzKey?.[43]).toBe(0xff);
   });
   it('explains FZ mistakes precisely', () => {
-    expect(validateKeyText('fz', words(43))).toEqual({ error: 'Enter 44 hexadecimal 32-bit words (43 so far).' });
-    expect(validateKeyText('fz', `${words(43)} xyz`)).toEqual({ error: '"xyz" is not a hexadecimal 32-bit word.' });
-    expect(validateKeyText('fz', `${words(43)} 123456789`)).toEqual({ error: '"123456789" is not a hexadecimal 32-bit word.' });
+    expect(validateKeyText('fz', words(43))).toEqual({ error: 'Enter 44 hexadecimal 32-bit words (43 so far).', message: { key: 'dialogs.keyFzWordCount', params: { count: 43 } } });
+    expect(validateKeyText('fz', `${words(43)} xyz`)).toEqual({ error: '"xyz" is not a hexadecimal 32-bit word.', message: { key: 'dialogs.keyFzWordInvalid', params: { word: 'xyz' } } });
+    expect(validateKeyText('fz', `${words(43)} 123456789`)).toEqual({ error: '"123456789" is not a hexadecimal 32-bit word.', message: { key: 'dialogs.keyFzWordInvalid', params: { word: '123456789' } } });
   });
   it('accepts exactly 16 hexadecimal digits for XZZ and lower-cases them', () => {
     expect(validateKeyText('xzz', ' 0xAB CD EF 01 23 45 67 89 ')).toEqual({ options: { xzzKey: 'abcdef0123456789' } });
-    expect(validateKeyText('xzz', 'abcdef012345678')).toEqual({ error: 'Enter exactly 16 hexadecimal digits (15 so far).' });
-    expect(validateKeyText('xzz', 'abcdef01234567zz')).toEqual({ error: 'Only hexadecimal digits (0-9, a-f) are allowed.' });
+    expect(validateKeyText('xzz', 'abcdef012345678')).toEqual({ error: 'Enter exactly 16 hexadecimal digits (15 so far).', message: { key: 'dialogs.keyXzzCount', params: { count: 15 } } });
+    expect(validateKeyText('xzz', 'abcdef01234567zz')).toEqual({ error: 'Only hexadecimal digits (0-9, a-f) are allowed.', message: { key: 'dialogs.keyXzzHexOnly' } });
   });
 });

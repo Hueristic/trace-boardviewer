@@ -111,6 +111,10 @@ export interface WorkspaceExportRequest {
   includeNotes: boolean;
 }
 export interface WorkspaceExportResult { path: string; files: number; bytes: number }
+/** How an export ended: a written bundle, `cancelled` (the save dialog was dismissed, or the board changed before anything ran) or `failed` (it could not run or write). Only a bundle means something was written. */
+export type WorkspaceExportOutcome = WorkspaceExportResult | 'cancelled' | 'failed';
+/** Why an alias was not set: the name or the target broke its length rule, both names are the same, the workspace has no room for another alias, or another reason (nothing is explained then). */
+export type AliasRejection = 'name' | 'target' | 'same' | 'limit' | 'other';
 
 /** Bounds shared with electron/workspace.cjs. */
 export const WORKSPACE_LIMITS = Object.freeze({

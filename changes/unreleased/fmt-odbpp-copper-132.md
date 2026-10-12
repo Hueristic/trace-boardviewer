@@ -1,0 +1,3 @@
+- ODB++ boards now also read their copper (pads, copper lines and arcs) and their drilled holes from the top, bottom and drill layers. The copper is kept with the board but not drawn yet, and the import note says so.
+- If a board's copper or drill file is too large to keep or is not text, that board gets no copper at all, and the import note names the file.
+- Nothing else changes: components, pins, nets and the outline are read as before.

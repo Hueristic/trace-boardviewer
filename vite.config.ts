@@ -1,7 +1,9 @@
 /// <reference types="vitest/config" />
+import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
 
 /**
@@ -44,9 +46,32 @@ function productionCsp(): Plugin {
   return { name: 'trace-production-csp', apply: 'build', transformIndexHtml: { order: 'post', handler: html => stripDevServerCsp(html) } };
 }
 
+/**
+ * The commit the renderer is built from, as a meta tag of the shipped index.html. The packaging scripts read it back from the packaged
+ * app.asar and stop when it is not the HEAD they package. TRACE_BUILD_COMMIT overrides it for a build made outside a git checkout.
+ */
+function gitShortHead(): string {
+  try { return execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim(); } catch { return 'unknown'; }
+}
+function buildCommitMeta(): Plugin {
+  const commit = process.env.TRACE_BUILD_COMMIT || gitShortHead();
+  return {
+    name: 'trace-build-commit',
+    apply: 'build',
+    transformIndexHtml: { order: 'post', handler: html => html.replace('<head>', `<head>\n  <meta name="trace-build-commit" content="${commit}" />`) },
+  };
+}
+
+/** Records the fingerprint of the sources this bundle is built from (dist/build-stamp.txt); scripts/before-pack.cjs checks it before packing. */
+function buildStamp(): Plugin {
+  const root = path.dirname(fileURLToPath(import.meta.url));
+  const { writeBuildStamp } = createRequire(import.meta.url)('./scripts/dist-freshness.cjs') as { writeBuildStamp: (root: string) => string };
+  return { name: 'trace-build-stamp', apply: 'build', closeBundle() { writeBuildStamp(root); } };
+}
+
 export default defineConfig({
   base: './',
-  plugins: [pdfjsAssets(), productionCsp()],
+  plugins: [pdfjsAssets(), productionCsp(), buildCommitMeta(), buildStamp()],
   server: { host: '127.0.0.1', port: 5173, strictPort: true },
   build: { target: 'chrome140', sourcemap: false, assetsInlineLimit: 0 },
   // A test that parses a large input takes seconds on a busy machine; the default 5 s limit then fails a correct run. Timing is asserted
