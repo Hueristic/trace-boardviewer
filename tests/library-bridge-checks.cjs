@@ -487,21 +487,28 @@ test('contract (E-23): a correction of a removed root stays stored, is shown wit
   assert.equal((await again.scan({ rootIds: [rootId] })).manualClassificationCount, 1, 'the stored correction applies again');
 });
 
-test('a tampered root entry is dropped, and a damaged root list is moved aside, never overwritten', async () => {
-  const { root, userData } = await synthetic('roots-damage');
-  await bridgeFor(userData, { value: root }).pickRoot();
-  const directory = path.join(userData, 'library', 'devices');
-  const file = path.join(directory, 'roots.json');
-  const document = JSON.parse(await fs.readFile(file, 'utf8'));
-  document.roots[0].rootId = UNKNOWN_ID;
-  await fs.writeFile(file, JSON.stringify(document), 'utf8');
-  assert.equal((await bridgeFor(userData, { value: root }).listRoots()).total, 0, 'an id that does not follow from the path is dropped');
-  await fs.writeFile(file, '{ broken', 'utf8');
-  assert.equal((await bridgeFor(userData, { value: root }).listRoots()).total, 0);
-  const moved = (await fs.readdir(directory)).filter((name) => /^roots\.damaged-.*\.json$/.test(name));
-  assert.equal(moved.length, 1, 'the damaged list is kept aside');
-  assert.equal(await fs.readFile(path.join(directory, moved[0]), 'utf8'), '{ broken');
-});
+// A new root goes to roots-exact.json on darwin and to roots.json elsewhere (TB-030), so the file under test is the platform's own.
+// The bridge exports neither file name, so the path helpers below hold them; the platform is passed to the bridge, so the darwin
+// path runs on every host.
+for (const platform of ['win32', 'linux', 'darwin']) {
+  test(`${platform}: a tampered root entry is dropped, and a damaged root list is moved aside, never overwritten`, async () => {
+    const { root, userData } = await synthetic(`roots-damage-${platform}`);
+    const bridge = (chosen) => bridgeFor(userData, chosen, { platform });
+    await bridge({ value: root }).pickRoot();
+    const file = platform === 'darwin' ? await exactListPath(userData) : await rootListPath(userData);
+    const directory = path.dirname(file);
+    const base = path.basename(file, '.json');
+    const document = JSON.parse(await fs.readFile(file, 'utf8'));
+    document.roots[0].rootId = UNKNOWN_ID;
+    await fs.writeFile(file, JSON.stringify(document), 'utf8');
+    assert.equal((await bridge({ value: root }).listRoots()).total, 0, 'an id that does not follow from the path is dropped');
+    await fs.writeFile(file, '{ broken', 'utf8');
+    assert.equal((await bridge({ value: root }).listRoots()).total, 0);
+    const moved = (await fs.readdir(directory)).filter((name) => name.startsWith(`${base}.damaged-`) && name.endsWith('.json'));
+    assert.equal(moved.length, 1, 'the damaged list is kept aside');
+    assert.equal(await fs.readFile(path.join(directory, moved[0]), 'utf8'), '{ broken');
+  });
+}
 
 test('board presence: a complete scan measures the boardview, an incomplete one cannot prove a missing BIOS; the detail names files by role only', async () => {
   const { root, userData } = await synthetic('boards');
@@ -806,22 +813,26 @@ test('darwin: a legacy root removed and added again gets a new id, and its old c
   assert.equal(stored.corrections[0].file.rootId, legacyId);
 });
 
-test('a root list write that hits a transient lock is retried, not lost', async () => {
-  const { root, userData } = await synthetic('rename-retry');
-  let locked = false;
-  const fsWithLock = Object.assign({}, fs, {
-    rename: async (from, to) => {
-      if (!locked && String(to).endsWith('roots.json')) {
-        locked = true;
-        throw Object.assign(new Error('locked by another process'), { code: 'EPERM' });
-      }
-      return fs.rename(from, to);
-    },
+// The first write of the platform's root list (roots-exact.json on darwin, roots.json elsewhere, TB-030) is refused once; the retry keeps it.
+for (const platform of ['win32', 'linux', 'darwin']) {
+  test(`${platform}: a root list write that hits a transient lock is retried, not lost`, async () => {
+    const { root, userData } = await synthetic(`rename-retry-${platform}`);
+    const listName = platform === 'darwin' ? 'roots-exact.json' : 'roots.json';
+    let locked = false;
+    const fsWithLock = Object.assign({}, fs, {
+      rename: async (from, to) => {
+        if (!locked && path.basename(String(to)) === listName) {
+          locked = true;
+          throw Object.assign(new Error('locked by another process'), { code: 'EPERM' });
+        }
+        return fs.rename(from, to);
+      },
+    });
+    const { rootId } = await bridgeFor(userData, { value: root }, { fs: fsWithLock, platform }).pickRoot();
+    assert.equal(locked, true, 'the first rename was refused');
+    assert.equal((await bridgeFor(userData, { value: root }, { platform }).listRoots()).roots[0].rootId, rootId, 'the root was persisted after the retry');
   });
-  const { rootId } = await bridgeFor(userData, { value: root }, { fs: fsWithLock }).pickRoot();
-  assert.equal(locked, true, 'the first rename was refused');
-  assert.equal((await bridgeFor(userData, { value: root }).listRoots()).roots[0].rootId, rootId, 'the root was persisted after the retry');
-});
+}
 
 test('a cancel raised while the corrections are read stops the scan before the catalogue runs', async () => {
   const { root, userData } = await synthetic('cancel-load');
