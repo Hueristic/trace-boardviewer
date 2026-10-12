@@ -18,6 +18,22 @@ const openCollapsedSidePanels = async page => {
     if (await button.count() && await button.getAttribute('aria-pressed') === 'false') await button.click();
   }
 };
+// The first row (a fraction of the image surface's height) on which every given column (a fraction of its width) hits the surface itself,
+// not an overlay, a marker or a control above it; retried briefly while panels animate.
+const freeSurfaceRow = async (page, box, columns, rows) => {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    for (const row of rows) {
+      const points = columns.map(column => [box.x + box.width * column, box.y + box.height * row]);
+      const free = await page.evaluate(list => list.every(([x, y]) => {
+        const element = document.elementFromPoint(x, y);
+        return !!element && !!element.closest('.imgv-surface') && !element.closest('.imgv-overlay > *, button, input, textarea, [role=dialog], [role=status], aside, nav');
+      }), points);
+      if (free) return row;
+    }
+    await page.waitForTimeout(250);
+  }
+  throw new Error(`no row of the image surface is uncovered at columns ${columns.join(', ')} (rows tried: ${rows.join(', ')})`);
+};
 const searchInput = async page => {
   const input = page.locator('[data-testid=search-input]');
   if (!(await input.isVisible())) {
@@ -1132,18 +1148,29 @@ async function run(ctx) {
     const panelToggle = page.getByRole('button', { name: 'Bookmarks and notes', exact: true });
     if (await panelToggle.getAttribute('aria-expanded') !== 'true') await panelToggle.click();
     await page.waitForFunction(() => document.querySelectorAll('.imgv-row').length >= 1);
+    // A user closes the removed-content notice once it is read; in a small window it covers much of the image. Its close button can sit
+    // under the open "Bookmarks and notes" panel, so it is activated from the keyboard (focus, Enter), as a keyboard user does.
+    const hideNotice = page.locator('.imgv-banner .imgv-btn--small');
+    if (await hideNotice.count()) {
+      await hideNotice.focus();
+      await page.keyboard.press('Enter');
+      await page.locator('.imgv-banner').waitFor({ state: 'detached', timeout: 10000 });
+    }
     const calib = page.getByRole('button', { name: /calibrat/i });
     await calib.click();
     const box = await surface.boundingBox();
     assert.ok(box && box.width > 100 && box.height > 100);
-    await page.mouse.click(box.x + box.width * 0.25, box.y + box.height * 0.5);
-    await page.mouse.click(box.x + box.width * 0.75, box.y + box.height * 0.5);
+    // The clicks go to image points that no overlay covers (hint dock, the compact side panel while it closes), on one row for both
+    // calibration ends; the rows near the middle come first, as on a wide window.
+    const calibrationRow = await freeSurfaceRow(page, box, [0.25, 0.75], [0.5, 0.6, 0.4, 0.7, 0.3, 0.8]);
+    await page.mouse.click(box.x + box.width * 0.25, box.y + box.height * calibrationRow);
+    await page.mouse.click(box.x + box.width * 0.75, box.y + box.height * calibrationRow);
     await page.locator('.imgv-input').first().fill('100');
     await page.getByRole('button', { name: /set scale/i }).click();
     await page.getByRole('button', { name: /note/i }).first().click();
-    // The bookmark above sits at the view centre: a note click there would select that marker instead of opening the editor. The lower
-    // half is used because, in a narrow viewer, the removed-content banner and the note hint cover the top of the surface.
-    await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * 0.7);
+    // The bookmark above sits at the view centre: a note click there would select that marker instead of opening the editor.
+    const noteRow = await freeSurfaceRow(page, box, [0.3], [0.7, 0.3, 0.8, 0.2]);
+    await page.mouse.click(box.x + box.width * 0.3, box.y + box.height * noteRow);
     const editor = page.getByRole('dialog', { name: /new note/i });
     await editor.locator('textarea').fill('image viewer annotation');
     await editor.getByRole('button', { name: /^save$/i }).click();
