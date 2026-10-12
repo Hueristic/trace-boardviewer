@@ -29,6 +29,8 @@ const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 
 const EXIT = Object.freeze({ OK: 0, FAILED: 1, REFUSED: 2 });
+// The release app or the QA flavour (TRACE_FLAVOUR=qa, config/electron-builder.qa.mac.yml), which has its own bundle identifier.
+const FLAVOUR = require('./qa-flavour.cjs').flavourFromEnvironment();
 const SCHEMA = 'trace-mac-smoke-evidence/1';
 const FIXTURE_NAME = 'MacSmoke.cad';
 const EXPECTED_COUNTS = Object.freeze({ components: 2, pins: 4, nets: 2 });
@@ -408,7 +410,7 @@ function staticChecks({ requestedArch, app, artifact }) {
   const results = [];
   const add = (name, ok, detail) => results.push({ name, status: ok ? 'pass' : 'fail', ...(detail ? { detail } : {}) });
   add('main binary is a single-architecture Mach-O matching the requested arch', app.machO.archs.length === 1 && app.machO.archs[0] === requestedArch, `${app.machO.archs.join(',') || 'none'} (requested ${requestedArch})`);
-  add('bundle identifier is hu.trace.boardviewer', app.bundleId === 'hu.trace.boardviewer', String(app.bundleId));
+  add(`bundle identifier is ${FLAVOUR.appId}`, app.bundleId === FLAVOUR.appId, String(app.bundleId));
   // Not an ad-hoc requirement: a build signed with an identity is recorded as such, and docs/MAC_VALIDATION.md decides acceptance.
   add('code signature is present and recorded (ad-hoc or with an identity)', app.codesign.signed, JSON.stringify({ adhoc: app.codesign.adhoc, team: app.codesign.teamIdentifier, authorities: app.codesign.authorities }));
   add('codesign --verify --deep --strict accepts the bundle', app.codesign.verifyExit === 0, app.codesign.verifyOutput.slice(0, 200));

@@ -1002,7 +1002,10 @@ async function run(ctx) {
     // Measured contract (docs/SUPPORT.md: "misread names are misses, never wrong links"; the link floor is 60 %). The fixture's U10 token
     // is read twice on Windows: once at or above the floor (an exact link, read as "U10" after case normalization) and once at about 21 %,
     // marked low, which is neither a candidate nor a link. The candidate is therefore chosen by its reading state, never by the first
-    // text match, which can be the exact reading.
+    // text match, which can be the exact reading. The readings depend on the rasterization of the page (Linux reads the token once,
+    // above the floor; a CI runner may differ from a desk machine), so their number is recorded, not required: each reading must sit on
+    // its side of the floor and the card must link exactly the readings at or above it. src/lib/pdf/ocr-link-threshold.test.ts pins the
+    // floor itself.
     const ocrWords = await page.locator('.pdfv-text-ocr .pdfv-ocr-word').evaluateAll(els => els.map(el => ({
       text: el.textContent, low: el.classList.contains('is-low'), confidence: Number((el.title.match(/confidence (\d+)%/) || [])[1]),
     })));
@@ -1010,9 +1013,8 @@ async function run(ctx) {
     const u10Words = ocrWords.filter(word => ocrTokenMatches(word.text, 'U10'));
     assert.ok(u10Words.length > 0, `the recognized U10 token is in the OCR layer: ${JSON.stringify(ocrWords)}`);
     const u10Candidates = u10Words.filter(word => word.low);
-    assert.equal(u10Candidates.length, 1, `exactly one U10 occurrence is low confidence (the ~21 % candidate): ${JSON.stringify(u10Words)}`);
+    for (const candidate of u10Candidates) assert.ok(Number.isFinite(candidate.confidence) && candidate.confidence < floor, `U10 candidate confidence ${candidate.confidence}% is below the ${floor}% link floor`);
     const [u10Word] = u10Candidates;
-    assert.ok(Number.isFinite(u10Word.confidence) && u10Word.confidence < floor, `U10 candidate confidence ${u10Word.confidence}% is below the ${floor}% link floor`);
     for (const exact of u10Words.filter(word => !word.low)) assert.ok(exact.confidence >= floor, `an exact U10 reading is at or above the ${floor}% link floor: ${JSON.stringify(exact)}`);
     const exactHitCount = u10Words.length - u10Candidates.length;
     const controlWord = ocrWords.find(word => word.text === 'TRACE-VIEWER-OCR');
@@ -1030,12 +1032,15 @@ async function run(ctx) {
     await openDocument(ctx, 'viewer-scanned-text.pdf');
     await page.waitForSelector('.pdfv-page[data-page="1"][data-render="done"]', { timeout: 30000 });
     await page.waitForSelector('.pdfv-ocr-badge', { timeout: 30000 });
-    assert.equal(await page.locator('.pdfv-probe.is-ocr[aria-label^="U10," i]').count(), 0, 'no probe links the case-only OCR text: the probe selector count is 0');
+    // A probe links an OCR reading at or above the floor that spells U10 exactly; a case-only reading (Windows reads "u10") and a low
+    // reading get none. Linux reads "U10" exactly at about 88 %, so it gets one probe.
+    const exactOcrProbeCount = u10Words.filter(word => !word.low && String(word.text).trim().replace(/[^A-Za-z0-9]+$/, '') === 'U10').length;
+    assert.equal(await page.locator('.pdfv-probe.is-ocr[aria-label^="U10," i]').count(), exactOcrProbeCount, `one probe per exact-case OCR reading at or above the floor and none for a case-only or low reading: ${JSON.stringify(u10Words)}`);
     const beforeRotate = await page.locator('.pdfv').getAttribute('data-rotation');
     await page.getByRole('button', { name: /rotate clockwise/i }).click();
     await page.waitForFunction(value => document.querySelector('.pdfv')?.getAttribute('data-rotation') !== value, beforeRotate);
     await ctx.screenshot('viewers-pdf-text-and-ocr');
-    return { nativeTextSearch: true, pageNavigation: '1→2→1', scannedOcr: recognized.slice(0, 160), lowConfidenceOcr: { token: 'u10', confidence: u10Word.confidence, floor }, exactOcrProbeCount: 0, pageAnnotation: true, bookmarkCount: 1, rotationChanged: true };
+    return { nativeTextSearch: true, pageNavigation: '1→2→1', scannedOcr: recognized.slice(0, 160), lowConfidenceOcr: { token: 'u10', confidence: u10Word ? u10Word.confidence : null, floor, readings: u10Words }, exactOcrProbeCount, pageAnnotation: true, bookmarkCount: 1, rotationChanged: true };
   });
 
   await ctx.step('PNG, JPEG, and WebP decode through the packaged image viewer', async () => {

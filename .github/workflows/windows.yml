@@ -672,6 +672,7 @@ jobs:
       - name: Run the packaged-app smoke test (QA flavour)
         timeout-minutes: 20
         env:
+          TRACE_FLAVOUR: qa
           TRACE_APP: ${{ steps.locate_qa.outputs.app }}
           TRACE_ZIP: ${{ steps.locate_qa.outputs.zip }}
         run: |

@@ -56,6 +56,9 @@ const TARGET_LABELS = Object.freeze({ installed: 'installed .deb', appimage: 'Ap
 const FLAVOUR = require('./qa-flavour.cjs').flavourFromEnvironment();
 const PRODUCT_NAME = FLAVOUR.productName;
 const EXECUTABLE_NAME = FLAVOUR.executableName;
+// The default profile folder is pinned by electron/main.cjs ($XDG_CONFIG_HOME/trace-boardviewer) for every flavour, not derived from
+// the executable name.
+const PROFILE_DIRECTORY = 'trace-boardviewer';
 const DESKTOP_FILE = `${EXECUTABLE_NAME}.desktop`;
 const INSTALL_DIR = `/opt/${PRODUCT_NAME}`;
 const INSTALLED_EXECUTABLE = `${INSTALL_DIR}/${EXECUTABLE_NAME}`;
@@ -692,7 +695,7 @@ function compareFuseWire(observed, expected) {
 
 /** The default profile location relative to the temporary HOME, and whether it is the documented one. */
 function decideDefaultProfile({ home, userData }) {
-  const expected = path.posix.join(home, '.config', EXECUTABLE_NAME);
+  const expected = path.posix.join(home, '.config', PROFILE_DIRECTORY);
   const relative = typeof userData === 'string' && (userData === home || userData.startsWith(`${home}/`)) ? userData.slice(home.length + 1) : null;
   return { ok: userData === expected, expected, relative: relative === null ? userData : `$HOME/${relative}` };
 }
@@ -1213,8 +1216,8 @@ async function runFlow({ parsed, executable, log, observations }) {
   await fs.writeFile(path.join(dirs.bin, 'xdg-open'), XDG_OPEN_STUB, { mode: 0o755 });
   const boardKey = mac.sha256(Buffer.from(FIXTURE_BOARD));
   const manifestFile = path.join(dirs.profile, 'workspaces', `${boardKey}.json`);
-  const repository = readJson(path.join(ROOT, 'electron', 'repository.json')).repository;
-  const bugUrl = `https://github.com/${repository}/issues/new?template=bug_report.yml`;
+  // Bug reports stay inside the app; the support page is one of the three links electron/main.cjs opens (SUPPORT_LINKS.support).
+  const supportUrl = /\bsupport: '(https:\/\/[^']+)'/.exec(readText(path.join(ROOT, 'electron', 'main.cjs')))[1];
   const evidenceDir = path.dirname(path.resolve(parsed.out || defaultOut(parsed)));
 
   const checks = [];
@@ -1583,15 +1586,15 @@ async function runFlow({ parsed, executable, log, observations }) {
       let failure = null;
       if (!aborted) {
         try {
-          await page.evaluate(() => window.traceDesktop.openSupportLink('bug'));
+          await page.evaluate(() => window.traceDesktop.openSupportLink('support'));
           opened = await waitFor(async () => (exists(dirs.xdgRecord) ? parseKeyValueLines(readText(dirs.xdgRecord)) : null), { timeoutMs: 15000, what: 'the stand-in xdg-open' }).catch(() => null);
         } catch (error) { failure = error; }
       }
-      if (failure) checks.push({ name: 'openExternal: the bug-report link is handed to the system', status: 'fail', detail: String(failure.message).slice(0, 500) });
+      if (failure) checks.push({ name: 'openExternal: the support-page link is handed to the system', status: 'fail', detail: String(failure.message).slice(0, 500) });
       else if (opened) {
         runtime.openExternal = opened;
-        const ok = opened.url === bugUrl && opened.argc === '1';
-        checks.push({ name: 'openExternal: the bug-report link reaches xdg-open as exactly one https URL', status: ok ? 'pass' : 'fail', detail: ok ? opened.url : `received ${JSON.stringify(opened)}, expected ${bugUrl}` });
+        const ok = opened.url === supportUrl && opened.argc === '1';
+        checks.push({ name: 'openExternal: the support-page link reaches xdg-open as exactly one https URL', status: ok ? 'pass' : 'fail', detail: ok ? opened.url : `received ${JSON.stringify(opened)}, expected ${supportUrl}` });
         if (opened.ld_library_path !== undefined) observations.push(`xdg-open inherited LD_LIBRARY_PATH=${opened.ld_library_path}`);
       } else if (!aborted) observations.push('openExternal: the stand-in xdg-open received nothing within 15 s (Electron may have used the XDG portal); the link was not verified');
     }
@@ -1620,7 +1623,7 @@ async function runFlow({ parsed, executable, log, observations }) {
     await step('normal quit again ends with exit code 0', () => quit('after launch 2'));
 
     // ---- default profile location -----------------------------------------------------------------------------------------------
-    await step(`default data location: without --user-data-dir and XDG_CONFIG_HOME the profile is $HOME/.config/${EXECUTABLE_NAME}, created private (0700)`, async () => {
+    await step(`default data location: without --user-data-dir and XDG_CONFIG_HOME the profile is $HOME/.config/${PROFILE_DIRECTORY}, created private (0700)`, async () => {
       const record = await launch(specFor('default-location'), { waitForProject: false });
       const problems = decideGate('absent', record);
       const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));

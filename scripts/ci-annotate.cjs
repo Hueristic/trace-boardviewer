@@ -3,7 +3,8 @@
 // Failure annotations for the CI jobs, readable without a login: annotations are public. A test or smoke step streams its output to a
 // log file under $RUNNER_TEMP/ci-diag, and a smoke step writes a JSON evidence file. When a job fails, this script writes, for each step
 // given to it, the smoke evidence first (its error, its failing checks and steps) and then the runner's own failing lines of the step's
-// log, as workflow annotations (::error). Each step has its own budget of MAX_LINES annotations. Redaction is by generic pattern only:
+// log, as workflow annotations (::error); the evidence of every step is written before any step's log lines. Each step has its own
+// budget of MAX_LINES annotations. Redaction is by generic pattern only:
 // user folders in paths, e-mail addresses and access tokens. It reads nothing but the files it is given. It always exits 0: the job has
 // already failed, and an annotation is never the reason a job fails.
 //
@@ -81,16 +82,22 @@ function evidenceFailures(data) {
   return out.map(redact);
 }
 
-/** The annotations of one step: its evidence first, then its failing log lines, at most MAX_LINES of them. */
-function stepAnnotations({ title, log, json }) {
-  const messages = [];
+/** The evidence lines and the failing log lines of one step, each list within the step's MAX_LINES budget (evidence first). */
+function stepParts({ log, json }) {
+  let evidence = [];
   if (json && fs.existsSync(json)) {
     let data = null;
     try { data = JSON.parse(fs.readFileSync(json, 'utf8')); } catch { data = null; }
-    messages.push(...evidenceFailures(data));
+    evidence = evidenceFailures(data).slice(0, MAX_LINES);
   }
-  if (log && fs.existsSync(log)) messages.push(...logFailures(fs.readFileSync(log, 'utf8')));
-  return messages.slice(0, MAX_LINES).map((message) => ({ title: `CI step: ${title}`, message }));
+  const logLines = log && fs.existsSync(log) ? logFailures(fs.readFileSync(log, 'utf8')).slice(0, MAX_LINES - evidence.length) : [];
+  return { evidence, log: logLines };
+}
+
+/** The annotations of one step: its evidence first, then its failing log lines, at most MAX_LINES of them. */
+function stepAnnotations(step) {
+  const { evidence, log } = stepParts(step);
+  return [...evidence, ...log].map((message) => ({ title: `CI step: ${step.title}`, message }));
 }
 
 /** The steps given on the command line: each --step starts one, and the --log and --json after it belong to it. */
@@ -111,13 +118,20 @@ function stepsFrom(argv) {
 }
 
 function main(argv) {
-  const steps = stepsFrom(argv);
+  const steps = stepsFrom(argv).map((step) => ({ step, parts: stepParts(step) }));
   let total = 0;
-  for (const step of steps) {
-    const found = stepAnnotations(step);
-    total += found.length;
-    for (const { title, message } of found) console.log(`::error title=${escapeProperty(title)}::${escapeData(message)}`);
-    if (found.length === MAX_LINES) console.log(`::notice title=${escapeProperty(`CI step: ${step.title}`)}::the first ${MAX_LINES} failing lines of this step are shown; the logs hold the rest.`);
+  // Every step's evidence before any step's log lines: GitHub shows only the first ten error annotations of this step, and the
+  // expected stderr of passing tests in an earlier step's log must not push a smoke failure out of them.
+  for (const kind of ['evidence', 'log']) {
+    for (const { step, parts } of steps) {
+      for (const message of parts[kind]) {
+        total += 1;
+        console.log(`::error title=${escapeProperty(`CI step: ${step.title}`)}::${escapeData(message)}`);
+      }
+    }
+  }
+  for (const { step, parts } of steps) {
+    if (parts.evidence.length + parts.log.length === MAX_LINES) console.log(`::notice title=${escapeProperty(`CI step: ${step.title}`)}::the first ${MAX_LINES} failing lines of this step are shown; the logs hold the rest.`);
   }
   if (total === 0) console.log('::notice::No failing line was found in the steps given to the annotator.');
   return 0;
