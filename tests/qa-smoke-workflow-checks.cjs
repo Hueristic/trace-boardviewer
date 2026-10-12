@@ -106,7 +106,7 @@ test('static: every test and smoke command streams its output to a log and keeps
     }
     const annotate = steps(job).find((step) => step.if === 'failure()' && typeof step.run === 'string' && /ci-annotate\.cjs/.test(step.run));
     assert.ok(annotate, `${job}: an annotation step runs after a failure`);
-    assert.match(annotate.run, /--logs="\$RUNNER_TEMP\/ci-diag"/, `${job}: the annotations read the diagnostics folder`);
+    assert.match(annotate.run, /--step="[^"]+" --log="\$RUNNER_TEMP\/ci-diag\//, `${job}: each step's annotations read its own log`);
   }
   const linuxSteps = steps('linux');
   assert.equal(linuxSteps[linuxSteps.length - 1].name, 'Stop leftover app processes', 'the cleanup stays the last step of the Linux job');

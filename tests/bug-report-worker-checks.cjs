@@ -155,15 +155,21 @@ test('trigger admission atomically enforces per-source and global request caps',
   } finally { store.close(); }
 });
 
+// A worker retries an insert that SQLite reports as busy (another connection holds the writer lock). The statement was rolled back, so
+// the retry counts it once; the totals the test asserts do not change. Up to 200 tries, 25 ms apart, inside the worker thread.
+const RETRY_ON_BUSY = `const sleepMs = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      const retryOnBusy = (work) => { for (let attempt = 0; ; attempt++) { try { return work(); } catch (error) { if (attempt >= 200 || !/database is locked|SQLITE_BUSY/i.test(String(error.message || error.code))) throw error; sleepMs(25); } } };`;
+
 test('separate SQLite connections racing the source trigger never exceed twenty', async () => {
   const store = sqliteD1();
   try {
     store.db.exec('PRAGMA journal_mode = WAL');
     const source = `const { parentPort, workerData } = require('node:worker_threads');
       const { DatabaseSync } = require('node:sqlite');
-      const db = new DatabaseSync(workerData.filename); db.exec('PRAGMA busy_timeout=5000');
+      ${RETRY_ON_BUSY}
+      const db = new DatabaseSync(workerData.filename); db.exec('PRAGMA busy_timeout=60000');
       const insert = db.prepare('INSERT OR IGNORE INTO bug_report_admissions(admission_id, source_hash, window_start, day, admitted_at) VALUES (?, ?, ?, ?, ?)');
-      parentPort.once('message', () => { let count = 0; try { for(let i=0;i<30;i++) count += Number(insert.run(workerData.prefix+i,'shared-race-source',workerData.windowStart,workerData.day,workerData.now).changes); parentPort.postMessage({count}); } catch(e) { parentPort.postMessage({error:e.code || e.message}); } finally { db.close(); } });`;
+      parentPort.once('message', () => { let count = 0; try { for(let i=0;i<30;i++) count += Number(retryOnBusy(() => insert.run(workerData.prefix+i,'shared-race-source',workerData.windowStart,workerData.day,workerData.now)).changes); parentPort.postMessage({count}); } catch(e) { parentPort.postMessage({error:e.code || e.message}); } finally { db.close(); } });`;
     const filename = path.join(store.dir, 'reports.sqlite');
     const now = Date.now(); const day = new Date(now).toISOString().slice(0, 10); const windowStart = Math.floor(now / 600000) * 600000;
     const workers = Array.from({ length: 8 }, (_, i) => new Worker(source, { eval: true, workerData: { filename, prefix: `race-${i}-`, now, day, windowStart } }));
@@ -180,9 +186,10 @@ test('separate SQLite connections racing the source trigger never exceed twenty'
 
     const globalRace = `const { parentPort, workerData } = require('node:worker_threads');
       const { DatabaseSync } = require('node:sqlite');
-      const db = new DatabaseSync(workerData.filename); db.exec('PRAGMA busy_timeout=5000');
+      ${RETRY_ON_BUSY}
+      const db = new DatabaseSync(workerData.filename); db.exec('PRAGMA busy_timeout=60000');
       const insert = db.prepare('INSERT OR IGNORE INTO bug_report_admissions(admission_id,source_hash,window_start,day,admitted_at) VALUES (?,?,?,?,?)');
-      parentPort.once('message', () => { let count=0; try { for(let i=0;i<300;i++) count += Number(insert.run(workerData.prefix+i,workerData.prefix+i,workerData.windowStart,workerData.day,workerData.now).changes); parentPort.postMessage({count}); } catch(e) { parentPort.postMessage({error:e.code || e.message}); } finally { db.close(); } });`;
+      parentPort.once('message', () => { let count=0; try { for(let i=0;i<300;i++) count += Number(retryOnBusy(() => insert.run(workerData.prefix+i,workerData.prefix+i,workerData.windowStart,workerData.day,workerData.now)).changes); parentPort.postMessage({count}); } catch(e) { parentPort.postMessage({error:e.code || e.message}); } finally { db.close(); } });`;
     const globalWorkers = Array.from({ length: 8 }, (_, i) => new Worker(globalRace, { eval: true, workerData: { filename, prefix: `global-${i}-`, now, day, windowStart } }));
     const globalExits = globalWorkers.map(thread => new Promise(resolve => thread.once('exit', resolve)));
     const globalReplies = globalWorkers.map(thread => new Promise((resolve, reject) => { thread.once('message', resolve); thread.once('error', reject); }));
@@ -195,9 +202,10 @@ test('separate SQLite connections racing the source trigger never exceed twenty'
 
     const reportRace = `const { parentPort, workerData } = require('node:worker_threads');
       const { DatabaseSync } = require('node:sqlite');
-      const db = new DatabaseSync(workerData.filename); db.exec('PRAGMA busy_timeout=5000');
+      ${RETRY_ON_BUSY}
+      const db = new DatabaseSync(workerData.filename); db.exec('PRAGMA busy_timeout=60000');
       const insert = db.prepare('INSERT OR IGNORE INTO bug_reports(report_id,payload_hash,payload_json,received_at,received_day,expires_at) VALUES (?,?,?,?,?,?)');
-      parentPort.once('message', () => { let count=0; try { for(let i=0;i<50;i++) count += Number(insert.run(workerData.prefix+i,'a'.repeat(64),'{}',1,workerData.day,9999999999).changes); parentPort.postMessage({count}); } catch(e) { parentPort.postMessage({error:e.code || e.message}); } finally { db.close(); } });`;
+      parentPort.once('message', () => { let count=0; try { for(let i=0;i<50;i++) count += Number(retryOnBusy(() => insert.run(workerData.prefix+i,'a'.repeat(64),'{}',1,workerData.day,9999999999)).changes); parentPort.postMessage({count}); } catch(e) { parentPort.postMessage({error:e.code || e.message}); } finally { db.close(); } });`;
     const reportWorkers = Array.from({ length: 8 }, (_, i) => new Worker(reportRace, { eval: true, workerData: { filename, prefix: `daily-${i}-`, day } }));
     const reportExits = reportWorkers.map(thread => new Promise(resolve => thread.once('exit', resolve)));
     const reportReplies = reportWorkers.map(thread => new Promise((resolve, reject) => { thread.once('message', resolve); thread.once('error', reject); }));

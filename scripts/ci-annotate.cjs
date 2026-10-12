@@ -1,21 +1,23 @@
 'use strict';
 
 // Failure annotations for the CI jobs, readable without a login: annotations are public. A test or smoke step streams its output to a
-// log file under $RUNNER_TEMP/ci-diag; when a job fails, this script writes the failing lines of those logs and the failing steps of the
-// smoke evidence (JSON files of a test-results folder) as workflow annotations (::error). It writes at most MAX_LINES annotations, and
-// redacts what must not be public by generic patterns only: user folders in paths, e-mail addresses and access tokens. It reads nothing
-// but those files. It always exits 0: the job has already failed, and an annotation is never the reason a job fails.
+// log file under $RUNNER_TEMP/ci-diag, and a smoke step writes a JSON evidence file. When a job fails, this script writes, for each step
+// given to it, the smoke evidence first (its error, its failing checks and steps) and then the runner's own failing lines of the step's
+// log, as workflow annotations (::error). Each step has its own budget of MAX_LINES annotations. Redaction is by generic pattern only:
+// user folders in paths, e-mail addresses and access tokens. It reads nothing but the files it is given. It always exits 0: the job has
+// already failed, and an annotation is never the reason a job fails.
 //
-// usage: node scripts/ci-annotate.cjs [--logs=<folder of .log files>] [--evidence=<folder of .json evidence files>]
+// usage: node scripts/ci-annotate.cjs --step=<title> [--log=<file>] [--json=<file>] [--step=<title> ...]
 
 const fs = require('node:fs');
-const path = require('node:path');
 
 const MAX_LINES = 40;
 const CONTEXT_AFTER = 5;
-// The lines that mean a failure: TAP "not ok", the reporters' failure marks, assertion and TypeScript errors, a non-zero exit.
-const FAILURE = /\bnot ok\b|✖|×|\bFAIL\b|AssertionError|\bError:|error TS\d+|\bERR_[A-Z_]+|exit=[1-9]\d*/;
-// Summary lines that count failures as zero: they are not failures.
+const CLIP = 300;
+// The runner's own failing lines: a TAP "not ok", the spec reporter's cross, the vitest failure mark and file header, an assertion
+// error, a TypeScript error, a Node error code. A line that only contains the word FAIL is not one of them.
+const FAILURE = /^\s*not ok\b|✖|^\s*×|^\s*FAIL\s+\S+\.(?:c|m)?(?:j|t)sx?\b|AssertionError|\berror TS\d+|\bERR_[A-Z_]+\b/;
+// Summary lines that count the failures as zero: they are not failures.
 const ZERO_SUMMARY = /\bfail 0\b|\b0 failed\b|\b0 fail\b/;
 
 const escapeData = (text) => text.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
@@ -34,7 +36,9 @@ function redact(text) {
     .replace(/\b(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_|sk_(?:live_|test_)?)[A-Za-z0-9_]{8,}/g, '<token>');
 }
 
-/** The failing lines of a log, each with the lines after it, redacted. */
+const clip = (text) => (text.length > CLIP ? `${text.slice(0, CLIP)}...` : text);
+
+/** The runner's failing lines of a log, each with the lines after it, redacted. Other lines are never printed. */
 function logFailures(text) {
   const lines = text.split(/\r?\n/);
   const out = [];
@@ -50,56 +54,72 @@ function logFailures(text) {
   return out;
 }
 
-/** The failing steps of one evidence file: a verdict that is not passed, the checks or problems it lists, and its failed steps. */
+/**
+ * The failures of one smoke evidence file, in this order: its error, its failing checks, its problems, its failed steps. Each is
+ * redacted and clipped. A file that is not evidence of a failure gives nothing.
+ */
 function evidenceFailures(data) {
   const out = [];
   if (!data || typeof data !== 'object') return out;
+  if (data.error) out.push(`error: ${clip(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))}`);
+  if (Array.isArray(data.failedChecks)) {
+    for (const item of data.failedChecks) out.push(`failed check: ${clip(typeof item === 'string' ? item : JSON.stringify(item))}`);
+  }
+  if (Array.isArray(data.checks)) {
+    for (const check of data.checks) {
+      if (check && (check.passed === false || check.status === 'fail')) out.push(`failed check: ${clip(String(check.name ?? JSON.stringify(check)))}`);
+    }
+  }
+  if (Array.isArray(data.problems)) for (const item of data.problems) out.push(`problem: ${clip(typeof item === 'string' ? item : JSON.stringify(item))}`);
   if (data.passed === false) out.push('passed: false');
   if (typeof data.status === 'string' && data.status !== 'pass' && data.status !== 'passed') out.push(`status: ${data.status}`);
-  for (const key of ['failedChecks', 'problems']) {
-    if (Array.isArray(data[key])) for (const item of data[key]) out.push(`${key}: ${typeof item === 'string' ? item : JSON.stringify(item)}`);
-  }
   if (Array.isArray(data.steps)) {
     for (const step of data.steps) {
-      if (step && step.status === 'fail') out.push(`step "${step.name ?? 'unnamed'}" failed${step.error ? `: ${step.error}` : ''}`);
+      if (step && step.status === 'fail') out.push(clip(`step "${step.name ?? 'unnamed'}" failed${step.error ? `: ${step.error}` : ''}`));
     }
   }
   return out.map(redact);
 }
 
-function listFiles(folder, extension) {
-  if (!folder || !fs.existsSync(folder)) return [];
-  return fs.readdirSync(folder).filter((name) => name.endsWith(extension)).sort().map((name) => path.join(folder, name));
+/** The annotations of one step: its evidence first, then its failing log lines, at most MAX_LINES of them. */
+function stepAnnotations({ title, log, json }) {
+  const messages = [];
+  if (json && fs.existsSync(json)) {
+    let data = null;
+    try { data = JSON.parse(fs.readFileSync(json, 'utf8')); } catch { data = null; }
+    messages.push(...evidenceFailures(data));
+  }
+  if (log && fs.existsSync(log)) messages.push(...logFailures(fs.readFileSync(log, 'utf8')));
+  return messages.slice(0, MAX_LINES).map((message) => ({ title: `CI step: ${title}`, message }));
 }
 
-/** The annotation lines for a set of logs and evidence files, at most MAX_LINES of them. */
-function annotations({ logs = [], evidence = [] }) {
-  const out = [];
-  for (const file of logs) {
-    const title = `CI log: ${path.basename(file, '.log')}`;
-    for (const line of logFailures(fs.readFileSync(file, 'utf8'))) out.push({ title, message: line });
+/** The steps given on the command line: each --step starts one, and the --log and --json after it belong to it. */
+function stepsFrom(argv) {
+  const steps = [];
+  let current = null;
+  for (const item of argv) {
+    const match = /^--(step|log|json)=(.*)$/.exec(item);
+    if (!match) continue;
+    if (match[1] === 'step') {
+      current = { title: match[2], log: null, json: null };
+      steps.push(current);
+    } else if (current) {
+      current[match[1]] = match[2] || null;
+    }
   }
-  for (const file of evidence) {
-    let data = null;
-    try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { data = null; }
-    const title = `CI evidence: ${path.basename(file, '.json')}`;
-    for (const message of evidenceFailures(data)) out.push({ title, message });
-  }
-  return out;
+  return steps;
 }
 
 function main(argv) {
-  const value = (name) => {
-    const found = argv.find((item) => item.startsWith(`--${name}=`));
-    return found ? found.slice(name.length + 3) : null;
-  };
-  const all = annotations({ logs: listFiles(value('logs'), '.log'), evidence: listFiles(value('evidence'), '.json') });
-  const shown = all.slice(0, MAX_LINES);
-  for (const { title, message } of shown) {
-    console.log(`::error title=${escapeProperty(title)}::${escapeData(message)}`);
+  const steps = stepsFrom(argv);
+  let total = 0;
+  for (const step of steps) {
+    const found = stepAnnotations(step);
+    total += found.length;
+    for (const { title, message } of found) console.log(`::error title=${escapeProperty(title)}::${escapeData(message)}`);
+    if (found.length === MAX_LINES) console.log(`::notice title=${escapeProperty(`CI step: ${step.title}`)}::the first ${MAX_LINES} failing lines of this step are shown; the logs hold the rest.`);
   }
-  if (all.length > shown.length) console.log(`::notice::${all.length - shown.length} more failing lines are in the job's logs (annotations stop at ${MAX_LINES}).`);
-  if (all.length === 0) console.log('::notice::No failing line was found in the step logs or the smoke evidence.');
+  if (total === 0) console.log('::notice::No failing line was found in the steps given to the annotator.');
   return 0;
 }
 
@@ -107,4 +127,4 @@ if (require.main === module) {
   process.exitCode = main(process.argv.slice(2));
 }
 
-module.exports = Object.freeze({ MAX_LINES, escapeData, escapeProperty, redact, logFailures, evidenceFailures, annotations });
+module.exports = Object.freeze({ MAX_LINES, escapeData, escapeProperty, redact, logFailures, evidenceFailures, stepAnnotations, stepsFrom });

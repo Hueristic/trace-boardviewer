@@ -183,7 +183,13 @@ jobs:
       - name: Annotate failures from the logs and the evidence (runs only after a failure)
         if: failure()
         shell: bash
-        run: node scripts/ci-annotate.cjs --logs="$RUNNER_TEMP/ci-diag" --evidence=test-results/packaged-functional
+        run: |
+          node scripts/ci-annotate.cjs \
+            --step="Windows parser and geometry tests" --log="$RUNNER_TEMP/ci-diag/windows-vitest.log" \
+            --step="Windows desktop boundary tests" --log="$RUNNER_TEMP/ci-diag/windows-desktop.log" \
+            --step="Windows packaged functional QA runner contracts" --log="$RUNNER_TEMP/ci-diag/windows-contracts.log" \
+            --step="Windows packaged functional QA" --json=test-results/packaged-functional/windows-x64.json \
+            --step="Windows release launch" --json=test-results/packaged-functional/release-launch-windows.json
   portable-isolation:
     needs: build
     runs-on: windows-latest
@@ -793,7 +799,16 @@ jobs:
       - name: Annotate failures from the logs and the evidence (runs only after a failure)
         if: failure()
         shell: bash
-        run: node scripts/ci-annotate.cjs --logs="$RUNNER_TEMP/ci-diag" --evidence=test-results/mac
+        run: |
+          node scripts/ci-annotate.cjs \
+            --step="macOS static packaging checks" --log="$RUNNER_TEMP/ci-diag/mac-static.log" \
+            --step="macOS packaged functional QA runner contracts" --log="$RUNNER_TEMP/ci-diag/mac-contracts.log" \
+            --step="macOS TypeScript checks" --log="$RUNNER_TEMP/ci-diag/mac-tsc.log" \
+            --step="macOS parser and geometry tests" --log="$RUNNER_TEMP/ci-diag/mac-vitest.log" \
+            --step="macOS desktop boundary tests" --log="$RUNNER_TEMP/ci-diag/mac-desktop.log" \
+            --step="macOS release launch" --log="$RUNNER_TEMP/ci-diag/mac-release-launch.log" --json="test-results/mac/release-launch-$TRACE_ARCH.json" \
+            --step="macOS packaged-app smoke" --log="$RUNNER_TEMP/ci-diag/mac-smoke.log" --json="test-results/mac/mac-smoke-evidence-$TRACE_ARCH.json" \
+            --step="macOS packaged functional QA" --log="$RUNNER_TEMP/ci-diag/mac-packaged-qa.log" --json=test-results/mac/packaged-functional-arm64.json
   linux:
     # Experimental Linux build: an x86-64 .deb and AppImage (static AppImage runtime) built on an Ubuntu 24.04 runner. The job runs
     # the static packaging checks and the test suites, builds both packages, checks them statically (S0) and smoke-tests them under
@@ -1163,7 +1178,20 @@ jobs:
           overwrite: true
       - name: Annotate failures from the logs and the evidence (runs only after a failure)
         if: failure()
-        run: node scripts/ci-annotate.cjs --logs="$RUNNER_TEMP/ci-diag" --evidence=test-results/linux
+        run: |
+          node scripts/ci-annotate.cjs \
+            --step="Linux static packaging checks" --log="$RUNNER_TEMP/ci-diag/linux-static.log" \
+            --step="Linux packaged functional QA runner contracts" --log="$RUNNER_TEMP/ci-diag/linux-contracts.log" \
+            --step="Linux parser and geometry tests" --log="$RUNNER_TEMP/ci-diag/linux-vitest.log" \
+            --step="Linux desktop boundary tests" --log="$RUNNER_TEMP/ci-diag/linux-desktop.log" \
+            --step="Linux package static checks (S0)" --log="$RUNNER_TEMP/ci-diag/linux-s0.log" --json=test-results/linux/linux-static.json \
+            --step="Linux smoke S1 (deb, restricted)" --log="$RUNNER_TEMP/ci-diag/linux-smoke-S1.log" --json=test-results/linux/smoke-S1-deb-restricted.json \
+            --step="Linux packaged functional QA (installed deb)" --log="$RUNNER_TEMP/ci-diag/linux-packaged-qa-deb.log" --json=test-results/linux/packaged-functional-x64.json \
+            --step="Linux smoke S2 (AppImage, restricted)" --log="$RUNNER_TEMP/ci-diag/linux-smoke-S2.log" --json=test-results/linux/smoke-S2-appimage-restricted.json \
+            --step="Linux smoke S3 (AppImage, userns)" --log="$RUNNER_TEMP/ci-diag/linux-smoke-S3.log" --json=test-results/linux/smoke-S3-appimage-userns.json \
+            --step="Linux packaged functional QA (AppImage)" --log="$RUNNER_TEMP/ci-diag/linux-packaged-qa-appimage.log" --json=test-results/linux/packaged-functional-appimage-x64.json \
+            --step="Linux smoke S4 (unpacked, userns)" --log="$RUNNER_TEMP/ci-diag/linux-smoke-S4.log" --json=test-results/linux/smoke-S4-unpacked-userns.json \
+            --step="Linux release launch" --log="$RUNNER_TEMP/ci-diag/linux-release-launch.log" --json="test-results/linux/release-launch-$TRACE_ARCH.json"
       - name: Stop leftover app processes
         # The smoke script kills what it started; this catches anything a cancelled or timed-out step left behind (app
         # processes and AppImage mounts), so the runner can finish the job cleanly.
