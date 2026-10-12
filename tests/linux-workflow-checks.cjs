@@ -264,7 +264,7 @@ test('static: the workflow never switches the sandbox off and never pre-answers 
 
 test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace state each one needs', () => {
   const expected = {
-    S1: '--scenario S1 --target installed --arch "$TRACE_ARCH" --userns restricted --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S1-deb-restricted.json',
+    S1: '--scenario S1 --target installed --deb "$TRACE_DEB" --arch "$TRACE_ARCH" --userns restricted --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S1-deb-restricted.json',
     S2: '--scenario S2 --target appimage --appimage "$TRACE_APPIMAGE" --arch "$TRACE_ARCH" --userns restricted --expect-sandbox off --expect-gate yes --out test-results/linux/smoke-S2-appimage-restricted.json',
     S3: '--scenario S3 --target appimage --appimage "$TRACE_APPIMAGE" --arch "$TRACE_ARCH" --userns allowed --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S3-appimage-userns.json',
     S4: '--scenario S4 --target unpacked --unpacked "$TRACE_UNPACKED" --arch "$TRACE_ARCH" --userns allowed --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S4-unpacked-userns.json',
@@ -276,7 +276,7 @@ test('static: the four smoke scenarios S1-S4 under Xvfb with the user-namespace 
     assert.equal(step.env.TRACE_FLAVOUR, 'qa', `${scenario} runs the QA flavour`);
     assert.ok(Number.isInteger(step['timeout-minutes']) && step['timeout-minutes'] <= 15, `${scenario} has its own timeout`);
     // Every scenario must be accepted by the script's own argument parser (the variables as the locate step sets them).
-    const values = { '"$TRACE_ARCH"': 'x64', '"$TRACE_APPIMAGE"': 'release-linux/TRACE-Boardviewer-1.2.0-linux-x86_64.AppImage', '"$TRACE_UNPACKED"': 'release-linux/linux-unpacked' };
+    const values = { '"$TRACE_ARCH"': 'x64', '"$TRACE_APPIMAGE"': 'release-linux/TRACE-Boardviewer-1.2.0-linux-x86_64.AppImage', '"$TRACE_UNPACKED"': 'release-linux/linux-unpacked', '"$TRACE_DEB"': 'release-linux/TRACE-Boardviewer-1.2.0-linux-amd64.deb' };
     const argv = ['run', ...args.split(' ').map((word) => values[word] ?? word)];
     assert.deepEqual(smoke.parseArgs(argv).errors, [], `${scenario} arguments parse`);
   }
@@ -428,7 +428,7 @@ test('static: the smoke script refuses to produce evidence off Linux, loads Play
 
 test('static: off Linux, static and run exit 2 with nothing on stdout; summary and --dry-run work everywhere and write nothing', { skip: process.platform === 'linux' && 'on Linux the commands would really run' }, () => {
   const run = (args) => spawnSync(process.execPath, [rel(SMOKE_FILE), ...args], { encoding: 'utf8', timeout: 30000, cwd: os.tmpdir() });
-  for (const args of [['static', '--appimage', 'a.AppImage', '--deb', 'a.deb', '--unpacked', 'u', '--arch', 'x64'], ['run', '--scenario', 'S1', '--target', 'installed', '--arch', 'x64', '--userns', 'restricted', '--expect-sandbox', 'on', '--expect-gate', 'no'], ['run', '--help']]) {
+  for (const args of [['static', '--appimage', 'a.AppImage', '--deb', 'a.deb', '--unpacked', 'u', '--arch', 'x64'], ['run', '--scenario', 'S1', '--target', 'installed', '--deb', 'a.deb', '--arch', 'x64', '--userns', 'restricted', '--expect-sandbox', 'on', '--expect-gate', 'no'], ['run', '--help']]) {
     const result = run(args);
     assert.equal(result.status, 2, `exit code 2 for ${JSON.stringify(args)}`);
     assert.match(result.stderr, /refuses to run on/);
@@ -476,7 +476,7 @@ test('simulated: argument parsing, executable and file names', () => {
   assert.equal(smoke.executableFor({ target: 'installed' }), '/opt/TRACE Boardviewer/trace-boardviewer');
   assert.equal(smoke.executableFor({ target: 'unpacked', unpacked: 'release-linux/linux-unpacked/' }), 'release-linux/linux-unpacked/trace-boardviewer');
   assert.equal(smoke.executableFor({ target: 'installed', executable: '/x/y' }), '/x/y');
-  const base = ['run', '--scenario', 'S1', '--target', 'installed', '--arch', 'x64', '--userns', 'restricted'];
+  const base = ['run', '--scenario', 'S1', '--target', 'installed', '--deb', 'x.deb', '--arch', 'x64', '--userns', 'restricted'];
   assert.deepEqual(smoke.parseArgs([...base, '--expect-sandbox', 'on', '--expect-gate', 'no']).errors, []);
   for (const bad of [
     [], ['bogus'], ['run'], [...base, '--expect-sandbox', 'on', '--expect-gate', 'yes'], [...base, '--expect-sandbox', 'off', '--expect-gate', 'no'],
@@ -486,7 +486,9 @@ test('simulated: argument parsing, executable and file names', () => {
     ['run', '--scenario', 'S1', '--target', 'installed', '--appimage', 'x.AppImage', '--arch', 'x64', '--userns', 'restricted', '--expect-sandbox', 'on', '--expect-gate', 'no'],
     ['run', '--scenario', 'S4', '--target', 'unpacked', '--arch', 'x64', '--userns', 'allowed', '--expect-sandbox', 'on', '--expect-gate', 'no'],
     [...base, '--expect-sandbox', 'on', '--expect-gate', 'no', '--arch', 'universal'], [...base, '--expect-sandbox', 'on', '--expect-gate', 'no', '--userns', 'maybe'],
-    [...base, '--expect-sandbox', 'on', '--expect-gate', 'no', '--bogus'], [...base, '--expect-sandbox', 'on', '--expect-gate', 'no', '--deb', 'x.deb'],
+    [...base, '--expect-sandbox', 'on', '--expect-gate', 'no', '--bogus'], ['run', '--scenario', 'S1', '--target', 'installed', '--arch', 'x64', '--userns', 'restricted', '--expect-sandbox', 'on', '--expect-gate', 'no'],
+    ['run', '--scenario', 'S1', '--target', 'installed', '--deb', 'x.AppImage', '--arch', 'x64', '--userns', 'restricted', '--expect-sandbox', 'on', '--expect-gate', 'no'],
+    ['run', '--scenario', 'S3', '--target', 'appimage', '--appimage', 'x.AppImage', '--deb', 'x.deb', '--arch', 'x64', '--userns', 'allowed', '--expect-sandbox', 'on', '--expect-gate', 'no'],
     [...base, '--expect-sandbox', 'on', '--expect-gate'], [...base, '--expect-sandbox', 'on', '--expect-gate', 'no', '--keep-temp=1'],
     ['static', '--appimage', 'a.AppImage', '--deb', 'a.deb', '--arch', 'x64'], ['static', '--appimage', 'a.zip', '--deb', 'a.deb', '--unpacked', 'u', '--arch', 'x64'],
     ['static', '--appimage', 'a.AppImage', '--deb', 'a.deb', '--unpacked', 'u', '--arch', 'x64', '--keep-temp'],

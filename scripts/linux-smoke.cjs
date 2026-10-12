@@ -4,7 +4,7 @@
 // unpacked app (release-linux/linux-unpacked).
 //
 //   node scripts/linux-smoke.cjs static --appimage <file> --deb <file> --unpacked <dir> --arch x64 [--out <json>]
-//   node scripts/linux-smoke.cjs run --scenario S1 --target installed|appimage|unpacked [--appimage <file>] [--unpacked <dir>]
+//   node scripts/linux-smoke.cjs run --scenario S1 --target installed|appimage|unpacked [--deb <file>] [--appimage <file>] [--unpacked <dir>]
 //        [--executable <path>] --arch x64 --userns restricted|allowed --expect-sandbox on|off --expect-gate yes|no
 //        [--out <json>] [--commit <sha>] [--keep-temp]
 //   node scripts/linux-smoke.cjs summary --dir test-results/linux       (Markdown for $GITHUB_STEP_SUMMARY)
@@ -83,7 +83,8 @@ const GATE = Object.freeze({
   acceptedKey: 'noSandboxAccepted',
   buttons: Object.freeze(['Quit', 'Start without sandbox']),
   checkbox: 'Do not ask again',
-  title: PRODUCT_NAME,
+  // dialog.showMessageBox gets title: app.name, which electron/main.cjs sets with app.setName('TRACE Boardviewer') for every flavour.
+  title: 'TRACE Boardviewer',
 });
 // Chromium switches that turn (part of) the OS sandbox off. None of them is ever passed by this script.
 const SANDBOX_OFF_SWITCHES = Object.freeze(['no-sandbox', 'disable-setuid-sandbox', 'disable-namespace-sandbox', 'disable-seccomp-filter-sandbox', 'no-zygote-sandbox']);
@@ -121,7 +122,7 @@ const NOT_COVERED = Object.freeze([
 const USAGE = [
   'Usage:',
   '  node scripts/linux-smoke.cjs static --appimage <file> --deb <file> --unpacked <dir> --arch <x64|arm64> [--out <json>] [--dry-run]',
-  '  node scripts/linux-smoke.cjs run --scenario <S1..S9> --target <installed|appimage|unpacked> [--appimage <file>] [--unpacked <dir>]',
+  '  node scripts/linux-smoke.cjs run --scenario <S1..S9> --target <installed|appimage|unpacked> [--deb <file>] [--appimage <file>] [--unpacked <dir>]',
   '       [--executable <path>] --arch <x64|arm64> --userns <restricted|allowed> --expect-sandbox <on|off> --expect-gate <yes|no>',
   '       [--out <json>] [--commit <sha>] [--keep-temp] [--dry-run]',
   '  node scripts/linux-smoke.cjs summary --dir <directory with evidence JSON files>',
@@ -148,7 +149,7 @@ const VALUED = Object.freeze({
 const FLAGS = Object.freeze({ '--keep-temp': 'keepTemp', '--dry-run': 'dryRun', '--help': 'help', '-h': 'help' });
 const ALLOWED = Object.freeze({
   static: ['appimage', 'deb', 'unpacked', 'arch', 'out', 'commit', 'dryRun', 'help'],
-  run: ['scenario', 'target', 'appimage', 'unpacked', 'executable', 'arch', 'userns', 'expectSandbox', 'expectGate', 'out', 'commit', 'keepTemp', 'dryRun', 'help'],
+  run: ['scenario', 'target', 'deb', 'appimage', 'unpacked', 'executable', 'arch', 'userns', 'expectSandbox', 'expectGate', 'out', 'commit', 'keepTemp', 'dryRun', 'help'],
   summary: ['dir', 'help'],
 });
 const optionName = (key) => Object.keys(VALUED).find((name) => VALUED[name] === key) ?? Object.keys(FLAGS).find((name) => FLAGS[name] === key) ?? key;
@@ -204,6 +205,12 @@ function parseArgs(argv, env = {}) {
     if (parsed.expectGate === 'no' && parsed.expectSandbox === 'off') parsed.errors.push('--expect-sandbox off needs --expect-gate yes (a process without the sandbox must ask first)');
     if (parsed.appimage && parsed.target && parsed.target !== 'appimage') parsed.errors.push('--appimage is only used with --target appimage');
     if (parsed.unpacked && parsed.target && parsed.target !== 'unpacked') parsed.errors.push('--unpacked is only used with --target unpacked');
+    if (parsed.deb && parsed.target && parsed.target !== 'installed') parsed.errors.push('--deb is only used with --target installed');
+    // TB-084: the installed version must be the version of the .deb this run was given, so --target installed names that file.
+    if (parsed.target === 'installed') {
+      if (!parsed.deb) parsed.errors.push('--target installed needs --deb <file>, the .deb that was installed');
+      else if (!/\.deb$/.test(parsed.deb)) parsed.errors.push('--deb must name a .deb file');
+    }
     if (parsed.target === 'appimage') {
       const file = parsed.executable || parsed.appimage;
       if (!file) parsed.errors.push('--target appimage needs --appimage <file>');

@@ -55,23 +55,38 @@ function logFailures(text) {
   return out;
 }
 
+const text = (value) => (typeof value === 'string' ? value : JSON.stringify(value));
+
 /**
- * The failures of one smoke evidence file, in this order: its error, its failing checks, its problems, its failed steps. Each is
- * redacted and clipped. A file that is not evidence of a failure gives nothing.
+ * The failures of one smoke or packaged-QA evidence file, in this order: its error, the stage and reasons that stopped a packaged-QA
+ * run (failure, failures, manifestProblems), its failing checks with their detail, its problems, its failed steps. Each is redacted
+ * and clipped. A file that is not evidence of a failure gives nothing.
  */
 function evidenceFailures(data) {
   const out = [];
   if (!data || typeof data !== 'object') return out;
-  if (data.error) out.push(`error: ${clip(typeof data.error === 'string' ? data.error : JSON.stringify(data.error))}`);
-  if (Array.isArray(data.failedChecks)) {
-    for (const item of data.failedChecks) out.push(`failed check: ${clip(typeof item === 'string' ? item : JSON.stringify(item))}`);
-  }
-  if (Array.isArray(data.checks)) {
-    for (const check of data.checks) {
-      if (check && (check.passed === false || check.status === 'fail')) out.push(`failed check: ${clip(String(check.name ?? JSON.stringify(check)))}`);
+  if (data.error) out.push(`error: ${clip(text(data.error))}`);
+  const failure = data.failure && typeof data.failure === 'object' ? data.failure : null;
+  if (failure) out.push(clip(`stopped${failure.stage ? ` at ${failure.stage}` : ''}: ${text(failure.message ?? failure)}`));
+  if (Array.isArray(data.failures)) {
+    for (const item of data.failures) {
+      const message = item && typeof item === 'object' ? `${item.name ?? item.stage ?? 'failure'}: ${text(item.message ?? item.error ?? item)}` : text(item);
+      if (!failure || !message.includes(String(failure.message ?? ''))) out.push(clip(`failure ${message}`));
     }
   }
-  if (Array.isArray(data.problems)) for (const item of data.problems) out.push(`problem: ${clip(typeof item === 'string' ? item : JSON.stringify(item))}`);
+  if (Array.isArray(data.manifestProblems)) for (const item of data.manifestProblems) out.push(clip(`evidence manifest: ${text(item)}`));
+  const checkNames = new Set();
+  if (Array.isArray(data.checks)) {
+    for (const check of data.checks) {
+      if (!check || (check.passed !== false && check.status !== 'fail')) continue;
+      checkNames.add(String(check.name));
+      out.push(`failed check: ${clip(`${String(check.name ?? JSON.stringify(check))}${check.detail ? ` — ${text(check.detail)}` : ''}`)}`);
+    }
+  }
+  if (Array.isArray(data.failedChecks)) {
+    for (const item of data.failedChecks) if (!checkNames.has(String(item))) out.push(`failed check: ${clip(text(item))}`);
+  }
+  if (Array.isArray(data.problems)) for (const item of data.problems) out.push(`problem: ${clip(text(item))}`);
   if (data.passed === false) out.push('passed: false');
   if (typeof data.status === 'string' && data.status !== 'pass' && data.status !== 'passed') out.push(`status: ${data.status}`);
   if (Array.isArray(data.steps)) {

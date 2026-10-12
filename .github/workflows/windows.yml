@@ -129,7 +129,7 @@ jobs:
           "$traceHash  $([IO.Path]::GetFileName($traceQaExe))" | Set-Content -LiteralPath "$traceQaExe.sha256" -Encoding ascii
           $traceQaUnpacked = Join-Path release-qa 'win-unpacked'
           if (-not (Test-Path -LiteralPath $traceQaUnpacked -PathType Container)) { throw 'release-qa/win-unpacked is missing: the QA payload manifest cannot be generated.' }
-          node scripts/payload-manifest.cjs --dir $traceQaUnpacked --out payload-manifest-qa.json
+          node scripts/payload-manifest.cjs --dir $traceQaUnpacked --out payload-manifest-qa.json --flavour qa
           if ($LASTEXITCODE -ne 0) { throw "QA payload manifest generation failed with exit code $LASTEXITCODE." }
       - name: Run packaged functional QA against the manifest-linked Windows QA payload (QA flavour)
         env:
@@ -977,7 +977,7 @@ jobs:
           test -f /etc/apparmor.d/trace-boardviewer-qa
           sudo cat /sys/kernel/security/apparmor/profiles | grep -F 'trace-boardviewer-qa (unconfined)'
           mkdir -p "$RUNNER_TEMP/ci-diag"
-          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S1 --target installed --arch "$TRACE_ARCH" --userns restricted --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S1-deb-restricted.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-smoke-S1.log"
+          xvfb-run -a -s '-screen 0 1600x1000x24' node scripts/linux-smoke.cjs run --scenario S1 --target installed --deb "$TRACE_DEB" --arch "$TRACE_ARCH" --userns restricted --expect-sandbox on --expect-gate no --out test-results/linux/smoke-S1-deb-restricted.json 2>&1 | tee "$RUNNER_TEMP/ci-diag/linux-smoke-S1.log"
       - name: Run packaged functional QA against the installed QA DEB under S1 sandbox policy (QA flavour)
         if: "!cancelled() && steps.locate_qa.outcome == 'success'"
         timeout-minutes: 20
