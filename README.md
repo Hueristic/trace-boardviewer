@@ -22,18 +22,21 @@ Open a boardview or PCB file (KiCad, EAGLE, selected Allegro/Altium layouts and 
 
 **Quick compatibility · 1.3.3**
 
-| | What you can use | Scope or reason |
+| Status | Format or feature | What has been checked |
 | --- | --- | --- |
-| ✓ | GenCAD, KiCad PCB, EAGLE XML, Altium PcbDoc, EasyEDA Pro | Selected real exports checked; version and geometry limits apply. |
-| ✓ | BRD/BRD2, BDV, BVR, ASC, BV/BV2, TVW, FZ/CAE, F2B | Selected boardview variants; some bodies and pad sizes are estimates. FZ/CAE tries default format keys. |
-| ✓ | Native Allegro BRD | Real checks cover 16.2, 16.4, 16.5, 16.6 and 17.2; other documented layouts use synthetic tests. Unknown layouts are refused. |
-| ✓ | Mentor Neutral, Tebo ICT pairs, Fabmaster FARC/FAZ | Documented component/pin subsets; companion files and omitted geometry are explained. |
-| ✓ | KiCad/EAGLE/Altium schematics, PDFs and images | Offline search and cross-probe; scanned PDFs have optional English OCR. |
-| ⚠ | HyperLynx, Fabmaster FATF, EasyEDA Standard, CSV/TSV, ZIP, XZZ | Draft validation; encrypted XZZ needs your session key. IPC-2581, IPC-D-356 and ODB++ were checked with open-tool exports; vendor writers remain unverified. |
-| ✗ | Native PADS SDB, BRD_V1.0, VS2 listings, Gerber as a complete board | Recognized with an explanation; the complete electrical model or format mapping is missing or unverified. Request a readable export. |
-| ✗ | Every dialect, unavailable encryption keys, PCB editing or copper routing | This is a viewer for documented layouts. Key entry is skippable; unsupported files never lock the app. |
+| Supported, selected variants | GenCAD, KiCad PCB, EAGLE board XML, Altium PcbDoc, EasyEDA Pro, and documented boardview variants | Exact variants, geometry and record limits are listed in the full table. |
+| Supported, selected variants | KiCad, EAGLE and Altium schematics; PDF and image documents | Offline viewing and search; scanned-PDF OCR is optional and English-only. |
+| Limited | Native Cadence Allegro BRD | Selected layouts; maximum 240 MiB and 4 million declared objects. Unknown layouts and footprint layers are refused. |
+| Limited | Samsung CAD | Records are checked on selected files; physical scale and every dialect are not established. |
+| Limited | CAST CST | Only documented component layers are imported; other observed layer mappings remain unsupported. |
+| Limited | IPC-2581 | Checked with 27 IPC-2581 files written by KiCad 9 `kicad-cli` from open designs; vendor writers are unverified. |
+| Limited | IPC-D-356 | Checked with 39 files written by KiCad 9 `kicad-cli` from open designs; vendor writers are unverified. |
+| Limited | ODB++ | Checked with 39 archives written by KiCad 9 `kicad-cli` from open designs; vendor writers and copper pours/text are unverified or not read. |
+| Limited | HyperLynx, Fabmaster FATF, EasyEDA Standard, CSV/TSV, ZIP and XZZ | Draft or selected-subset support; encrypted XZZ requires a session key. See the full table. |
+| Unsupported as a complete board | Native PADS SDB, BRD_V1.0 encoded boards, VS2 listings and Gerber | Recognized with an explanation but not imported as a complete electrical board. |
+| Not provided | PCB editing or copper routing | TRACE is a viewer; key entry is optional and can be skipped. |
 
-Windows x64, macOS Apple silicon and Linux x86-64 share these features; macOS/Linux packages are experimental. [Full file types and exact limits](docs/SUPPORT.md).
+Windows x64 is the supported desktop target. macOS Apple silicon and Linux x86-64 downloads remain experimental. The v1.3.3 Windows package passed a startup check; Linux packages passed startup and visible-window checks under Ubuntu 24.04 WSL2. These were startup checks, not full feature acceptance; WSL2 is not native Linux acceptance. [Full file types and exact limits](docs/SUPPORT.md).
 
 <p align="center">Free and open source (MIT) · no account, no telemetry · 
 <a href="https://ko-fi.com/tracerboardview">Ko-fi</a> · 
@@ -103,7 +106,7 @@ Release builds target Windows x64, Linux x86-64 and macOS Apple silicon. The mac
 
 ## Run on Linux (experimental)
 
-Each release from 1.3.0 on carries two packages of the same x86-64 build. They are built and smoke-tested automatically on Ubuntu 24.04 (GitHub Actions, virtual X display); they have not been tested on a desktop Linux machine yet, and other distributions, desktop environments and Wayland sessions are not tested either. Neither package is signed: check it against the `.sha256` file next to it (`sha256sum -c <file>.sha256`).
+Each release from 1.3.0 on carries two packages of the same x86-64 build. They are built and smoke-tested automatically on Ubuntu 24.04 (GitHub Actions, virtual X display). The v1.3.3 packages also passed startup and visible-window checks in Ubuntu 24.04 on WSL2; this is not a native Linux desktop or full feature acceptance test. Other distributions, desktop environments and Wayland sessions are not tested. Neither package is signed: check it against the `.sha256` file next to it (`sha256sum -c <file>.sha256`).
 
 - **Ubuntu 24.04 (the tested configuration): `TRACE-Boardviewer-<version>-linux-amd64.deb`.** Install it with `sudo apt install ./TRACE-Boardviewer-<version>-linux-amd64.deb` and start TRACE Boardviewer from the application menu (or run `trace-boardviewer`). The package installs to `/opt/TRACE Boardviewer`. On systems with AppArmor 4, such as Ubuntu 24.04, it also installs the profile `/etc/apparmor.d/trace-boardviewer`, which lets Chromium's sandbox use user namespaces under Ubuntu's restriction. Remove it with `sudo apt remove trace-boardviewer`; your settings and notes stay.
 - **Other distributions, not tested by TRACE: `TRACE-Boardviewer-<version>-linux-x86_64.AppImage` (portable, nothing is installed).** Make it executable (`chmod +x`) and run it. Its static AppImage runtime needs no libfuse2. Where unprivileged user namespaces are allowed (Fedora, Debian, Arch and openSUSE by default, none of them tested by TRACE) Chromium's sandbox works as usual. Ubuntu 23.10 and newer restrict them, so there the AppImage can only run without the sandbox; TRACE then asks before it starts that way (Quit is the default, and "Do not ask again" remembers a yes). Use the `.deb` on Ubuntu.
@@ -130,7 +133,7 @@ Known limits: the window icon on GNOME under Wayland comes from an installed des
 - **Format diagnostic report:** analyze an unreadable board locally from Help, review counts and format facts, and save or copy the report yourself. No file content or key is included, and nothing is uploaded.
 - **In-app bug reports:** review the exact report before sending it to a separate receiver. Drafts and retries stay on your device; sending and retrying always require your action.
 - Workshop and Focus layouts and dark/light/system themes.
-- Interface in Hungarian, English, German, French, Italian, Slovak, Polish and Ukrainian, with instant switching (the technician-workspace features added in 1.2.0 are still English in every language; see [Languages](#languages)).
+- Interface available in Hungarian, English, German, French, Italian, Slovak, Polish and Ukrainian, with instant switching. Translation coverage varies by screen; some newer workspace text remains English (see [Languages](#languages)).
 - Rendering optimizations for dense nets and large boards.
 
 | Action | Shortcut |
@@ -185,8 +188,8 @@ Screenshots of TRACE 1.3.2 with synthetic test boards made for this project; no 
 
 - **Choosing the language.** A fresh profile follows the system language when it is one of the eight, otherwise English. A profile saved before language support existed keeps the Hungarian interface it was used with; its theme, layout, recent boards and notes are unchanged. Once you pick a language it is saved with the other settings and always wins.
 - **Switching.** Choose **Settings → Language**, where each language is listed by its own name. The interface changes instantly; the open board, selection and notes are not reloaded.
-- **What is translated.** The welcome screen, the board view and its tools, the component inspector (selection, pins and nets, connections), settings, board information, recent boards and the first part of the help dialog, the support and update notices, loading and error messages, the native file dialog and the importer's errors and warnings.
-- **Not translated yet.** The technician-workspace features added in 1.2.0 are English in every language: the Board / Schematic / Documents tabs and the save status, the search field and its results, the Documents and Schematic views and the PDF, image and schematic viewers, the note, link-and-aliases, export and encryption-key dialogs, the schematic, documents, notes and bookmarks sections of the inspector, the last rows of the help dialog and the workspace messages.
+- **Translation coverage.** The interface can be switched among all eight languages. Many core screens, import messages and dialogs are translated. Version 1.3.3 adds workspace file-status text and more search, export, refusal and accessibility labels to the catalogs.
+- **Still partly in English.** Some workspace views, labels and messages have not been translated in every language. Translation coverage varies by area; 1.3.3 does not claim a fully translated workspace.
 - **What is never translated.** Board data: component references, values, packages, net names and file names. Your own notes stay exactly as you wrote them. Units stay `mm`, and keyboard shortcuts do not change. Numbers and dates follow the selected language's conventions.
 
 Translations live in feature namespaces under `electron/locales/<language>/`. See [CONTRIBUTING.md](CONTRIBUTING.md) to add or improve one.
@@ -208,7 +211,7 @@ Translations live in feature namespaces under `electron/locales/<language>/`. Se
 Guides on the website: [getting started](https://trace-boardviewer.github.io/getting-started/) · [Linux packages](https://trace-boardviewer.github.io/linux/) · [1-minute demo](https://trace-boardviewer.github.io/demo/) · [KiCad PCB viewer](https://trace-boardviewer.github.io/kicad-pcb-viewer/) · [free EAGLE viewer](https://trace-boardviewer.github.io/eagle-viewer/) · [GenCAD viewer](https://trace-boardviewer.github.io/gencad-viewer/) · [native Allegro BRD viewer](https://trace-boardviewer.github.io/allegro-brd-viewer/) · [Altium PcbDoc and SchDoc viewer](https://trace-boardviewer.github.io/altium-viewer/) · [open a .brd file](https://trace-boardviewer.github.io/open-brd-file/) · [open a .bvr file](https://trace-boardviewer.github.io/open-bvr-file/) · [comparison with other boardviewers](https://trace-boardviewer.github.io/boardview-software-comparison/) · [release notes](https://trace-boardviewer.github.io/changelog/)
 - Schematics: KiCad `.kicad_sch` (6.0–9.0), KiCad legacy `.sch` (with its `-cache.lib`/`.lib`), EAGLE `.sch` and Altium `.SchDoc` (with sibling sheets and `.PrjPcb` for hierarchy). Altium real-file checks cover flat designs; repeated sheets and project scope have synthetic checks only.
 - A PDF is a document, not a boardview or a netlist. Pages without a text layer (scans) can be read with the built-in text recognition (OCR, English, fully offline): recognized words are marked with their confidence, and only exact board names read with high confidence become links.
-- Files are limited to 64 MiB; larger or pathological inputs are rejected with a precise error rather than guessed.
+- Most inputs are limited to 64 MiB. Native Cadence Allegro BRD is the exception: up to 240 MiB and 4 million declared objects. Larger or pathological inputs are rejected with a precise error rather than guessed.
 
 No customer or manufacturer board file is included in this repository or in the application. A `.cad` (or any) extension alone never identifies a format: TRACE detects formats by their bytes.
 
