@@ -22,19 +22,19 @@ Open a boardview or PCB file (KiCad, EAGLE, selected Allegro/Altium layouts and 
 
 **Quick compatibility · 1.3.3**
 
-| Status | Format or feature | What has been checked |
+| Status | Formats or feature | Scope |
 | --- | --- | --- |
-| Supported, selected variants | GenCAD, KiCad PCB, EAGLE board XML, Altium PcbDoc, EasyEDA Pro, and documented boardview variants | Exact variants, geometry and record limits are listed in the full table. |
-| Supported, selected variants | KiCad, EAGLE and Altium schematics; PDF and image documents | Offline viewing and search; scanned-PDF OCR is optional and English-only. |
-| Limited | Native Cadence Allegro BRD | Selected layouts; maximum 240 MiB and 4 million declared objects. Unknown layouts and footprint layers are refused. |
-| Limited | Samsung CAD | Records are checked on selected files; physical scale and every dialect are not established. |
-| Limited | CAST CST | Only documented component layers are imported; other observed layer mappings remain unsupported. |
-| Limited | IPC-2581 | Checked with 27 IPC-2581 files written by KiCad 9 `kicad-cli` from open designs; vendor writers are unverified. |
-| Limited | IPC-D-356 | Checked with 39 files written by KiCad 9 `kicad-cli` from open designs; vendor writers are unverified. |
-| Limited | ODB++ | Checked with 39 archives written by KiCad 9 `kicad-cli` from open designs; vendor writers and copper pours/text are unverified or not read. |
-| Limited | HyperLynx, Fabmaster FATF, EasyEDA Standard, CSV/TSV, ZIP and XZZ | Draft or selected-subset support; encrypted XZZ requires a session key. See the full table. |
-| Unsupported as a complete board | Native PADS SDB, BRD_V1.0 encoded boards, VS2 listings and Gerber | Recognized with an explanation but not imported as a complete electrical board. |
-| Not provided | PCB editing or copper routing | TRACE is a viewer; key entry is optional and can be skipped. |
+| ✓ | GenCAD 1.4, KiCad PCB, EAGLE board XML, Altium PcbDoc, EasyEDA Pro | Selected documented variants; see the full table for exact coverage. |
+| ✓ | Landrex/TestLink BRD, TOPTEST BRD2, Honhan BDV, BVR, ASC companion trio | Supported variants and geometry estimates are listed in the full table. |
+| ✓ | Jet BV, BV2, TVW, FZ/CAE, Unisoft F2B, Mentor Neutral, Tebo ICT, Fabmaster FARC/FAZ | Selected documented variants; companion and geometry limits apply. |
+| ✓ | KiCad, EAGLE and Altium schematics; PDFs and images | Offline viewing and search; scanned-PDF OCR is optional and English-only. |
+| ⚠ | Native Cadence Allegro BRD | Selected layouts; up to 240 MiB and 4 million declared objects. Other layouts are refused. |
+| ⚠ | Samsung CAD; CAST CST | Samsung scale/dialects are not fully established; CST imports documented component layers only. |
+| ⚠ | IPC-2581; IPC-D-356 | Checked with open-design files written by KiCad 9 `kicad-cli`; vendor writers are unverified. |
+| ⚠ | ODB++ | Open-design files written by KiCad 9 `kicad-cli`; selected copper pads, lines, arcs and drilled holes are displayed, but pours and text are not read. |
+| ⚠ | HyperLynx, Fabmaster FATF, EasyEDA Standard, CSV/TSV, ZIP, XZZ | Draft or selected-subset support; encrypted XZZ needs a session key. |
+| ✗ | Native PADS SDB, BRD_V1.0 encoded boards, VS2 listings, Gerber as a complete board | Recognized with an explanation but not imported as a complete electrical board. |
+| ✗ | PCB editing and copper routing | Not provided. |
 
 Windows x64 is the supported desktop target. macOS Apple silicon and Linux x86-64 downloads remain experimental. The v1.3.3 Windows package passed a startup check; Linux packages passed startup and visible-window checks under Ubuntu 24.04 WSL2. These were startup checks, not full feature acceptance; WSL2 is not native Linux acceptance. [Full file types and exact limits](docs/SUPPORT.md).
 
@@ -217,7 +217,7 @@ No customer or manufacturer board file is included in this repository or in the 
 
 The importer preserves physical dimensions for pads whose shape the format states exactly. Other pad shapes are approximated by their bounds and reported in the board information panel; if pad dimensions are missing the view uses display markers and says so.
 
-Connection guides show logical net relationships. They do not show actual copper traces. Schematic connectivity comes from the schematic file (KiCad: computed from wires, junctions, labels and power symbols; EAGLE: the nets the file declares), never from a PDF or an image.
+Connection guides show logical net relationships; they are separate from board copper geometry. ODB++ boards also display supported copper pads, lines, arcs and drilled holes in the 2D view. Copper pours, text, fonts, solder mask and silkscreen are not read, so this is not a complete copper-routing view. Schematic connectivity comes from the schematic file (KiCad: computed from wires, junctions, labels and power symbols; EAGLE: the nets the file declares), never from a PDF or an image.
 
 ## Develop and build
 
