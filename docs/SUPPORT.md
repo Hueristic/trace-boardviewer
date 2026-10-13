@@ -394,16 +394,17 @@ No customer or manufacturer board is included in the repository or the applicati
 ### EasyEDA Pro PCB
 
 - **Variants:**
-  - project archive (.epro, or the .zip backup the client writes: project.json + PCB/ + FOOTPRINT/, line-based JSON arrays, format 1.x)
+  - V1/V2 project archive (.epro, or the .zip backup the client writes: project.json + PCB/ + FOOTPRINT/, line-based JSON arrays, format 1.x)
+  - V3 project archive (.epro2: project2.json and embedded .epru PCB logs)
   - bare PCB document (.epcb: components only, no pads)
-- **Units:** mil (0.0254 mm); the vendor text says 0.01 inch, real files say mil
-- **Sides:** COMPONENT layer TOP/BOTTOM (bottom parts are mirrored and turned by their angle plus 180: confirmed by a manufacturer flying-probe export and a CPL for 0, 90, 180 and 270 degrees; other bottom angles follow the same rule and are not checked against a real file); pad layer MULTI is both
+- **Units:** V1/V2: mil (0.0254 mm); V3: reads the CANVAS-declared unit when it is mil or mm
+- **Sides:** COMPONENT layer TOP/BOTTOM (bottom placement is confirmed by a manufacturer flying-probe export and a CPL at 0°, 90°, 180° and 270°; other angles follow the same rule but are unverified against real files); pad layer MULTI is both
 - **Notes and limits:**
   - Validated with real files: eight open-licence EasyEDA Pro projects (twelve .zip project backups plus the same projects exported from the offline .eprj databases); top-side pad positions agree with the routed tracks of the same nets.
-  - No real bottom-side component was available and the vendor documents are silent on the bottom mirror: the mirror-then-rotate convention is unverified and every import with a bottom-side part says so.
+  - A manufacturer flying-probe export and a CPL confirm bottom-side placement at 0°, 90°, 180° and 270°. Other angles follow the same rule but are unverified against real files; check pad positions at those angles.
   - Tracks, vias, copper pours and text are not read (nets come from the PAD_NET assignments); oval, polygon and n-gon pads are drawn as bounding rectangles and counted as approximated; footprint pad overrides are ignored and disclosed.
   - Outline: OUTLINE-layer lines, arcs, polylines and circles stitched into the largest closed loop (arcs and curves are sampled); inner loops are disclosed as cutouts. A bare .epcb has no footprints, so it shows part positions only.
-  - The offline .eprj/.elib SQLite databases and the V3 log format are recognized and rejected with a hint (export an .epro); schematics and panels are not boards.
+  - The .epro2 V3 project archive is read when it contains project2.json and a readable PCB .epru log with components; damaged projects, projects without a V3 log, and projects without a PCB document with components are refused by name. The offline .eprj/.elib SQLite databases remain recognized and rejected with a hint to export an .epro; schematics and panels are not boards.
 
 ### ODB++ archive
 

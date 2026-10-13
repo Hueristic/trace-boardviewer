@@ -1,0 +1,2 @@
+- The EasyEDA Pro support table now describes readable `.epro2` V3 project archives and embedded `.epru` PCB logs, confirms only the real-file-tested bottom angles, and retains the SQLite database limitation. `.epru` is not listed as a standalone picker extension.
+- The README guide list now links to the EasyEDA Pro and ODB++ viewer guides. No app behavior changes.
