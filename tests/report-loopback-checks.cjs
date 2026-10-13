@@ -16,9 +16,9 @@ const contract = require('../shared/bug-report-contract.cjs');
 const hasOpenssl = spawnSync('openssl', ['version'], { encoding: 'utf8' }).status === 0;
 const sha256 = (text) => createHash('sha256').update(text, 'utf8').digest('hex');
 
-function post({ port, host = REPORT_HOST, urlPath = REPORT_PATH, body = '' }) {
+function post({ port, ca, host = REPORT_HOST, serverName = REPORT_HOST, urlPath = REPORT_PATH, body = '' }) {
   return new Promise((resolve, reject) => {
-    const request = https.request({ host: '127.0.0.1', port, path: urlPath, method: 'POST', rejectUnauthorized: false,
+    const request = https.request({ host: '127.0.0.1', servername: serverName, port, path: urlPath, method: 'POST', ca, rejectUnauthorized: true,
       headers: { host, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } }, (response) => {
       const chunks = [];
       response.on('data', (chunk) => chunks.push(chunk));
@@ -33,7 +33,7 @@ test('the loopback receiver answers a report with the contract acknowledgement (
   const loop = await startReportLoopback();
   try {
     const body = JSON.stringify({ schema: contract.SCHEMA, reportId: 'report-loopback-1', description: 'synthetic', diagnostics: null });
-    const { status, text } = await post({ port: loop.port, body });
+    const { status, text } = await post({ port: loop.port, ca: loop.caCertificate, body });
     assert.equal(status, 201);
     assert.ok(contract.isValidAcknowledgement(JSON.parse(text), 'report-loopback-1', sha256(body)), `acknowledgement: ${text}`);
     assert.deepEqual(loop.received, [{ reportId: 'report-loopback-1', bytes: Buffer.byteLength(body), sha256: sha256(body) }]);
@@ -45,21 +45,24 @@ test('the loopback receiver answers a report with the contract acknowledgement (
 test('the loopback receiver refuses another path, another host header, a body without a report id, and an oversized body', { skip: !hasOpenssl && 'openssl is not installed' }, async () => {
   const loop = await startReportLoopback();
   try {
-    assert.equal((await post({ port: loop.port, urlPath: '/v1/other', body: '{"reportId":"x"}' })).status, 404);
-    assert.equal((await post({ port: loop.port, host: 'example.invalid', body: '{"reportId":"x"}' })).status, 404);
-    assert.equal((await post({ port: loop.port, body: '{"description":"no id"}' })).status, 400);
-    await assert.rejects(post({ port: loop.port, body: 'x'.repeat(70 * 1024) }));
+    assert.equal((await post({ port: loop.port, ca: loop.caCertificate, urlPath: '/v1/other', body: '{"reportId":"x"}' })).status, 404);
+    assert.equal((await post({ port: loop.port, ca: loop.caCertificate, host: 'example.invalid', body: '{"reportId":"x"}' })).status, 404);
+    assert.equal((await post({ port: loop.port, ca: loop.caCertificate, body: '{"description":"no id"}' })).status, 400);
+    await assert.rejects(post({ port: loop.port, ca: loop.caCertificate, body: 'x'.repeat(70 * 1024) }));
+    await assert.rejects(post({ port: loop.port, ca: Buffer.from('not a trusted certificate'), body: '{"reportId":"untrusted"}' }), /certificate|issuer|self-signed/i);
+    await assert.rejects(post({ port: loop.port, ca: loop.caCertificate, serverName: 'example.invalid', body: '{"reportId":"wrong-host"}' }), /certificate|hostname|altname/i);
     assert.deepEqual(loop.received, [], 'nothing refused is recorded as received');
   } finally {
     await loop.close();
   }
 });
 
-test('the QA app is pointed at the loopback receiver by its host-resolver rule, and trusts only that run certificate', { skip: !hasOpenssl && 'openssl is not installed' }, async () => {
+test('the QA app is pointed at the loopback receiver and pins certificate exceptions to that run key', { skip: !hasOpenssl && 'openssl is not installed' }, async () => {
   const loop = await startReportLoopback();
   try {
     assert.ok(loop.launchArgs.includes(`--host-resolver-rules=MAP ${REPORT_HOST} 127.0.0.1:${loop.port}`), JSON.stringify(loop.launchArgs));
-    assert.ok(loop.launchArgs.includes('--ignore-certificate-errors'));
+    assert.ok(loop.launchArgs.includes(`--ignore-certificate-errors-spki-list=${loop.spkiSha256}`));
+    assert.equal(loop.launchArgs.some(arg => arg === '--ignore-certificate-errors'), false, 'the QA app does not disable certificate verification globally');
     assert.equal(loop.host, REPORT_HOST);
   } finally {
     await loop.close();

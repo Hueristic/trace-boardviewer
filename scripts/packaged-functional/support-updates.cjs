@@ -625,7 +625,7 @@ async function testNetworkConsentAndUpdateFailure(ctx, page) {
   assert.equal(bridge.settings.updateCheck, false, 'the packaged QA profile starts with automatic update checks opted out');
   const updateFeature = bridge.activity.features.find(feature => feature.id === 'update-check');
   assert.ok(updateFeature, 'the registered update feature is visible in network activity');
-  assert.ok(updateFeature.hosts.includes('api.github.com'), 'the update feature reports its fixed public host');
+  assert.deepEqual(updateFeature.hosts, ['api.github.com'], 'the update feature reports only its exact registered public host');
   assert.equal(updateFeature.enabled, false, 'the automatic update feature starts disabled in the QA profile');
 
   await page.locator('[data-testid=settings-button]').click();

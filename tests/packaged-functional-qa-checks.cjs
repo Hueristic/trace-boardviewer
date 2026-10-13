@@ -325,9 +325,17 @@ test('required scenario modules run sequentially and missing or assertion-free m
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'trace-qa-modules-'));
   const order = [];
   const context = { step: async (name, action) => { order.push(name); return require('../scripts/packaged-functional-qa.cjs').recordStep(name, action || (async () => null)); } };
+  const fixtures = Object.freeze([
+    { id: 'imports', source: "exports.run = async (ctx) => { await ctx.step('imports'); return 'imports'; };\n" },
+    { id: 'viewers', source: "exports.run = async (ctx) => { await ctx.step('viewers'); return 'viewers'; };\n" },
+    { id: 'workspaces', source: "exports.run = async (ctx) => { await ctx.step('workspaces'); return 'workspaces'; };\n" },
+    { id: 'support-updates', source: "exports.run = async (ctx) => { await ctx.step('support-updates'); return 'support-updates'; };\n" },
+    { id: 'bug-reports', source: "exports.run = async (ctx) => { await ctx.step('bug-reports'); return 'bug-reports'; };\n" },
+  ]);
   try {
-    for (const id of SCENARIO_MANIFEST.modules) {
-      await fs.writeFile(path.join(directory, id + '.cjs'), `exports.run = async (ctx) => { await ctx.step(${JSON.stringify(id)}); return ${JSON.stringify(id)}; };\n`);
+    assert.deepEqual(fixtures.map(({ id }) => id), [...SCENARIO_MANIFEST.modules], 'static fixture modules cover the complete required scenario manifest in order');
+    for (const fixture of fixtures) {
+      await fs.writeFile(path.join(directory, fixture.id + '.cjs'), fixture.source);
     }
     const results = await runRequiredScenarioModules(context, directory);
     assert.deepEqual(order, [...SCENARIO_MANIFEST.modules]);

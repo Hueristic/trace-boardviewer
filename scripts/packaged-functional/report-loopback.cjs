@@ -3,11 +3,11 @@
 // Offline stand-in for the real bug-report receiver, for the packaged QA run only (HUNT-LNX-20261011-06: the send step needed the real
 // endpoint, which an offline run cannot reach). The QA app is launched with a host-resolver rule that points the report host at this
 // loopback server. The request keeps its exact URL, so the inspector's gate still matches it, and the bytes never leave the machine.
-// The certificate is made per run by openssl for that host name only; the QA app alone trusts it (--ignore-certificate-errors is a
-// QA-only launch argument). The answer is the contract's own acknowledgement: the report id from the body and the SHA-256 of the exact
+// The certificate is made per run by openssl for that host name only; the QA app permits certificate exceptions only for its SPKI hash.
+// The answer is the contract's own acknowledgement: the report id from the body and the SHA-256 of the exact
 // bytes received, which is what the app checks before it reports the report as received.
 
-const { createHash } = require('node:crypto');
+const { createHash, X509Certificate } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const fsSync = require('node:fs');
 const fsp = require('node:fs/promises');
@@ -28,7 +28,10 @@ function makeCertificate(dir) {
   if (result.error || result.status !== 0) {
     throw new Error(`openssl could not make the loopback certificate for the offline QA run: ${(result.error && result.error.message) || result.stderr || `exit ${result.status}`}`);
   }
-  return { key: fsSync.readFileSync(key), cert: fsSync.readFileSync(cert) };
+  const certificate = fsSync.readFileSync(cert);
+  const publicKey = new X509Certificate(certificate).publicKey.export({ type: 'spki', format: 'der' });
+  const spkiSha256 = createHash('sha256').update(publicKey).digest('base64');
+  return { key: fsSync.readFileSync(key), cert: certificate, spkiSha256 };
 }
 
 /** Starts the loopback receiver. `launchArgs` go to the QA app; `received` lists what arrived; `close()` stops it and removes its files. */
@@ -36,7 +39,7 @@ async function startReportLoopback({ tempRoot = os.tmpdir() } = {}) {
   const dir = await fsp.mkdtemp(path.join(tempRoot, 'trace-report-loopback-'));
   let server = null;
   try {
-    const { key, cert } = makeCertificate(dir);
+    const { key, cert, spkiSha256 } = makeCertificate(dir);
     const received = [];
     server = https.createServer({ key, cert }, (request, response) => {
       const reply = (status, value) => {
@@ -74,7 +77,9 @@ async function startReportLoopback({ tempRoot = os.tmpdir() } = {}) {
       path: REPORT_PATH,
       port,
       received,
-      launchArgs: [`--host-resolver-rules=MAP ${REPORT_HOST} 127.0.0.1:${port}`, '--ignore-certificate-errors'],
+      caCertificate: cert,
+      spkiSha256,
+      launchArgs: [`--host-resolver-rules=MAP ${REPORT_HOST} 127.0.0.1:${port}`, `--ignore-certificate-errors-spki-list=${spkiSha256}`],
       async close() {
         await new Promise((resolve) => server.close(() => resolve()));
         await fsp.rm(dir, { recursive: true, force: true });
