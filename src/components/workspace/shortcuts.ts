@@ -14,6 +14,8 @@ export interface ShortcutContext {
   modalGuard?: boolean;
   /** An encryption key is being asked for (the dialog may still wait behind the support notice): nothing may disturb the request. */
   keyRequest: boolean;
+  /** A GenCAD version other than 1.4 is being asked for: nothing may disturb the request. */
+  versionRequest: boolean;
   hasBoard: boolean;
   /** The board canvas is on screen (Board tab, or the split view). */
   boardVisible: boolean;
@@ -47,7 +49,7 @@ function tabDigit(event: ShortcutKey): '1' | '2' | '3' | null {
 export function resolveShortcut(event: ShortcutKey, ctx: ShortcutContext): ShortcutResult | null {
   // A modal dialog owns the keyboard. The key dialog and the note editor handle Esc themselves (the dialog's cancel); the other
   // modals also close through the shell, which covers a key that reaches the window from outside the dialog.
-  if (ctx.keyRequest || ctx.note) return null;
+  if (ctx.keyRequest || ctx.versionRequest || ctx.note) return null;
   if (ctx.modal) return event.key === 'Escape' && !ctx.modalGuard ? act('close-modal') : null;
   const mod = event.ctrlKey || event.metaKey;
   const key = event.key.toLowerCase();

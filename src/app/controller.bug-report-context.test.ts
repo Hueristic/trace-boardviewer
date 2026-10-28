@@ -154,4 +154,38 @@ describe('content-free latest import context', () => {
     await failed.controller.idle();
     expect(failed.state().import.reportContext).toMatchObject({ outcome: 'worker-failed', stage: 'unpack', extensionClass: '.cad', errorCode: 'WORKER_FAILED' });
   });
+
+  it('asks for a GENCAD version other than 1.4 and retries as 1.4 when accepted', async () => {
+    const gencad19 = new TextEncoder().encode('$HEADER\nGENCAD 1.9\n$ENDHEADER\n');
+    const h = createHarness();
+    h.desktop.boards.set('/boards/old.cad', boardPayload('old.cad', 20, { path: '/boards/old.cad', data: gencad19 }));
+    h.boardWorkers.replies['old.cad'] = { issue: { key: 'parse.error.requiresGencad14', params: { version: '1.9' } } };
+    await h.controller.actions.openRecent('/boards/old.cad');
+    await h.controller.idle();
+    expect(h.state().import.versionRequest).toMatchObject({ fileName: 'old.cad', version: '1.9', code: 'GENCAD_VERSION' });
+    expect(h.state().import.reportContext).toMatchObject({ outcome: 'version-required', stage: 'detect', formatId: null, extensionClass: '.cad', errorCode: null });
+    expect(JSON.stringify(h.state().import.reportContext)).not.toContain('old.cad');
+    h.controller.actions.cancelVersionRequest();
+    expect(h.state().import.versionRequest).toBeNull();
+    expect(h.state().import.reportContext).toMatchObject({ outcome: 'cancelled', errorCode: 'CANCELLED' });
+
+    const retry = createHarness();
+    retry.desktop.boards.set('/boards/old.cad', boardPayload('old.cad', 21, { path: '/boards/old.cad', data: gencad19 }));
+    retry.boardWorkers.replies['old.cad'] = { issue: { key: 'parse.error.requiresGencad14', params: { version: '1.9' } } };
+    await retry.controller.actions.openRecent('/boards/old.cad');
+    await retry.controller.idle();
+    // The user agrees: the version record is rewritten in memory and the parse is retried.
+    retry.boardWorkers.replies['old.cad'] = dividerBoard('old.cad');
+    retry.boardWorkers.reportContexts['old.cad'] = { stage: 'done', formatId: 'gencad' };
+    retry.controller.actions.submitVersion();
+    await retry.controller.idle();
+    expect(retry.state().board?.name).toBe('old.cad');
+    expect(retry.state().import.versionRequest).toBeNull();
+    expect(retry.state().import.reportContext).toMatchObject({ outcome: 'opened', stage: 'done', formatId: 'gencad', extensionClass: '.cad', errorCode: null });
+    const posted = retry.boardWorkers.posted.filter(message => (message as { name: string }).name === 'old.cad');
+    expect(posted.length).toBe(2);
+    const retryData = new TextDecoder().decode((posted[1] as { data: Uint8Array }).data);
+    expect(retryData).toContain('GENCAD 1.4');
+    expect(retryData).not.toContain('GENCAD 1.9');
+  });
 });

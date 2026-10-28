@@ -394,7 +394,7 @@ export interface LibraryBoardDetail {
 
 
 export type BugReportLastImport = {
-  outcome: 'reading' | 'processing' | 'opened' | 'failed' | 'cancelled' | 'key-required' | 'timeout' | 'worker-failed';
+  outcome: 'reading' | 'processing' | 'opened' | 'failed' | 'cancelled' | 'key-required' | 'version-required' | 'timeout' | 'worker-failed';
   stage: 'read' | 'detect' | 'unpack' | 'parse' | 'done' | 'unknown';
   formatId: string | null; extensionClass: string; errorCode: string | null;
 } | null;

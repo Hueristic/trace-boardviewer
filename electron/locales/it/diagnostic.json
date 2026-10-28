@@ -100,6 +100,7 @@
   "diagnostic.bugOutcomeFailed": "Non riuscito",
   "diagnostic.bugOutcomeCancelled": "Annullato",
   "diagnostic.bugOutcomeKeyRequired": "Chiave richiesta",
+  "diagnostic.bugOutcomeVersionRequired": "Versione richiesta",
   "diagnostic.bugOutcomeTimeout": "Tempo scaduto",
   "diagnostic.bugOutcomeWorkerFailed": "Errore del processo di elaborazione",
   "diagnostic.bugStageRead": "Lettura",

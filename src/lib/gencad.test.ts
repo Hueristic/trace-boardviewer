@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { GENCAD_LIMITS, GenCadParseError, parseGenCad } from './gencad';
+import { GENCAD_LIMITS, GenCadParseError, detectGencadUnits, parseGenCad, rewriteGencadVersion } from './gencad';
 import { formatIssue, LANGUAGES } from './i18n';
 import { catching, expectCostAtMost, expectScaling } from '../test-support/timing';
 
@@ -584,5 +584,15 @@ describe.skipIf(!externalBoardPath)('external production GENCAD board', () => {
     for (const net of board.nets) {
       expect(net.pinIds.every(id => pins.get(id)?.net === net.name)).toBe(true);
     }
+  });
+});
+
+
+describe('detectGencadUnits via parseGenCad', () => {
+  it('does not invoke detection when a UNITS record is present', () => {
+    // A file with UNITS MM should parse normally and not warn about inference.
+    const board = parseGenCad(fixture({ units: 'MM' }), 'board.cad');
+    expect(board.units).toBe('mm');
+    expect(board.warnings.some(w => /inferred/i.test(String((w.params as any)?.message)))).toBe(false);
   });
 });
