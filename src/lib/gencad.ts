@@ -81,7 +81,7 @@ function tokenize(text: string, line: number): string[] {
   return tokens;
 }
 
-function sectionsFrom(text: string, warnings: ParseIssue[]): Map<string, RecordLine[]> {
+export function sectionsFrom(text: string, warnings: ParseIssue[]): Map<string, RecordLine[]> {
   if (!text.trim()) fail('parse.error.empty');
   if (text.length > 64 * 1024 * 1024) fail('parse.error.tooLarge');
   if (text.includes('\0')) {
