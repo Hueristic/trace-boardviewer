@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { GENCAD_LIMITS, GenCadParseError, parseGenCad } from './gencad';
+import { GENCAD_LIMITS, GenCadParseError, detectGencadUnits, parseGenCad, rewriteGencadVersion } from './gencad';
 import { formatIssue, LANGUAGES } from './i18n';
 import { catching, expectCostAtMost, expectScaling } from '../test-support/timing';
 
@@ -584,5 +584,26 @@ describe.skipIf(!externalBoardPath)('external production GENCAD board', () => {
     for (const net of board.nets) {
       expect(net.pinIds.every(id => pins.get(id)?.net === net.name)).toBe(true);
     }
+  });
+});
+
+
+describe('detectGencadUnits via parseGenCad', () => {
+  it('infers MIL when the file is in mils (real board file)', () => {
+    const fs = require('node:fs');
+    const text = fs.readFileSync('/home/lichelord/Downloads/TUF-RX6900XT-O16G-I3SR1.01X(D412BSSAM).cad', 'latin1');
+    // strip the UNITS line to force detection
+    const noUnits = text.replace(/^UNITS .*$/m, '');
+    const board = parseGenCad(noUnits, 'board.cad');
+    // The inferred unit should be mils (0.0254 mm/unit) — board is ~271x135mm.
+    expect(board.units).toBe('mm'); // units in mm regardless of source unit
+    expect(board.warnings.some(w => w.key === 'parse.warning.formatNote' && /inferred/i.test(String((w.params as any)?.message)))).toBe(true);
+  });
+
+  it('does not invoke detection when a UNITS record is present', () => {
+    // A file with UNITS MM should parse normally and not warn about inference.
+    const board = parseGenCad(fixture({ units: 'MM' }), 'board.cad');
+    expect(board.units).toBe('mm');
+    expect(board.warnings.some(w => /inferred/i.test(String((w.params as any)?.message)))).toBe(false);
   });
 });
