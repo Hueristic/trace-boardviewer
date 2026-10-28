@@ -3,7 +3,7 @@ declare namespace BugReportContract {
   type Architecture = 'x64' | 'arm64' | 'other';
   type Locale = 'hu' | 'en' | 'de' | 'fr' | 'it' | 'sk' | 'pl' | 'uk';
   type LastImport = {
-    outcome: 'reading' | 'processing' | 'opened' | 'failed' | 'cancelled' | 'key-required' | 'timeout' | 'worker-failed';
+    outcome: 'reading' | 'processing' | 'opened' | 'failed' | 'cancelled' | 'key-required' | 'version-required' | 'timeout' | 'worker-failed';
     stage: 'read' | 'detect' | 'unpack' | 'parse' | 'done' | 'unknown';
     formatId: string | null;
     extensionClass: string;

@@ -354,6 +354,16 @@ function outerContour(paths: Path[]): { outline: Point[]; extras: number } {
   }
 }
 
+/** The only record the version-request flow may rewrite: the GENCAD version line becomes GENCAD 1.4. Everything else is untouched. */
+export function rewriteGencadVersion(text: string): string {
+  return text.replace(/^[ \t]*GENCAD[ \t]+[0-9][0-9.]{0,7}[ \t]*$/im, 'GENCAD 1.4');
+}
+
+/** The version a file's header declares (the second token of its GENCAD line), or undefined when there is none. */
+export function gencadVersionOf(text: string): string | undefined {
+  return /^[ \t]*GENCAD[ \t]+([0-9][0-9.]{0,7})[ \t]*$/im.exec(text)?.[1];
+}
+
 function units(header: RecordLine[]): number {
   const versions = header.filter(row => row.tokens[0] === 'GENCAD');
   if (versions.length !== 1 || versions[0].tokens[1] !== '1.4') fail('parse.error.requiresGencad14');

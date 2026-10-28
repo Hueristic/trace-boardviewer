@@ -87,6 +87,8 @@ export interface SaveState { dirty: boolean; saving: boolean; failure: string | 
 
 /** An encrypted board waiting for its key (the same payload is re-parsed once a key is entered; keys are session-only). `reason` is the parser's reason as a catalog message; `message` is the English text. */
 export interface KeyRequest { fileName: string; kind: 'fz' | 'xzz'; code: 'KEY_REQUIRED' | 'INVALID_KEY'; message: string; reason?: Message }
+/** A GenCAD file whose header declares a version other than 1.4, asked whether to parse it anyway. */
+export interface VersionRequest { fileName: string; version: string; code: 'GENCAD_VERSION'; message: string; reason?: Message }
 /** How far the parser of the running import got. */
 export interface ImportProgress {
   /** 0..1 when the parser reports its position (GenCAD, KiCad), else null (the UI shows no percentage). */
@@ -98,6 +100,8 @@ export interface ImportState {
   /** 'reading' = native/browser file read, 'processing' = parser worker running. */
   phase: 'idle' | 'reading' | 'processing';
   keyRequest: KeyRequest | null;
+  /** A GenCAD file that declares a version other than 1.4, pending the user's choice to parse it anyway. */
+  versionRequest: VersionRequest | null;
   recents: RecentFile[];
   /** Original-file identity of the open board (null without a board). */
   file: { name: string; path: string; key: string } | null;
@@ -148,8 +152,11 @@ export interface WorkspaceActions {
   /** Drag-and-drop or a browser file input: the native process reads a dropped path (and its companions); the browser gets the files. */
   openDropped(files: File[]): Promise<void>;
   /** Re-parses the waiting encrypted board with a key typed by the user (validated by `validateKeyText` in src/app/keys.ts); keys never persist. */
-  submitKey(text: string): void;
-  cancelKeyRequest(): void;
+submitKey(text: string): void;
+    cancelKeyRequest(): void;
+    /** Parse a GenCAD file whose header declares a version other than 1.4 anyway (see `versionRequest`). */
+    submitVersion(): void;
+    cancelVersionRequest(): void;
   /** Stops the running import (read or parse); the previous board, if any, stays open. A notice says it was cancelled. */
   cancelImport(): void;
   closeBoard(): void;

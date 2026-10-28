@@ -1,0 +1,2 @@
+- A GenCAD file whose header declares a version other than 1.4 (for example GENCAD 1.9) is no longer refused with "A text GENCAD 1.4 file is required." TRACE now asks whether to read it as GENCAD 1.4 anyway, with the warning that the result is not guaranteed: some later revisions add records TRACE does not know, so the board may be incomplete or wrong.
+- Accepting rewrites the version record in memory (the file on disk is untouched) and retries the parse. Declining leaves the previous board visible and says why the file was not opened.

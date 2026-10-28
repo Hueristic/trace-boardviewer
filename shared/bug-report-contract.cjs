@@ -16,7 +16,7 @@ const LOCALES = Object.freeze(['hu', 'en', 'de', 'fr', 'it', 'sk', 'pl', 'uk']);
 const PLATFORMS = Object.freeze(['windows', 'macos', 'linux', 'other']);
 const ARCHES = Object.freeze(['x64', 'arm64', 'other']);
 const SURFACES = Object.freeze(['welcome', 'board', 'documents', 'schematic', 'settings', 'other']);
-const OUTCOMES = Object.freeze(['reading', 'processing', 'opened', 'failed', 'cancelled', 'key-required', 'timeout', 'worker-failed']);
+const OUTCOMES = Object.freeze(['reading', 'processing', 'opened', 'failed', 'cancelled', 'key-required', 'version-required', 'timeout', 'worker-failed']);
 const STAGES = Object.freeze(['read', 'detect', 'unpack', 'parse', 'done', 'unknown']);
 const ERROR_CODES = Object.freeze([...diagnosticSchema.enums.errorCode, 'READ_FAILED', 'WORKER_FAILED', 'TIMEOUT', 'CANCELLED', 'UNKNOWN']);
 

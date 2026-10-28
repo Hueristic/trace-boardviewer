@@ -100,6 +100,7 @@
   "diagnostic.bugOutcomeFailed": "Échec",
   "diagnostic.bugOutcomeCancelled": "Annulé",
   "diagnostic.bugOutcomeKeyRequired": "Clé requise",
+  "diagnostic.bugOutcomeVersionRequired": "Version demandée",
   "diagnostic.bugOutcomeTimeout": "Délai dépassé",
   "diagnostic.bugOutcomeWorkerFailed": "Échec du processus de traitement",
   "diagnostic.bugStageRead": "Lecture",

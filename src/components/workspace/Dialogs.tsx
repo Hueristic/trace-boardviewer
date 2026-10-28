@@ -1,6 +1,6 @@
-import { AlertCircle, Check, ChevronDown, ChevronRight, FileBox, FileSearch, FolderOpen, KeyRound, LayoutPanelLeft, Maximize2, Moon, Square, Sun } from 'lucide-react';
+import { AlertCircle, AlertTriangle, Check, ChevronDown, ChevronRight, FileBox, FileSearch, FolderOpen, KeyRound, LayoutPanelLeft, Maximize2, Moon, Square, Sun } from 'lucide-react';
 import { useId, useState } from 'react';
-import type { KeyRequest } from '../../app/api';
+import type { KeyRequest, VersionRequest } from '../../app/api';
 import { diagnosticSupported } from '../../app/diagnostic-session';
 import { validateKeyText } from '../../app/keys';
 import { LANGUAGE_NAMES, LANGUAGES, normalizeLanguage } from '../../lib/i18n';
@@ -67,6 +67,16 @@ export function InfoDialog({ board, onClose }: { board: Board; onClose(): void }
   </Modal>;
 }
 
+/** A GenCAD file whose header declares a version other than 1.4, asked whether to parse it anyway (driven by `state.import.versionRequest`). */
+export function VersionConfirmDialog({ request, onSubmit, onCancel }: { request: VersionRequest; onSubmit(): void; onCancel(): void }) {
+  const { t, text } = useUi();
+  return <Modal title={t('dialogs.versionTitle')} closeLabel={t('common.close')} close={onCancel} testId="version-dialog">
+    <p className="data-warning"><AlertTriangle size={16} /><span>{request.fileName}: {text({ key: 'dialogs.versionWarning', params: { version: request.version } })}</span></p>
+    <p>{t('dialogs.versionNotGuaranteed')}</p>
+    <p className="muted">{t('dialogs.versionHelp')}</p>
+    <div className="modal-footer"><button type="button" className="outline-button" data-testid="version-cancel" onClick={onCancel}>{t('common.cancel')}</button><button type="button" className="primary-button" data-testid="version-proceed" onClick={onSubmit}><Check size={16} />{t('dialogs.versionProceed')}</button></div>
+  </Modal>;
+}
 /** Key entry for an encrypted board (driven by `state.import.keyRequest`). The text is validated by src/app/keys.ts; keys are session-only. */
 export function KeyDialog({ request, onSubmit, onCancel }: { request: KeyRequest; onSubmit(text: string): void; onCancel(): void }) {
   const { t, text } = useUi();

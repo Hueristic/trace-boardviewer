@@ -33,6 +33,7 @@ import type {
 import { createModelClient } from './model-client';
 import type { ModelClient } from './model-client';
 import { errorText, FormatFailureError, isAbortError, isClosingError, nativeCode, nativeFailure, UiError } from './errors';
+import { gencadVersionOf, rewriteGencadVersion } from '../lib/gencad';
 import { validateKeyText } from './keys';
 import type { KeyKind } from './keys';
 import {
@@ -113,7 +114,7 @@ export interface WorkspaceController {
   idle(): Promise<void>;
 }
 
-type ImportOutcome = 'loaded' | 'failed' | 'key-required';
+type ImportOutcome = 'loaded' | 'failed' | 'key-required' | 'version-required';
 type AttachOutcome = 'added' | 'duplicate' | 'restored' | 'failed';
 type ParserReply = { board?: Board; model?: number; progress?: { fraction?: unknown }; reportContext?: { stage?: unknown; formatId?: unknown }; issue?: ParseIssue; formatError?: FormatFailure; error?: string };
 /** A parsed board and, when the worker speaks the model protocol, the client of the worker that now serves this board. */
@@ -273,6 +274,7 @@ class Controller {
   private readonly watchdog: ParseWatchdog;
   private sessionOptions: ImportOptions = {};
   private waitingKey: { payload: FilePayload; kind: KeyKind } | null = null;
+  private waitingVersion: { payload: FilePayload; version: string } | null = null;
 
   // --- board-scoped resources (everything below is dropped on a board switch) ---
   private generation = 0;
@@ -324,7 +326,7 @@ class Controller {
     this.state = {
       board: null, boardIndex: null, boardKey: null, boardPath: '', manifest: null, activeTab: 'board', split: DEFAULT_SPLIT, documents: NO_DOCUMENTS, notes: NO_NOTES, notesBlocked: null,
       save: IDLE_SAVE, selection: EMPTY_SELECTION, probe: EMPTY_PROBE, search: EMPTY_SEARCH, link: null, pdfLinks: NO_LINKS, overlays: NO_OVERLAYS, notices: NO_NOTICES,
-      persistence: this.desktop ? 'native' : 'session-only', import: { phase: 'idle', keyRequest: null, recents: NO_RECENTS, file: null, progress: null, reportContext: null },
+      persistence: this.desktop ? 'native' : 'session-only', import: { phase: 'idle', keyRequest: null, versionRequest: null, recents: NO_RECENTS, file: null, progress: null, reportContext: null },
     };
     this.actions = this.createActions();
   }
@@ -419,7 +421,8 @@ class Controller {
     this.parser?.cancel();
     this.parser = null;
     this.waitingKey = null;
-    this.patchImport({ phase: 'idle', keyRequest: null, progress: null, reportContext: null });
+    this.waitingVersion = null;
+    this.patchImport({ phase: 'idle', keyRequest: null, versionRequest: null, progress: null, reportContext: null });
     return token;
   }
 
@@ -567,6 +570,15 @@ class Controller {
         this.setReportContext(token, importContext(payload.name, 'key-required', this.state.import.reportContext?.stage ?? 'unknown', null, error.failure.code));
         return 'key-required';
       }
+      if (error instanceof UiError && error.msg && 'issue' in error.msg && error.msg.issue?.key === 'parse.error.requiresGencad14') {
+        // A GenCAD file that declares a version other than 1.4 may still be parseable, but only after the user explicitly
+        // agrees to treat it as GENCAD 1.4 (version-request). The previous board stays visible; a newer import dismisses this.
+        const version = gencadVersionOf(new TextDecoder('latin1').decode(payload.data));
+        this.waitingVersion = { payload, version: version ?? 'unknown' };
+        this.patchImport({ versionRequest: { fileName: payload.name, version: version ?? 'unknown', code: 'GENCAD_VERSION', message: error.msg.issue.key, reason: error.msg.issue } });
+        this.setReportContext(token, importContext(payload.name, 'version-required', this.state.import.reportContext?.stage ?? 'unknown', null, null));
+        return 'version-required';
+      }
       if (error instanceof ImportContextError) this.setReportContext(token, importContext(payload.name, error.outcome, this.state.import.reportContext?.stage ?? 'unknown', null, error.code));
       else this.setReportContext(token, importContext(payload.name, 'failed', this.state.import.reportContext?.stage ?? 'unknown', null,
         error instanceof FormatFailureError ? error.failure.code : 'UNKNOWN'));
@@ -712,7 +724,7 @@ class Controller {
       board, boardIndex: this.boardIndex, boardKey: payload.key, boardPath: payload.path, manifest: null, activeTab: 'board', split: DEFAULT_SPLIT, documents: NO_DOCUMENTS, notes: notes.length ? notes : NO_NOTES,
       notesBlocked: notesError, save: IDLE_SAVE, selection: EMPTY_SELECTION, probe: EMPTY_PROBE, search: EMPTY_SEARCH, link: null, pdfLinks: NO_LINKS, overlays: NO_OVERLAYS,
       persistence: this.desktop ? 'native' : 'session-only',
-      import: { ...this.state.import, phase: 'idle', keyRequest: null, progress: null, file: { name: payload.name, path: payload.path, key: payload.key } },
+      import: { ...this.state.import, phase: 'idle', keyRequest: null, versionRequest: null, progress: null, file: { name: payload.name, path: payload.path, key: payload.key } },
     });
     this.searchText = '';
     this.statusStore.setSource(`${board.format} · ${board.units}`);
@@ -1894,6 +1906,28 @@ class Controller {
         const context = this.state.import.reportContext;
         this.patchImport({ keyRequest: null, ...(context ? { reportContext: { ...context, outcome: 'cancelled', errorCode: 'CANCELLED' } } : {}) });
         // Closing the key dialog leaves the file unopened; without a word the vanished dialog reads as a silent failure (H3-03).
+        this.notify(say('toast.openFailed'));
+      },
+      submitVersion: () => {
+        const waiting = this.waitingVersion;
+        const request = this.state.import.versionRequest;
+        if (!waiting || !request) return;
+        this.waitingVersion = null;
+        const { payload } = waiting;
+        // The user agreed to treat the file as GENCAD 1.4: rewrite the version record in memory (bytes are untouched elsewhere)
+        // and retry the parse. The previous board stays visible until the retry succeeds.
+        const text = new TextDecoder('latin1').decode(payload.data);
+        const rewritten = rewriteGencadVersion(text);
+        const data = new Uint8Array(rewritten.length);
+        for (let i = 0; i < rewritten.length; i++) data[i] = rewritten.charCodeAt(i) & 0xff;
+        void this.track(this.loadPayload({ ...payload, data }, this.beginImport()));
+      },
+      cancelVersionRequest: () => {
+        if (!this.state.import.versionRequest) return;
+        this.waitingVersion = null;
+        const context = this.state.import.reportContext;
+        this.patchImport({ versionRequest: null, ...(context ? { reportContext: { ...context, outcome: 'cancelled', errorCode: 'CANCELLED' } } : {}) });
+        // Closing the version dialog leaves the file unopened; without a word the vanished dialog reads as a silent failure (H3-03).
         this.notify(say('toast.openFailed'));
       },
       closeBoard: () => this.closeBoard(),
