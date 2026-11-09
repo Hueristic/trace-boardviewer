@@ -48,7 +48,7 @@ function surfaceKey(surface: NonNullable<BugReportInput['context']>['surface']):
 }
 function importLabel(t: Translator, last: BugReportLastImport): string {
   if (!last) return '—';
-  const outcome = ({ reading: 'diagnostic.bugOutcomeReading', processing: 'diagnostic.bugOutcomeProcessing', opened: 'diagnostic.bugOutcomeOpened', failed: 'diagnostic.bugOutcomeFailed', cancelled: 'diagnostic.bugOutcomeCancelled', 'key-required': 'diagnostic.bugOutcomeKeyRequired', timeout: 'diagnostic.bugOutcomeTimeout', 'worker-failed': 'diagnostic.bugOutcomeWorkerFailed' } as const)[last.outcome];
+  const outcome = ({ reading: 'diagnostic.bugOutcomeReading', processing: 'diagnostic.bugOutcomeProcessing', opened: 'diagnostic.bugOutcomeOpened', failed: 'diagnostic.bugOutcomeFailed', cancelled: 'diagnostic.bugOutcomeCancelled', 'key-required': 'diagnostic.bugOutcomeKeyRequired', 'version-required': 'diagnostic.bugOutcomeVersionRequired', timeout: 'diagnostic.bugOutcomeTimeout', 'worker-failed': 'diagnostic.bugOutcomeWorkerFailed' } as const)[last.outcome];
   const stage = ({ read: 'diagnostic.bugStageRead', detect: 'diagnostic.bugStageDetect', unpack: 'diagnostic.bugStageUnpack', parse: 'diagnostic.bugStageParse', done: 'diagnostic.bugStageDone', unknown: 'diagnostic.bugStageUnknown' } as const)[last.stage];
   return `${t(outcome)} · ${t(stage)}${last.formatId ? ` · ${last.formatId}` : ''}${last.extensionClass !== 'none' ? ` · ${last.extensionClass}` : ''}${last.errorCode ? ` · ${last.errorCode}` : ''}`;
 }

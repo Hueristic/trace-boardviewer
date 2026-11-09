@@ -28,7 +28,6 @@
   "help.shortcutResize": "Redimensionner les volets divisés (séparateur sélectionné)",
   "help.shortcutResults": "Résultats de recherche : déplacer / ouvrir",
   "help.shortcutClearSearch": "Vider le champ de recherche (un second appui quitte)",
-
   "dialogs.keyTitleFz": "Clé de chiffrement FZ / CAE",
   "dialogs.keyTitleXzz": "Clé de chiffrement XZZ",
   "dialogs.keyLabelFz": "Collez les 44 mots hexadécimaux de 32 bits de la clé du fabricant (0x facultatif ; espaces, virgules ou retours à la ligne entre eux).",
@@ -39,5 +38,10 @@
   "dialogs.keyXzzHexOnly": "Seuls les chiffres hexadécimaux (0-9, a-f) sont autorisés.",
   "dialogs.keyXzzCount": "Saisissez exactement 16 chiffres hexadécimaux ({count} jusqu'ici).",
   "dialogs.keyFzWordInvalid": "\"{word}\" n'est pas un mot hexadécimal de 32 bits.",
-  "dialogs.keyFzWordCount": "Saisissez 44 mots hexadécimaux de 32 bits ({count} jusqu'ici)."
+  "dialogs.keyFzWordCount": "Saisissez 44 mots hexadécimaux de 32 bits ({count} jusqu'ici).",
+  "dialogs.versionTitle": "Version GENCAD",
+  "dialogs.versionWarning": "Ce fichier déclare GENCAD {version}, pas 1.4. TRACE lit GENCAD 1.4.",
+  "dialogs.versionNotGuaranteed": "La lecture comme GENCAD 1.4 n'est pas garantie.",
+  "dialogs.versionProceed": "Lire comme 1.4",
+  "dialogs.versionHelp": "Certaines révisions ultérieures ajoutent des enregistrements que TRACE ne connait pas ; la carte peut être incomplète ou erronée."
 }

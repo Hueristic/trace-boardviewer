@@ -81,7 +81,7 @@ function tokenize(text: string, line: number): string[] {
   return tokens;
 }
 
-function sectionsFrom(text: string, warnings: ParseIssue[]): Map<string, RecordLine[]> {
+export function sectionsFrom(text: string, warnings: ParseIssue[]): Map<string, RecordLine[]> {
   if (!text.trim()) fail('parse.error.empty');
   if (text.length > 64 * 1024 * 1024) fail('parse.error.tooLarge');
   if (text.includes('\0')) {
@@ -159,6 +159,13 @@ function number(row: RecordLine, index: number): number {
   const value = Number(token);
   if (!Number.isFinite(value) || Math.abs(value) > 1e12) fail('parse.error.coordinateRange', row.line);
   return value;
+}
+
+/** Lenient numeric parse used by the unit detector: returns null instead of throwing, so detection never aborts on a malformed record. */
+function toNumber(token: string | undefined): number | null {
+  if (!token || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(token)) return null;
+  const v = Number(token);
+  return Number.isFinite(v) ? v : null;
 }
 
 function point(row: RecordLine, index: number, scale: number): Point {
@@ -354,6 +361,106 @@ function outerContour(paths: Path[]): { outline: Point[]; extras: number } {
   }
 }
 
+/** The only record the version-request flow may rewrite: the GENCAD version line becomes GENCAD 1.4. Everything else is untouched. */
+export function rewriteGencadVersion(text: string): string {
+  return text.replace(/^[ \t]*GENCAD[ \t]+[0-9][0-9.]{0,7}[ \t]*$/im, 'GENCAD 1.4');
+}
+
+/** The version a file's header declares (the second token of its GENCAD line), or undefined when there is none. */
+export function gencadVersionOf(text: string): string | undefined {
+  return /^[ \t]*GENCAD[ \t]+([0-9][0-9.]{0,7})[ \t]*$/im.exec(text)?.[1];
+}
+
+/** Standard SMD pitches in millimetres (common values). A candidate unit scale is scored by how closely the file's own
+ * pin-to-pin distances map onto this set, so a file that declares no UNITS record can be told whether it is in mm, inches or mils. */
+const STANDARD_PITCHES_MM = Object.freeze([
+  0.4, 0.5, 0.65, 0.8, 1.0, 1.2, 1.27, 1.5, 1.6, 1.8, 2.0, 2.5, 3.0, 3.5, 4.0, 4.7, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 12.7, 15.0, 20.0, 25.4,
+]);
+const KNOWN_PITCH_MIN_MM = 0.3;
+const KNOWN_PITCH_MAX_MM = 6.0;
+const PITCH_SAMPLE_LIMIT = 4096;
+
+/** The unit scale (mm per source unit) that best fits the file's own pin-to-pin distances, or null when it cannot be decided.
+ * Detection only runs when no UNITS record exists (see parseGenCad). The board's bounding box must be a plausible PCB size
+ * under the chosen scale, and the pin distances must match standard component pitches. */
+export function detectGencadUnits(sections: Map<string, RecordLine[]>): number | null {
+  const shapes = sections.get('SHAPES');
+  if (!shapes) return null;
+
+  // 1. Collect pin positions per package (SHAPE) and the board bbox from PLACE records (absolute board coordinates).
+  const packages: [number, number][][] = [];
+  let current: [number, number][] | null = null;
+  for (const row of shapes) {
+    const t = row.tokens;
+    if (t[0] === 'SHAPE') { current = []; packages.push(current); continue; }
+    if (t[0] === 'PIN' && current && t.length >= 5) {
+      const x = toNumber(t[3]), y = toNumber(t[4]);
+      if (x !== null && y !== null) current.push([x, y]);
+    }
+  }
+  const placements: [number, number][] = [];
+  for (const row of sections.get('COMPONENTS') ?? []) {
+    if (row.tokens[0] === 'PLACE' && row.tokens.length >= 3) {
+      const x = toNumber(row.tokens[1]), y = toNumber(row.tokens[2]);
+      if (x !== null && y !== null) placements.push([x, y]);
+    }
+  }
+
+  // 2. Pairwise pin distances within each package.
+  const distances: number[] = [];
+  for (const pts of packages) {
+    for (let i = 0; i < pts.length && distances.length < PITCH_SAMPLE_LIMIT; i++) {
+      for (let j = i + 1; j < pts.length && distances.length < PITCH_SAMPLE_LIMIT; j++) {
+        const d = Math.hypot(pts[i][0] - pts[j][0], pts[i][1] - pts[j][1]);
+        if (d > 0) distances.push(d);
+      }
+    }
+  }
+  if (distances.length < 8) return null;
+
+  // 3. Board bbox from PLACE records (absolute board coordinates), or null when there are too few placements.
+  const bbox = placements.length >= 2
+    ? [Math.max(...placements.map(p => p[0])) - Math.min(...placements.map(p => p[0])),
+       Math.max(...placements.map(p => p[1])) - Math.min(...placements.map(p => p[1]))]
+    : null;
+
+  // 4. Candidate scales: the three standard GenCAD named units.
+  const candidates = [
+    { name: 'MILS', scale: 0.0254 },
+    { name: 'MM', scale: 1 },
+    { name: 'INCH', scale: 25.4 },
+  ];
+
+  // 5. Score each candidate: pitch match (median relative error against the standard pitch set, lower is better) and
+  //    known-type fit (fraction of distances that fall in a realistic component-pitch band).
+  const scored = candidates.map(c => {
+    const mmDistances = distances.map(d => d * c.scale);
+    const relErrors = mmDistances.map(mm => Math.min(...STANDARD_PITCHES_MM.map(p => Math.abs(mm - p) / p)));
+    relErrors.sort((a, b) => a - b);
+    const medianRelError = relErrors[Math.floor(relErrors.length / 2)];
+    const knownTypeFit = mmDistances.filter(mm => mm >= KNOWN_PITCH_MIN_MM && mm <= KNOWN_PITCH_MAX_MM).length / mmDistances.length;
+    let bboxPlausible = true;
+    if (bbox) {
+      const [w, h] = [bbox[0] * c.scale, bbox[1] * c.scale];
+      bboxPlausible = w >= 10 && w <= 600 && h >= 10 && h <= 600;
+    }
+    return { name: c.name, scale: c.scale, medianRelError, knownTypeFit, bboxPlausible };
+  });
+
+  // 6. Keep only bbox-plausible candidates.
+  const plausible = scored.filter(s => s.bboxPlausible);
+  if (plausible.length === 0) return null;
+
+  // 7. Best = lowest medianRelError; require both a solid known-type fit and a decisive margin over the runner-up.
+  plausible.sort((a, b) => a.medianRelError - b.medianRelError);
+  const best = plausible[0];
+  const runnerUp = plausible[1];
+  if (best.knownTypeFit < 0.5) return null;
+  if (best.medianRelError > 0.15) return null;
+  if (runnerUp && best.medianRelError > runnerUp.medianRelError * 0.8) return null;
+  return best.scale;
+}
+
 function units(header: RecordLine[]): number {
   const versions = header.filter(row => row.tokens[0] === 'GENCAD');
   if (versions.length !== 1 || versions[0].tokens[1] !== '1.4') fail('parse.error.requiresGencad14');
@@ -381,6 +488,29 @@ function units(header: RecordLine[]): number {
  * Outer-layer mounting-side compatibility follows the supplied repair-board exporter.
  */
 export function parseGenCad(text: string, fileName: string): Board {
+  try {
+    return parseGenCadOnce(text, fileName);
+  } catch (error) {
+    // A file that declares no UNITS record may still be readable: infer the unit from the file's own pin-to-pin distances
+    // (the standard SMD pitch set) and retry with the inferred record. The file is not modified; only the in-memory text gains a line.
+    if (!(error instanceof GenCadParseError) || error.issue.key !== 'parse.error.unitsMissing') throw error;
+    // GUARD: the detection algorithm runs ONLY when there is no UNITS record at all. If the file declared multiple UNITS records
+    // (rows.length !== 1 for a different reason), units() threw unitsMissing for that reason and we must NOT attempt inference.
+    const guardSections = sectionsFrom(text, []);
+    const declaredUnits = guardSections.get('HEADER')?.filter(r => r.tokens[0] === 'UNITS') ?? [];
+    if (declaredUnits.length !== 0) throw error;
+    const detected = detectGencadUnits(guardSections);
+    if (detected === null) throw error;
+    const unit = detected === 1 ? 'MM' : detected === 25.4 ? 'INCH' : detected === 0.0254 ? 'MILS' : `USER ${25.4 / detected}`;
+    const injected = text.replace(/^(?=[ \t]*GENCAD[ \t])/im, `UNITS ${unit}\n`);
+    if (injected === text) throw error;
+    const board = parseGenCadOnce(injected, fileName);
+    board.warnings.push({ key: 'parse.warning.formatNote', params: { message: `No UNITS record was declared; the unit was inferred from the board's pin-to-pin distances (${unit.toLowerCase()}).` } });
+    return board;
+  }
+}
+
+function parseGenCadOnce(text: string, fileName: string): Board {
   const warnings: ParseIssue[] = [];
   const sections = sectionsFrom(text, warnings);
   const header = sections.get('HEADER')!;

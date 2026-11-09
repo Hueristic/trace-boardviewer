@@ -100,6 +100,7 @@
   "diagnostic.bugOutcomeFailed": "Failed",
   "diagnostic.bugOutcomeCancelled": "Cancelled",
   "diagnostic.bugOutcomeKeyRequired": "Key required",
+  "diagnostic.bugOutcomeVersionRequired": "Version asked",
   "diagnostic.bugOutcomeTimeout": "Timed out",
   "diagnostic.bugOutcomeWorkerFailed": "Processing worker failed",
   "diagnostic.bugStageRead": "Read",

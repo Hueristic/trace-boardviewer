@@ -28,7 +28,6 @@
   "help.shortcutResize": "Resize split panes (divider focused)",
   "help.shortcutResults": "Search results: move / open",
   "help.shortcutClearSearch": "Clear the search field (second press leaves it)",
-
   "dialogs.keyTitleFz": "FZ / CAE encryption key",
   "dialogs.keyTitleXzz": "XZZ encryption key",
   "dialogs.keyLabelFz": "Paste the 44 hexadecimal 32-bit words of the vendor key (0x optional; spaces, commas or new lines between them).",
@@ -39,5 +38,10 @@
   "dialogs.keyXzzHexOnly": "Only hexadecimal digits (0-9, a-f) are allowed.",
   "dialogs.keyXzzCount": "Enter exactly 16 hexadecimal digits ({count} so far).",
   "dialogs.keyFzWordInvalid": "\"{word}\" is not a hexadecimal 32-bit word.",
-  "dialogs.keyFzWordCount": "Enter 44 hexadecimal 32-bit words ({count} so far)."
+  "dialogs.keyFzWordCount": "Enter 44 hexadecimal 32-bit words ({count} so far).",
+  "dialogs.versionTitle": "GenCAD version",
+  "dialogs.versionWarning": "This file declares GENCAD {version}, not 1.4. TRACE parses GENCAD 1.4.",
+  "dialogs.versionNotGuaranteed": "Reading it as GENCAD 1.4 is not guaranteed to be correct.",
+  "dialogs.versionProceed": "Read as 1.4",
+  "dialogs.versionHelp": "Some later revisions add records TRACE does not know; the board may be incomplete or wrong."
 }

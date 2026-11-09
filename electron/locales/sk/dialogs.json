@@ -28,7 +28,6 @@
   "help.shortcutResize": "Zmena veľkosti rozdelených panelov (delič zameraný)",
   "help.shortcutResults": "Výsledky hľadania: presun / otvoriť",
   "help.shortcutClearSearch": "Vymazať pole hľadania (druhé stlačenie opustí)",
-
   "dialogs.keyTitleFz": "Šifrovací kľúč FZ / CAE",
   "dialogs.keyTitleXzz": "Šifrovací kľúč XZZ",
   "dialogs.keyLabelFz": "Vlož 44 hexadecimálnych 32-bitových slov kľúča výrobcu (0x je voliteľné; slová oddeľ medzerou, čiarkou alebo novým riadkom).",
@@ -39,5 +38,10 @@
   "dialogs.keyXzzHexOnly": "Povolené sú iba hexadecimálne číslice (0-9, a-f).",
   "dialogs.keyXzzCount": "Zadaj presne 16 hexadecimálnych číslic (doteraz: {count}).",
   "dialogs.keyFzWordInvalid": "\"{word}\" nie je hexadecimálne 32-bitové slovo.",
-  "dialogs.keyFzWordCount": "Zadaj 44 hexadecimálnych 32-bitových slov (doteraz: {count})."
+  "dialogs.keyFzWordCount": "Zadaj 44 hexadecimálnych 32-bitových slov (doteraz: {count}).",
+  "dialogs.versionTitle": "Verzia GENCAD",
+  "dialogs.versionWarning": "Tento súbor označuje GENCAD {version}, nie 1.4. TRACE číta GENCAD 1.4.",
+  "dialogs.versionNotGuaranteed": "Čítanie ako GENCAD 1.4 nie je zaručené.",
+  "dialogs.versionProceed": "Čítaj ako 1.4",
+  "dialogs.versionHelp": "Neskôršie revízie pridávajú záznamy, ktoré TRACE nezná; doska môže byť neúplná alebo chybná."
 }

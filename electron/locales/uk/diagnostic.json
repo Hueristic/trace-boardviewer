@@ -100,6 +100,7 @@
   "diagnostic.bugOutcomeFailed": "Не вдалося",
   "diagnostic.bugOutcomeCancelled": "Скасовано",
   "diagnostic.bugOutcomeKeyRequired": "Потрібен ключ",
+  "diagnostic.bugOutcomeVersionRequired": "Версію запитано",
   "diagnostic.bugOutcomeTimeout": "Час очікування минув",
   "diagnostic.bugOutcomeWorkerFailed": "Помилка процесу обробки",
   "diagnostic.bugStageRead": "Читання",

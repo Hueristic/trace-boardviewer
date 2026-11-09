@@ -198,7 +198,7 @@ export function createMockWorkspace(options: MockOptions = {}): MockWorkspace {
     save: { dirty: false, saving: false, failure: null }, selection: { componentId: null, pinId: null, net: null },
     probe: { origin: null, nonce: 0, schematic: null, schematicMapping: null, boardMapping: null, documentRef: null, schematicNetMapping: null, boardNetMapping: null },
     search: { query: '', result: null, pending: false }, link: null, pdfLinks: {}, overlays: {}, notices: [], persistence: options.persistence ?? 'native',
-    import: { phase: 'idle', keyRequest: null, recents: [{ name: 'mainboard.kicad_pcb', path: 'C:/service/mainboard.kicad_pcb', openedAt: '2026-10-04T08:00:00.000Z' }, { name: 'older.gc', path: 'C:/service/older.gc', openedAt: '2026-09-01T08:00:00.000Z' }], file: options.empty ? null : { name: 'mainboard.kicad_pcb', path: 'C:/service/mainboard.kicad_pcb', key: boardKey }, progress: null, reportContext: null },
+    import: { phase: 'idle', keyRequest: null, versionRequest: null, recents: [{ name: 'mainboard.kicad_pcb', path: 'C:/service/mainboard.kicad_pcb', openedAt: '2026-10-04T08:00:00.000Z' }, { name: 'older.gc', path: 'C:/service/older.gc', openedAt: '2026-09-01T08:00:00.000Z' }], file: options.empty ? null : { name: 'mainboard.kicad_pcb', path: 'C:/service/mainboard.kicad_pcb', key: boardKey }, progress: null, reportContext: null },
   };
   const emit = () => { for (const listener of [...listeners]) listener(); };
   const set = (patch: Partial<WorkspaceState> | ((s: WorkspaceState) => Partial<WorkspaceState>)) => { state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }; emit(); };
@@ -287,6 +287,8 @@ export function createMockWorkspace(options: MockOptions = {}): MockWorkspace {
     openDropped: async files => { record_('openDropped', files.map(f => f.name)); },
     submitKey: text => { record_('submitKey', text); set(s => ({ import: { ...s.import, keyRequest: null } })); },
     cancelKeyRequest: () => { record_('cancelKeyRequest'); set(s => ({ import: { ...s.import, keyRequest: null } })); },
+    submitVersion: () => { record_('submitVersion'); set(s => ({ import: { ...s.import, versionRequest: null } })); },
+    cancelVersionRequest: () => { record_('cancelVersionRequest'); set(s => ({ import: { ...s.import, versionRequest: null } })); },
     closeBoard: () => { record_('closeBoard'); set({ board: null, boardIndex: null, boardKey: null, import: { ...state.import, file: null } }); },
     cancelImport: () => { record_('cancelImport'); set(s => ({ import: { ...s.import, phase: 'idle', progress: null } })); },
     setActiveTab: tab => { record_('setActiveTab', tab); set({ activeTab: tab }); },

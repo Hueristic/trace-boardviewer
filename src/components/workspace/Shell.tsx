@@ -23,7 +23,7 @@ import { parseBoardCamera } from '../board-camera';
 import type { ViewerCamera, ViewerRotation } from '../viewer-contracts';
 import { BoardPane } from './BoardPane';
 import DiagnosticDialog from '../DiagnosticDialog';
-import { HelpDialog, InfoDialog, KeyDialog, RecentsDialog, SettingsDialog } from './Dialogs';
+import { HelpDialog, InfoDialog, KeyDialog, RecentsDialog, SettingsDialog, VersionConfirmDialog } from './Dialogs';
 import { ExportDialog } from './ExportDialog';
 import { DevicesDialog } from '../library/DevicesDialog';
 import { windowDevicePort } from '../../lib/library/devices/bridge-port';
@@ -272,8 +272,8 @@ export default function Shell({ api }: { api: WorkspaceApi }) {
   }, []);
 
   // --- global keyboard workflow (the rules live in shortcuts.ts; the key dialog counts as a modal like the others, H3-02) ---
-  const keyCtx = useRef({ modal, noteTarget, keyRequest: !!state.import.keyRequest, boardVisible, focusLayout, hasBoard: !!board, activeTab });
-  keyCtx.current = { modal, noteTarget, keyRequest: !!state.import.keyRequest, boardVisible, focusLayout, hasBoard: !!board, activeTab };
+  const keyCtx = useRef({ modal, noteTarget, keyRequest: !!state.import.keyRequest, versionRequest: !!state.import.versionRequest, boardVisible, focusLayout, hasBoard: !!board, activeTab });
+  keyCtx.current = { modal, noteTarget, keyRequest: !!state.import.keyRequest, versionRequest: !!state.import.versionRequest, boardVisible, focusLayout, hasBoard: !!board, activeTab };
   useEffect(() => {
     const focusSearch = () => {
       const ctx = keyCtx.current;
@@ -286,7 +286,7 @@ export default function Shell({ api }: { api: WorkspaceApi }) {
       const ctx = keyCtx.current;
       const target = event.target as HTMLElement;
       const result = resolveShortcut(event, {
-        modal: !!ctx.modal, modalGuard: ctx.modal === 'bug-report', note: !!ctx.noteTarget, keyRequest: ctx.keyRequest, hasBoard: ctx.hasBoard, boardVisible: ctx.boardVisible,
+        modal: !!ctx.modal, modalGuard: ctx.modal === 'bug-report', note: !!ctx.noteTarget, keyRequest: ctx.keyRequest, versionRequest: ctx.versionRequest, hasBoard: ctx.hasBoard, boardVisible: ctx.boardVisible,
         editable: !!target.matches?.('input, textarea, select, [contenteditable]'), viewer: !!target.closest?.('.pdfv, .schv, .imgv'), pdf: !!target.closest?.('.pdfv'),
       });
       if (!result) return;
@@ -320,7 +320,7 @@ export default function Shell({ api }: { api: WorkspaceApi }) {
   // Settings from outside the keyboard (the macOS app-menu "Settings…" item, through the main process): the same guard as Ctrl+,,
   // so the item never replaces a dialog that is open or takes a key that is being asked for.
   useEffect(() => {
-    const onOpenSettings = () => { const ctx = keyCtx.current; if (!ctx.keyRequest && !ctx.noteTarget && !ctx.modal) openSettings(); };
+    const onOpenSettings = () => { const ctx = keyCtx.current; if (!ctx.keyRequest && !ctx.versionRequest && !ctx.noteTarget && !ctx.modal) openSettings(); };
     window.addEventListener(OPEN_SETTINGS_EVENT, onOpenSettings); return () => window.removeEventListener(OPEN_SETTINGS_EVENT, onOpenSettings);
   }, [openSettings]);
 
@@ -391,9 +391,10 @@ export default function Shell({ api }: { api: WorkspaceApi }) {
       {modal === 'devices' && <DevicesDialog t={t} port={devicePort} onClose={closeModal} />}
       {modal === 'link' && <LinkDialog api={api} aliases={aliases} onCreate={createAlias} onRemove={removeAlias} onClose={closeModal} />}
       {noteTarget && <NoteDialog key={noteEditorKey(state.boardKey, noteTarget)} api={api} target={noteTarget} onClose={closeNote} />}
-      <SupportNotice ready={ready && support.ready} suppressed={support.active} requested={supportRequested} blocked={!!modal || !!noteTarget || !!state.import.keyRequest || state.import.phase !== 'idle'} errorOpen={errorNotice} t={t} onShown={onSupportShown} onSettled={onSupportSettled} onVerified={support.verified} onReportBug={reportBug} />
+      <SupportNotice ready={ready && support.ready} suppressed={support.active} requested={supportRequested} blocked={!!modal || !!noteTarget || !!state.import.keyRequest || !!state.import.versionRequest || state.import.phase !== 'idle'} errorOpen={errorNotice} t={t} onShown={onSupportShown} onSettled={onSupportSettled} onVerified={support.verified} onReportBug={reportBug} />
       {/* Like the update strip, the key dialog waits for the support notice: shown on top of it, its Esc cancelled the key request instead of skipping the notice (H3-03). The request itself stays pending in the core. */}
       {supportSettled && state.import.keyRequest && <KeyDialog key={state.import.keyRequest.fileName + state.import.keyRequest.code} request={state.import.keyRequest} onSubmit={value => actions.submitKey(value)} onCancel={() => actions.cancelKeyRequest()} />}
+      {supportSettled && state.import.versionRequest && <VersionConfirmDialog key={state.import.versionRequest.fileName + state.import.versionRequest.code} request={state.import.versionRequest} onSubmit={() => actions.submitVersion()} onCancel={() => actions.cancelVersionRequest()} />}
       {toasts.length > 0 && <div className="wsp-toasts" aria-live="polite">{toasts.map(toast => <div key={toast.id} className={'toast' + (toast.kind === 'error' ? ' error' : '')} role={toast.kind === 'error' ? 'alert' : 'status'} data-testid="toast">
         {toast.kind === 'error' ? <AlertCircle size={17} /> : <Check size={17} />}<span>{text(toast.message)}</span>
         <button type="button" aria-label={t('toast.close')} onClick={() => toast.id < 0 ? setLocalToasts(list => list.filter(item => item.id !== toast.id)) : actions.dismissNotice(toast.id)}><X size={14} /></button></div>)}</div>}

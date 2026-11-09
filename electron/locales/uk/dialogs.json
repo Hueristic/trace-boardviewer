@@ -28,7 +28,6 @@
   "help.shortcutResize": "Зміна розміру розділених панелей (роздільник у фокусі)",
   "help.shortcutResults": "Результати пошуку: переміщення / відкриття",
   "help.shortcutClearSearch": "Очистити поле пошуку (друге натискання виходить)",
-
   "dialogs.keyTitleFz": "Ключ шифрування FZ / CAE",
   "dialogs.keyTitleXzz": "Ключ шифрування XZZ",
   "dialogs.keyLabelFz": "Вставте 44 шістнадцяткові 32-розрядні слова ключа виробника (0x необов'язково; розділяйте їх пробілами, комами або переносами рядків).",
@@ -39,5 +38,10 @@
   "dialogs.keyXzzHexOnly": "Дозволено лише шістнадцяткові цифри (0-9, a-f).",
   "dialogs.keyXzzCount": "Введіть рівно 16 шістнадцяткових цифр (досі: {count}).",
   "dialogs.keyFzWordInvalid": "\"{word}\" не є шістнадцятковим 32-бітовим словом.",
-  "dialogs.keyFzWordCount": "Введіть 44 шістнадцяткові 32-бітові слова (досі: {count})."
+  "dialogs.keyFzWordCount": "Введіть 44 шістнадцяткові 32-бітові слова (досі: {count}).",
+  "dialogs.versionTitle": "Версія GENCAD",
+  "dialogs.versionWarning": "Цей файл вказує GENCAD {version}, а не 1.4. TRACE читає GENCAD 1.4.",
+  "dialogs.versionNotGuaranteed": "Читання як GENCAD 1.4 не гарантоване.",
+  "dialogs.versionProceed": "Читати як 1.4",
+  "dialogs.versionHelp": "Деякі пізніші версії додають записи, які TRACE не знає; плата може бути неповною або помилковою."
 }

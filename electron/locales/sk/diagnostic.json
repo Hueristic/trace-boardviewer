@@ -100,6 +100,7 @@
   "diagnostic.bugOutcomeFailed": "Zlyhalo",
   "diagnostic.bugOutcomeCancelled": "Zrušené",
   "diagnostic.bugOutcomeKeyRequired": "Vyžaduje sa kľúč",
+  "diagnostic.bugOutcomeVersionRequired": "Verzia opýtaná",
   "diagnostic.bugOutcomeTimeout": "Časový limit",
   "diagnostic.bugOutcomeWorkerFailed": "Zlyhal proces spracovania",
   "diagnostic.bugStageRead": "Čítanie",

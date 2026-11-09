@@ -28,7 +28,6 @@
   "help.shortcutResize": "Zmiana rozmiaru podzielonych paneli (separator aktywny)",
   "help.shortcutResults": "Wyniki wyszukiwania: przesuń / otwórz",
   "help.shortcutClearSearch": "Wyczyść pole wyszukiwania (drugie naciśnięcie wychodzi)",
-
   "dialogs.keyTitleFz": "Klucz szyfrowania FZ / CAE",
   "dialogs.keyTitleXzz": "Klucz szyfrowania XZZ",
   "dialogs.keyLabelFz": "Wklej 44 szesnastkowe 32-bitowe słowa klucza producenta (0x jest opcjonalne; oddziel je spacjami, przecinkami lub nowymi wierszami).",
@@ -39,5 +38,10 @@
   "dialogs.keyXzzHexOnly": "Dozwolone są tylko cyfry szesnastkowe (0-9, a-f).",
   "dialogs.keyXzzCount": "Wpisz dokładnie 16 cyfr szesnastkowych (dotąd: {count}).",
   "dialogs.keyFzWordInvalid": "\"{word}\" nie jest szesnastkowym słowem 32-bitowym.",
-  "dialogs.keyFzWordCount": "Wpisz 44 szesnastkowe słowa 32-bitowe (dotąd: {count})."
+  "dialogs.keyFzWordCount": "Wpisz 44 szesnastkowe słowa 32-bitowe (dotąd: {count}).",
+  "dialogs.versionTitle": "Wersja GENCAD",
+  "dialogs.versionWarning": "Ten plik deklaruje GENCAD {version}, nie 1.4. TRACE czyta GENCAD 1.4.",
+  "dialogs.versionNotGuaranteed": "Odczyt jako GENCAD 1.4 nie jest gwarantowany.",
+  "dialogs.versionProceed": "Czytaj jako 1.4",
+  "dialogs.versionHelp": "Późniejsze wersje dodają rekordy, których TRACE nie zna; płyta może być niekompletna lub błędna."
 }

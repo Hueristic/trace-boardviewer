@@ -28,7 +28,6 @@
   "help.shortcutResize": "Osztott panelek átméretezése (elválasztó fókuszban)",
   "help.shortcutResults": "Keresési találatok: mozgatás / megnyitás",
   "help.shortcutClearSearch": "Keresőmező törlése (a második lenyomás kilép)",
-
   "dialogs.keyTitleFz": "FZ / CAE titkosítási kulcs",
   "dialogs.keyTitleXzz": "XZZ titkosítási kulcs",
   "dialogs.keyLabelFz": "Illeszd be a gyártói kulcs 44 hexadecimális, 32 bites szavát (a 0x előtag elhagyható; a szavak között szóköz, vessző vagy új sor állhat).",
@@ -39,5 +38,10 @@
   "dialogs.keyXzzHexOnly": "Csak hexadecimális számjegyek (0-9, a-f) megengedettek.",
   "dialogs.keyXzzCount": "Pontosan 16 hexadecimális számjegyet írj be (eddig: {count}).",
   "dialogs.keyFzWordInvalid": "\"{word}\" nem hexadecimális 32 bites szó.",
-  "dialogs.keyFzWordCount": "Írj be 44 hexadecimális 32 bites szót (eddig: {count})."
+  "dialogs.keyFzWordCount": "Írj be 44 hexadecimális 32 bites szót (eddig: {count}).",
+  "dialogs.versionTitle": "GENCAD verzió",
+  "dialogs.versionWarning": "Ez a fájl GENCAD {version}-nek jelzi magát, nem 1.4-nek. A TRACE GENCAD 1.4-ot olvas.",
+  "dialogs.versionNotGuaranteed": "A GENCAD 1.4-ként való olvasása nem garantálható.",
+  "dialogs.versionProceed": "Olvass 1.4-ként",
+  "dialogs.versionHelp": "Néhány későbbi revízió olyan rekordot ad hozzá, amit a TRACE nem ismer; a tábla lehet hiányos vagy hibás."
 }
